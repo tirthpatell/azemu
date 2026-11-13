@@ -10,7 +10,8 @@
 # statically by default.
 ARG RUST_IMAGE=rust:1.99.1-alpine
 FROM ${RUST_IMAGE} AS build
-RUN apk add --no-cache musl-dev gcc
+# git: the build stamps the binary with the commit it was built from (crates/core/build.rs)
+RUN apk add --no-cache musl-dev gcc git
 WORKDIR /src
 ARG CARGO_BUILD_JOBS=2
 ARG CARGO_FEATURES=""
