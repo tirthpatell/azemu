@@ -84,7 +84,7 @@ not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.l
 | equator | 0.4.2 | MIT |
 | equator-macro | 0.4.2 | MIT |
 | equivalent | 1.0.3 | Apache-2.0 OR MIT |
-| errno | 0.3.14 | MIT OR Apache-2.0 |
+| errno | 0.3.15 | MIT OR Apache-2.0 |
 | event-listener | 5.4.2 | Apache-2.0 OR MIT |
 | event-listener-strategy | 0.5.4 | Apache-2.0 OR MIT |
 | fast-float2 | 0.2.4 | MIT OR Apache-2.0 |
@@ -143,7 +143,7 @@ not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.l
 | memchr | 2.8.3 | Unlicense OR MIT |
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
-| mio | 1.2.4 | MIT |
+| mio | 1.2.5 | MIT |
 | nom | 7.1.3 | MIT |
 | nu-ansi-term | 0.50.3 | MIT |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 |
@@ -209,7 +209,7 @@ not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.l
 | rusticata-macros | 4.1.0 | MIT/Apache-2.0 |
 | rustls | 0.23.46 | Apache-2.0 OR ISC OR MIT |
 | rustls-pki-types | 1.16.0 | MIT OR Apache-2.0 |
-| rustls-webpki | 0.103.16 | ISC |
+| rustls-webpki | 0.103.17 | ISC |
 | rustversion | 1.0.23 | MIT OR Apache-2.0 |
 | ryu-js | 1.0.3 | Apache-2.0 OR BSL-1.0 |
 | salsa20 | 0.11.0 | MIT OR Apache-2.0 |
@@ -296,7 +296,7 @@ not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.l
 
 Each text once. Crates whose repository keeps the licence outside the published package carry no file and are covered by the SPDX expression above (MIT, Apache-2.0 and the other standard texts).
 
-### arrayvec 0.7.8, asn1-rs 0.7.2, asn1-rs-derive 0.6.0, async-channel 2.5.0, atomic-waker 1.1.2, base64 0.23.1, bitflags 2.13.2, cfg-if 1.0.5, concurrent-queue 2.5.0, crossbeam-utils 0.8.23, der-parser 10.0.0, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.14, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, ff 0.14.0, fixedbitset 0.5.9, flate2 1.1.11, fnv 1.0.7, futures-lite 2.6.1, group 0.14.0, hashbrown 0.14.5, hashbrown 0.17.1, heck 0.5.0, httparse 1.10.1, indexmap 2.14.2, intrusive-collections 0.10.3, itertools 0.15.0, lazy_static 1.5.1, lock_api 0.4.14, lock_api 0.5.0, log 0.4.35, num-bigint 0.4.8, num-bigint 0.5.1, num-integer 0.1.47, num-traits 0.2.19, oid-registry 0.8.1, once_cell 1.21.4, parking 2.2.1, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12, percent-encoding 2.3.2, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rsa 0.10.0, rusticata-macros 4.1.0, rustls 0.23.46, scopeguard 1.2.0, signal-hook-registry 1.4.8, smallvec 1.16.5, socket2 0.6.5, stable_deref_trait 1.2.1, thread_local 1.1.10, uuid 1.29.2, x509-parser 0.18.1, yasna 0.6.0
+### arrayvec 0.7.8, asn1-rs 0.7.2, asn1-rs-derive 0.6.0, async-channel 2.5.0, atomic-waker 1.1.2, base64 0.23.1, bitflags 2.13.2, cfg-if 1.0.5, concurrent-queue 2.5.0, crossbeam-utils 0.8.23, der-parser 10.0.0, displaydoc 0.2.7, either 1.19.0, equivalent 1.0.3, errno 0.3.15, event-listener 5.4.2, event-listener-strategy 0.5.4, fastrand 2.5.0, ff 0.14.0, fixedbitset 0.5.9, flate2 1.1.11, fnv 1.0.7, futures-lite 2.6.1, group 0.14.0, hashbrown 0.14.5, hashbrown 0.17.1, heck 0.5.0, httparse 1.10.1, indexmap 2.14.2, intrusive-collections 0.10.3, itertools 0.15.0, lazy_static 1.5.1, lock_api 0.4.14, lock_api 0.5.0, log 0.4.35, num-bigint 0.4.8, num-bigint 0.5.1, num-integer 0.1.47, num-traits 0.2.19, oid-registry 0.8.1, once_cell 1.21.4, parking 2.2.1, parking_lot 0.13.0, parking_lot_core 0.10.0, parking_lot_core 0.9.12, percent-encoding 2.3.2, regex 1.13.1, regex-automata 0.4.18, regex-syntax 0.8.11, rsa 0.10.0, rusticata-macros 4.1.0, rustls 0.23.46, scopeguard 1.2.0, signal-hook-registry 1.4.8, smallvec 1.16.5, socket2 0.6.5, stable_deref_trait 1.2.1, thread_local 1.1.10, uuid 1.29.2, x509-parser 0.18.1, yasna 0.6.0
 
 ```
 Apache License
@@ -4729,7 +4729,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### errno 0.3.14
+### errno 0.3.15
 
 ```
 Copyright (c) 2014 Chris Wong
@@ -6488,7 +6488,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 3. This notice may not be removed or altered from any source distribution.
 ```
 
-### mio 1.2.4
+### mio 1.2.5
 
 ```
 Copyright (c) 2014 Carl Lerche and other MIO contributors
@@ -9009,7 +9009,7 @@ IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 ```
 
-### rustls-webpki 0.103.16
+### rustls-webpki 0.103.17
 
 ```
 Except as otherwise noted, this project is licensed under the following

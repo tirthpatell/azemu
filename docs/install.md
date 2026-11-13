@@ -1,11 +1,16 @@
 # Installing azemu
 
-Three ways to get it, and which platforms it has been run on. The first release has not been published yet: until then, building it yourself (the last two ways) is what works.
+Three ways to get it, and the platforms a release provides.
 
 ## The container image
 
-The image is built from the [`Dockerfile`](../Dockerfile) at the root of the repository. When a release is published it will be on the GitHub Container Registry as
-`ghcr.io/tirthpatell/azemu` (with the version as the tag, and `latest`). To build it yourself (about 3 minutes, and the compile happens inside the Docker daemon):
+Each release is on the GitHub Container Registry as `ghcr.io/tirthpatell/azemu`, with the version as the tag, and `latest`, for `linux/amd64` and `linux/arm64`:
+
+```bash
+docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 ghcr.io/tirthpatell/azemu:latest
+```
+
+It is built from the [`Dockerfile`](../Dockerfile) at the root of the repository. To build it yourself (about 3 minutes, and the compile happens inside the Docker daemon):
 
 ```bash
 docker build -t azemu:latest .
@@ -27,7 +32,7 @@ parallel jobs by default (`--build-arg CARGO_BUILD_JOBS=2`); give it more if you
 
 ## The binary
 
-Binaries will be attached to each release on the GitHub release page, with a checksum file: Linux x86-64 and arm64 (glibc), Linux x86-64 static (musl), and macOS arm64 (see "Supported platforms"). It is one file, `azemu`; copy it anywhere and run it: `azemu`
+Binaries are attached to each release on the [GitHub release page](https://github.com/tirthpatell/azemu/releases), with a checksum file (`sha256sum -c SHA256SUMS`): Linux x86-64 and arm64 (glibc), Linux x86-64 static (musl), and macOS arm64 (see "Supported platforms"). It is one file, `azemu`; copy it anywhere and run it: `azemu`
 (gateway on `127.0.0.1:4577`) or `azemu --standard-ports`. `azemu --version` prints the version and the commit it was built from. No other file is needed.
 
 A binary taken out of the image is built on Debian 12 and needs glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and newer). One built with `cargo build --release` links to the
@@ -44,7 +49,7 @@ cargo build --release -p azemu          # target/release/azemu, about 3 minutes
 cargo install --path crates/azemu       # or: install it into ~/.cargo/bin
 ```
 
-azemu is not published to crates.io; install it from a checkout. In CI, once the first release is tagged, you can install a pinned version without a clone: `cargo install --locked --git https://github.com/tirthpatell/azemu --tag vX.Y.Z azemu --root <dir>` (cache `<dir>`; tried with a local copy of the repository, as `--git` with a path). A test program that starts azemu itself should use `--port 0`, which picks a free port (the same one on `127.0.0.1` and `::1`) and prints it as `gateway=` in the ready line; `--exit-on-stdin-close` makes azemu stop when the test program, which holds the other end of a pipe on its standard input, ends.
+azemu is not published to crates.io; install it from a checkout. In CI you can install a pinned version without a clone: `cargo install --locked --git https://github.com/tirthpatell/azemu --tag vX.Y.Z azemu --root <dir>` (cache `<dir>`; tried with a local copy of the repository, as `--git` with a path). A test program that starts azemu itself should use `--port 0`, which picks a free port (the same one on `127.0.0.1` and `::1`) and prints it as `gateway=` in the ready line; `--exit-on-stdin-close` makes azemu stop when the test program, which holds the other end of a pipe on its standard input, ends.
 
 A smaller binary: `cargo build --release -p azemu --no-default-features` leaves out the Cosmos script engine (stored procedures, triggers and user-defined functions then answer 501) and
 the Kafka endpoint (about 28% smaller). The two features, `cosmos-scripts` and `kafka`, are both on by default.

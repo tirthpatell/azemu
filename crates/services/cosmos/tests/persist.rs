@@ -517,7 +517,8 @@ async fn missing_and_extra_files_and_other_containers_documents() {
     let b = std::fs::read(&all[1]).unwrap();
     std::fs::write(&all[0], b).unwrap();
     std::fs::write(&all[1], a).unwrap();
-    assert!(start_error(&data).await.contains("another container"));
+    let e = start_error(&data).await;
+    assert!(e.contains("another container"), "{e}");
     let _ = std::fs::remove_dir_all(&data);
 }
 

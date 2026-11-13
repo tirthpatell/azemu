@@ -1,15 +1,13 @@
 # GitLab CI: the emulator runs as a service of the job. The job reaches it by the alias, on the standard ports.
 # `examples/ci/check.sh gitlab` runs the same arrangement on one machine.
 #
-# What works today: the arrangement, run on one machine with Docker by check.sh. This file was not run on a GitLab server.
-# The image is not published yet. Until the first release, build it from the root Dockerfile (`docker build -t azemu:latest .`) and push it
-# to your registry (the `name:` below); `Dockerfile.dev` builds a quick local image around a binary you made and works the same way.
-# After the first release the image is ghcr.io/tirthpatell/azemu:<version>, which a runner can pull directly.
+# The image is ghcr.io/tirthpatell/azemu:<version>, which a runner can pull directly. Pin it to a version rather than `latest`. To test a
+# build of your own, build the root Dockerfile (`docker build -t azemu:latest .`), push it to your registry and name it below.
 # The Python check below is only a stand-in for your tests.
 integration-tests:
   image: python:3.12-slim
   services:
-    - name: $CI_REGISTRY_IMAGE/azemu:latest
+    - name: ghcr.io/tirthpatell/azemu:0.1.0
       alias: azemu
   variables:
     AZEMU_TLS_NAME: azemu       # a certificate for https://azemu:...

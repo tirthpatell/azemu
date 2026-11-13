@@ -72,10 +72,18 @@ class ServiceBusSessionsTopicsTest {
                 r.setSessionState("progress=42".getBytes());
                 assertArrayEquals("progress=42".getBytes(), r.getSessionState());
             }
-            try (ServiceBusReceiverClient r = sr.acceptSession("state-session")) {
-                assertArrayEquals("progress=42".getBytes(), r.getSessionState());
-                r.setSessionState(null);
-                assertNull(r.getSessionState());
+            // The SDK does not wait for the first link to finish closing: a second accept made at once can be handed
+            // the link that is going away, and the service then answers that the session lock is lost. Accept again.
+            for (int attempt = 1; ; attempt++) {
+                try (ServiceBusReceiverClient r = sr.acceptSession("state-session")) {
+                    assertArrayEquals("progress=42".getBytes(), r.getSessionState());
+                    r.setSessionState(null);
+                    assertNull(r.getSessionState());
+                    break;
+                } catch (ServiceBusException e) {
+                    if (attempt == 5 || e.getReason() != ServiceBusFailureReason.SESSION_LOCK_LOST) throw e;
+                    try { Thread.sleep(100); } catch (InterruptedException ie) { throw new RuntimeException(ie); }
+                }
             }
         }
     }

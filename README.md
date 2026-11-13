@@ -16,34 +16,29 @@ azemu is an independent open-source project. It is not made, sponsored or endors
 
 More detail is under [`docs/`](docs/README.md). What it cannot tell you is listed near the end of this page: read that part before you rely on a green test.
 
-**Contents:** [Start it](#start-it) · [A first request](#a-first-request) (Python, [Rust](#rust)) · [What is emulated](#what-is-emulated) · [Reaching the emulator](#reaching-the-emulator) ·
+**Contents:** [Start it](#start-it) · [A first request](#a-first-request) ([Rust](#rust), [Go](#go), [Python](#python-and-other-languages)) · [What is emulated](#what-is-emulated) · [Reaching the emulator](#reaching-the-emulator) ·
 [Behaves like Azure by default](#behaves-like-azure-by-default) · [Using it in tests](#using-it-in-tests) · [Works with](#works-with) · [SDK notes](docs/sdk-notes.md) ·
 [How it is checked](#how-it-is-checked) · [How it was made](#how-it-was-made) · [What it cannot tell you](#what-it-cannot-tell-you) · [Security](#security) · [Options](#options) ·
 [Build, test, contribute, licence](#build-test-contribute-licence)
 
 ## Start it
 
-The first release has not been published yet. When it is, the container image will be on the GitHub Container Registry and the binaries on the GitHub release page
-([`docs/install.md`](docs/install.md) has the details):
+With Docker:
 
 ```bash
-docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 ghcr.io/tirthpatell/azemu:latest     # not published yet
+docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 ghcr.io/tirthpatell/azemu:latest
 ```
 
-What works today is to build it yourself. With Docker (about 3 minutes):
+Or without Docker: download the binary for your system from the [release page](https://github.com/tirthpatell/azemu/releases) (one file, nothing to install) and run
+`azemu`.
 
-```bash
-docker build -t azemu:latest .
-docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 azemu:latest
-```
-
-Or from source: Rust 1.91 or newer and a C compiler (no OpenSSL, no cmake). `cargo build --release -p azemu`, then `target/release/azemu`. `azemu --version` prints the
-version and the commit it was built from. Platforms and details: [`docs/install.md`](docs/install.md).
+Or from source: Rust 1.91 or newer and a C compiler (no OpenSSL, no cmake). `cargo build --release -p azemu`, then `target/release/azemu`; `docker build -t azemu:latest .`
+builds the image (about 3 minutes). `azemu --version` prints the version and the commit it was built from. Platforms and details: [`docs/install.md`](docs/install.md).
 
 When it is ready it prints one line to standard output:
 
 ```
-azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm version=0.1.0 commit=unknown
+azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm version=0.1.0 commit=1a2b3c4d5e6f
 ```
 
 `gateway` is the address of the main port (4577), `ca` is the certificate authority for https (see below), `services` is what is mounted. Logs go to standard
@@ -51,35 +46,11 @@ error. Stop it with Ctrl-C or SIGTERM. **Publish a container's ports to `127.0.0
 
 ## A first request
 
-Blob, with the Python SDK or the Azure SDK for Rust. Start the emulator first (above): `azemu`, or the container.
-
-### Python
-
-`pip install azure-storage-blob`:
-
-```python
-from azure.storage.blob import BlobServiceClient
-
-# Host-name form: the account "myacct" is the first part of the host name. Any key works.
-conn = ("DefaultEndpointsProtocol=http;AccountName=myacct;AccountKey=bm90LWEta2V5;"
-        "BlobEndpoint=http://myacct.blob.core.localhost:4577;")
-container = BlobServiceClient.from_connection_string(conn).create_container("demo")
-container.upload_blob("hello.txt", b"hello")
-print(container.download_blob("hello.txt").readall())      # b'hello'
-```
-
-Or, after starting with `--standard-ports` (the Docker image already does), the Azurite address, which works anywhere:
-
-```python
-BlobServiceClient.from_connection_string("UseDevelopmentStorage=true")      # http://127.0.0.1:10000/devstoreaccount1
-```
-
-The host-name form works where the system resolves any name under `.localhost` to your machine: a Linux desktop. It does not work inside most containers,
-on Windows, or on macOS before 26. The standard-port form works everywhere. Details: "Reaching the emulator".
+Blob, with the Azure SDK for Rust, for Go, or for Python. Start the emulator first (above): `azemu`, or the container.
 
 ### Rust
 
-In a new project (`cargo new hello && cd hello`): `cargo add azure_core azure_identity azure_storage_blob`, and `cargo add tokio --features macros,rt-multi-thread`. The Rust crates differ from the Python example in three ways, and each of them stops a first program:
+In a new project (`cargo new hello && cd hello`): `cargo add azure_core azure_identity azure_storage_blob`, and `cargo add tokio --features macros,rt-multi-thread`. Three things stop a first program with the Rust crates, so they come first:
 
 1. **Use https.** The Azure SDK for Rust sends a token and refuses to do so over plain http (`... must use https`). The emulator answers https on the same port.
 2. **Use a credential that does not need the Azure CLI.** `DeveloperToolsCredential`, which the crates' own READMEs use, runs the `az` program (`az not found on PATH`). `ManagedIdentityCredential`
@@ -125,6 +96,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 Started the emulator in a container? Fetch its authority first: `mkdir -p ~/.azemu && curl -s localhost:4577/_azemu/ca.pem > ~/.azemu/ca.pem`.
 A second run says `409 ContainerAlreadyExists`, as Azure would (`curl -X POST localhost:4577/_azemu/reset` empties the emulator). Which crates and versions, the other services (Queue, Key Vault, Cosmos DB, Event Hubs, Service Bus), tests with `cargo test`
 and CI: [`docs/rust.md`](docs/rust.md). A small project with tests: [`examples/rust/`](examples/rust/README.md).
+
+### Go
+
+`go get github.com/Azure/azure-sdk-for-go/sdk/storage/azblob`. A connection string with a key works over plain http, so there is nothing to set up:
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"log"
+
+	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
+)
+
+func main() {
+	// Host-name form: the account "myacct" is the first part of the host name. Any key works.
+	conn := "DefaultEndpointsProtocol=http;AccountName=myacct;AccountKey=bm90LWEta2V5;" +
+		"BlobEndpoint=http://myacct.blob.core.localhost:4577;"
+	client, err := azblob.NewClientFromConnectionString(conn, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, err := client.CreateContainer(ctx, "demo", nil); err != nil {
+		log.Fatal(err)
+	}
+	if _, err := client.UploadBuffer(ctx, "demo", "hello.txt", []byte("hello"), nil); err != nil {
+		log.Fatal(err)
+	}
+	blob, err := client.DownloadStream(ctx, "demo", "hello.txt", nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	body, _ := io.ReadAll(blob.Body)
+	fmt.Println(string(body)) // hello
+}
+```
+
+With a token credential (`azidentity`) use the https address and trust the emulator's certificate authority, as in the Rust example: `SSL_CERT_FILE` works for Go too.
+Per-service notes for Go: [`docs/sdk-notes.md`](docs/sdk-notes.md#go).
+
+### Python and other languages
+
+`pip install azure-storage-blob`:
+
+```python
+from azure.storage.blob import BlobServiceClient
+
+# Host-name form: the account "myacct" is the first part of the host name. Any key works.
+conn = ("DefaultEndpointsProtocol=http;AccountName=myacct;AccountKey=bm90LWEta2V5;"
+        "BlobEndpoint=http://myacct.blob.core.localhost:4577;")
+container = BlobServiceClient.from_connection_string(conn).create_container("demo")
+container.upload_blob("hello.txt", b"hello")
+print(container.download_blob("hello.txt").readall())      # b'hello'
+```
+
+The .NET, JavaScript and Java SDKs work the same way; what each needs is in [`docs/sdk-notes.md`](docs/sdk-notes.md).
+
+### Which address
+
+The examples use the host-name form (`myacct.blob.core.localhost:4577`). After starting with `--standard-ports` (the Docker image already does) the Azurite address works too:
+the connection string `UseDevelopmentStorage=true` in the SDKs that take one, which is `http://127.0.0.1:10000/devstoreaccount1`.
+
+The host-name form works where the system resolves any name under `.localhost` to your machine: a Linux desktop. It does not work inside most containers,
+on Windows, or on macOS before 26. The standard-port form works everywhere. Details: "Reaching the emulator".
 
 ## What is emulated
 

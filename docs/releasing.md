@@ -55,9 +55,10 @@ files into the build context, so a new top-level directory is never sent by acci
 
 ## The workflows
 
-- `ci.yml`: on pull requests and pushes to `main`: clippy, the crates' tests, a release build with a smoke test, the fast Python suites, the container test, the licence
-  checks. On `main` and weekly it also runs the Service Bus and Event Hubs suites and the JavaScript, Go, Java, .NET and Rust suites.
-- `replay.yml`: weekly, by hand, and on pushes to `main` that touch the emulator: fetches Microsoft's recordings (`tools/fetch-refs.py`, pinned tags), replays them, and fails
+- `ci.yml`: on pull requests and pushes to `main`: formatting, clippy, the crates' tests, a release build with a smoke test, the container test, the licence
+  checks, the fast Python suites, and the Go and Rust SDK suites. Started by hand (Run workflow) it also runs the Service Bus and Event Hubs Python suites and the
+  JavaScript, Java and .NET suites: run it that way before a release. Nothing runs on a schedule.
+- `replay.yml`: by hand, and on pushes to `main` that touch the emulator: fetches Microsoft's recordings (`tools/fetch-refs.py`, pinned tags), replays them, and fails
   when a score falls below `fidelity/SCORES.md`.
 - `release.yml`: above.
 

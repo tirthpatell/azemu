@@ -12,23 +12,14 @@ and its tests) is in [`examples/rust/`](../examples/rust/README.md).
 
 ## 1. Get azemu
 
-**Today** the first release has not been published, so you build it. From a clone of this repository (Rust 1.91 or newer and a C compiler; about 3 minutes):
-
-```bash
-cargo install --locked --path crates/azemu      # puts azemu in ~/.cargo/bin
-azemu --version
-```
-
-Or the container image: `docker build -t azemu:latest .` at the root of the clone, then
-`docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 azemu:latest` ([`install.md`](install.md)).
-
-**After the first release** you will not need a clone:
-
 | How | Command |
 |---|---|
-| Release binary (Linux x86-64 and arm64, with a checksum) | download it from the GitHub release page and put it on `PATH` |
-| Container image | `docker run --rm -p 127.0.0.1:4577:4577 ghcr.io/tirthpatell/azemu:<version>` |
+| Release binary (Linux x86-64 and arm64, macOS on Apple silicon; with a checksum) | download it from the [GitHub release page](https://github.com/tirthpatell/azemu/releases) and put it on `PATH` |
+| Container image | `docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 ghcr.io/tirthpatell/azemu:<version>` |
 | From source, pinned to a tag | `cargo install --locked --git https://github.com/tirthpatell/azemu --tag v<version> azemu --root <dir>`, and cache `<dir>` in CI |
+| From a clone | `cargo install --locked --path crates/azemu` (Rust 1.91 or newer and a C compiler; about 3 minutes) |
+
+Details: [`install.md`](install.md). Check it with `azemu --version`.
 
 azemu is not on crates.io. Pin a version in CI: below 1.0 a minor version may change a flag or a setting ([`CHANGELOG.md`](../CHANGELOG.md)).
 
@@ -307,7 +298,7 @@ Nothing below the account exists until something creates it, as on Azure. From R
 
 ```toml
 [dev-dependencies]
-azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.1.0" }   # the tag exists after the first release; until then use branch = "main"
+azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.1.0" }
 ```
 
 (From a checkout of this repository, [`examples/rust`](../examples/rust/Cargo.toml) uses a `path` instead.) Install the matching `azemu` too (section 1). A test:

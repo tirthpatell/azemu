@@ -4,7 +4,7 @@ All notable changes to azemu are written here, newest first. The version is the 
 `azemu --version` prints it with the commit the binary was built from. The project follows [Semantic Versioning](https://semver.org/),
 with the usual allowance for versions below 1.0: a minor version may change a flag, a setting or the answer of an endpoint.
 
-## 0.1.0 (not released yet)
+## 0.1.0
 
 The first version. It is an emulator of Azure services in one binary, made for developing and testing against: it is not for production, and it has no sign-in. What it
 contains, what it does not, and how well it matches Azure are in [`README.md`](README.md) (per service: [`docs/services/`](docs/services/)); this entry does not repeat them.

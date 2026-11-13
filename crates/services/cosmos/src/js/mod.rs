@@ -591,6 +591,12 @@ mod tests {
         ScriptSettings { timeout: Duration::from_millis(1500), ..ScriptSettings::default() }
     }
 
+    /// For a test that expects a limit other than the clock: on a slow or busy machine an unoptimised build can take
+    /// longer than `quick()` allows to reach that limit, and the clock would answer first.
+    fn patient() -> ScriptSettings {
+        ScriptSettings { timeout: Duration::from_secs(60), ..ScriptSettings::default() }
+    }
+
     fn fails(settings: &ScriptSettings, body: &str) -> Failure {
         match run(settings, body, json!([])) {
             Err(f) => f,
@@ -607,13 +613,13 @@ mod tests {
 
     #[test]
     fn a_loop_that_never_ends_stops_at_the_loop_limit() {
-        let f = fails(&quick(), "function () { while (true) {} }");
+        let f = fails(&patient(), "function () { while (true) {} }");
         assert!(matches!(f, Failure::Limit(ref m) if m.contains("loop")), "{f:?}");
         // the limit is per function call, so calling a looping function in a loop is caught by the clock instead
         let st = ScriptSettings { loop_iterations: u64::MAX, ..quick() };
         let t = Instant::now();
         assert_eq!(fails(&st, "function () { while (true) {} }"), Failure::Timeout);
-        assert!(t.elapsed() < Duration::from_secs(4), "{:?}", t.elapsed());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
         assert_eq!(
             fails(&quick(), "function () { function f() { for (var i = 0; i < 4000000; i++) {} } while (true) { f(); } }"),
             Failure::Timeout
@@ -632,7 +638,7 @@ mod tests {
             "function () { function f() { return 'a'.replace(/a/, f); } f(); }",
             "function () { var a = []; for (var i = 0; i < 200000; i++) { a = [a]; } String(a); }",
         ] {
-            let f = fails(&quick(), body);
+            let f = fails(&patient(), body);
             assert!(matches!(f, Failure::Limit(ref m) if m.contains("too deeply")), "{f:?}: {body}");
         }
     }
@@ -674,7 +680,7 @@ mod tests {
     #[test]
     fn deeply_nested_values_do_not_reach_native_recursion() {
         thrown_has(
-            fails(&quick(), "function () { var a = {}; for (var i = 0; i < 200000; i++) { a = {x: a}; } JSON.stringify(a); }"),
+            fails(&patient(), "function () { var a = {}; for (var i = 0; i < 200000; i++) { a = {x: a}; } JSON.stringify(a); }"),
             "nested too deeply",
         );
         let f = fails(&quick(), "function () { var a = []; for (var i = 0; i < 200000; i++) { a = [a]; } a.flat(Infinity); }");

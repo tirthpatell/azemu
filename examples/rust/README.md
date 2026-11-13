@@ -31,7 +31,7 @@ It prints the blob, the queue message and the secret it wrote, and the result of
 
 ## In your own project
 
-The testkit is a path dependency here so that the example works from a checkout. In your own project it is a git dependency (the tag exists after the first release; until then use `branch = "main"`):
+The testkit is a path dependency here so that the example works from a checkout. In your own project it is a git dependency:
 
 ```toml
 [dev-dependencies]

@@ -5,7 +5,7 @@ job (the Compose and CI examples below). Both use the standard ports (`--standar
 in `rust/`. The ports are
 listed in `Dockerfile.dev` and in [`docs/reaching-the-emulator.md`](../docs/reaching-the-emulator.md).
 
-The Compose and CI examples need an image, which is not published yet: today you build it yourself. The release image is built by the `Dockerfile` at the root (about 3 minutes; it compiles the emulator inside Docker):
+The Compose and CI examples need an image. The published one is `ghcr.io/tirthpatell/azemu:<version>` (`AZEMU_IMAGE=ghcr.io/tirthpatell/azemu:latest` makes the examples use it). By default they use `azemu:latest`, the image you build from the `Dockerfile` at the root (about 3 minutes; it compiles the emulator inside Docker):
 
 ```
 docker build -t azemu:latest .
@@ -25,7 +25,7 @@ docker build -f Dockerfile.dev -t azemu:dev ~/.cache/azemu-image
 | `compose/` | `compose.yaml`: the emulator and that client in one Compose project, the client reaching the emulator by the service name `azemu`. `cd examples/compose && docker compose up --build --abort-on-container-exit --exit-code-from client`. |
 | `ci/` | `gitlab-ci.yml` (the emulator as a `services:` entry with the alias `azemu`) and `github-actions.yml` (a service container with published ports, reached on `localhost`). `check.sh gitlab` and `check.sh github` reproduce both arrangements on one machine with Docker. |
 | `rust/` | a small Rust project: Blob, Queue, Key Vault and Cosmos DB through the Azure SDK for Rust, a program, and tests that start the emulator themselves (`cargo test`). Not Docker: it needs the `azemu` binary. [`rust/README.md`](rust/README.md), and [`docs/rust.md`](../docs/rust.md) for the reasons. |
-| `ci/github-actions-rust.yml` | GitHub Actions for a Rust project whose tests start azemu: installs it from a tag with `cargo install --git`, caches it, runs `cargo test`; the release archive and the image as commented alternatives for after the first release. |
+| `ci/github-actions-rust.yml` | GitHub Actions for a Rust project whose tests start azemu: installs it from a tag with `cargo install --git`, caches it, runs `cargo test`; the release archive and the image as commented alternatives. |
 
 Expected result: `docker compose up ... --exit-code-from client` ends with exit 0 and three `ok` lines; `examples/ci/check.sh gitlab` and `check.sh github` each print three `ok` lines and
 exit 0. The two YAML files for the CI systems are meant for those systems; `check.sh` reproduces the arrangement they describe on one machine with Docker. `tests/container/run.sh` is the bigger test of the same idea (eleven services).
