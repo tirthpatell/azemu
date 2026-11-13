@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# A static Linux x86-64 build (musl libc) of the unified binary, to see whether `ring` and the JavaScript engine build for musl
+# and whether the result runs. Not the release image (that is the Dockerfile at the root, glibc). From the repository root:
+#
+#   docker build -f tools/release/Dockerfile.musl --target export --output type=local,dest=$HOME/.cache/azemu-musl .
+#   $HOME/.cache/azemu-musl/azemu --version
+#
+# The binary lands in the directory you name; nothing stays in Docker's image list. Same memory warning as the Dockerfile:
+# this compiles inside the Docker daemon; CARGO_BUILD_JOBS limits it. The Alpine Rust image has musl as its host target and links
+# statically by default.
+ARG RUST_IMAGE=rust:1.99.1-alpine
+FROM ${RUST_IMAGE} AS build
+RUN apk add --no-cache musl-dev gcc
+WORKDIR /src
+ARG CARGO_BUILD_JOBS=2
+ARG CARGO_FEATURES=""
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_TERM_COLOR=never
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo .cargo
+COPY crates crates
+COPY .git* ./.git/
+RUN cargo build --release --locked -p azemu ${CARGO_FEATURES} && install -D target/release/azemu /out/azemu
+
+FROM scratch AS export
+COPY --from=build /out/azemu /azemu

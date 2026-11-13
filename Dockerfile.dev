@@ -1,0 +1,31 @@
+# A development image: it copies a binary you built yourself into a small base image, for quick local iteration and for the
+# tests that run a binary of a branch (tests/container/run.sh, examples/). The release image is the Dockerfile at the
+# root of the repository: a clean build inside Docker, a smaller base image, labels, licence files.
+#
+#   cargo build -p azemu                       # or --release
+#   mkdir -p ~/.cache/azemu-image && cp target/debug/azemu ~/.cache/azemu-image/
+#   docker build -f Dockerfile.dev -t azemu:dev ~/.cache/azemu-image
+#
+# The build context is the directory that holds the binary, so Docker does not send `target/` (tens of GB) to the
+# daemon. The binary links only glibc (and libgcc_s, libm), which `debian:stable-slim` has.
+#
+# What the image does by default: listens on every address of the container (`--host 0.0.0.0`), opens one fixed port per
+# service (`--standard-ports`: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10010 Key Vault, 10011 App
+# Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 8081 Cosmos, 5672 AMQP, 9093 Kafka; 4577 is the gateway)
+# and keeps nothing on disk. The emulator has no sign-in, so publish ports to your own machine only:
+# `docker run -p 127.0.0.1:4577:4577 ...`, never `-p 4577:4577`.
+#
+# Clients in other containers reach it by the name of the container or the Compose service. For https add that name to
+# the certificate with `-e AZEMU_TLS_NAME=azemu` (or `--tls-name azemu` after the image name), and fetch the CA that
+# signs it from `http://azemu:4577/_azemu/ca.pem`.
+FROM debian:stable-slim
+
+RUN useradd --create-home --uid 10001 azemu
+COPY --chmod=0755 azemu /usr/local/bin/azemu
+
+USER azemu
+ENV HOME=/home/azemu
+HEALTHCHECK --interval=5s --timeout=3s --start-period=3s --retries=3 CMD ["/usr/local/bin/azemu", "__healthcheck"]
+EXPOSE 4577 10000 10001 10002 10003 10010 10011 10012 10013 10014 8081 5671 5672 9093 443
+ENTRYPOINT ["azemu"]
+CMD ["--host", "0.0.0.0", "--standard-ports"]

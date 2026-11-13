@@ -1,0 +1,51 @@
+[package]
+name = "azemu-cosmos"
+description = "azemu: Azure Cosmos DB (NoSQL API) service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu-cosmos"
+path = "src/main.rs"
+
+# Runs only the script worker (see `docs/services/cosmos-scripts.md`). The tests start it: in a test the current executable is the
+# test binary, which cannot be the worker. The emulator itself starts itself with a hidden first argument instead.
+[[bin]]
+name = "azemu-cosmos-script-worker"
+path = "src/worker_bin.rs"
+
+# `scripts` (on by default) is the JavaScript engine for stored procedures, triggers and user-defined functions. Without it
+# (`--no-default-features`) those operations answer 501 "this build does not include the script engine".
+[features]
+default = ["scripts"]
+scripts = ["dep:boa_engine"]
+
+[dependencies]
+azemu-statefile = { path = "../../statefile" }
+azemu-core.workspace = true
+azemu-cosmos-sql = { path = "../../cosmos-sql" }
+tokio.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+base64.workspace = true
+# Pure-Rust JavaScript engine for stored procedures, triggers and UDFs. Default features (Temporal, float16, xsum) and
+# the ICU data (`intl`) are left out to keep the build light. Needs Rust 1.91 (the workspace says 1.85).
+boa_engine = { version = "0.22.0", default-features = false, optional = true }
+
+# Operating system limits the worker sets on itself (address space, CPU time). A safe wrapper: no `unsafe` in this crate.
+[target.'cfg(unix)'.dependencies]
+rlimit = "0.11.0"
+
+[dev-dependencies]
+azemu-core = { workspace = true, features = ["testing"] }
+tokio.workspace = true

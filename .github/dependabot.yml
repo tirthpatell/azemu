@@ -1,0 +1,25 @@
+# Dependency updates: one pull request a month per ecosystem, all the updates of a month grouped in it, so it is not noisy.
+# `cargo` covers the workspace (Cargo.lock). The SDK test suites (tests/) are tested against pinned SDK versions on purpose and
+# are not updated here.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      cargo-dependencies:
+        patterns: ["*"]
+    commit-message:
+      prefix: "deps"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

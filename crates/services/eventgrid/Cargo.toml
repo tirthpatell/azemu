@@ -1,0 +1,38 @@
+[package]
+name = "azemu-eventgrid"
+description = "azemu: Event Grid service (publish, namespace pull delivery, webhook push delivery)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu-eventgrid"
+path = "src/main.rs"
+
+[dependencies]
+azemu-statefile = { path = "../../statefile" }
+azemu-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+serde = { workspace = true, features = ["rc"] }
+serde_json.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+base64.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+
+[dev-dependencies]
+azemu-core = { workspace = true, features = ["testing"] }
+tokio.workspace = true

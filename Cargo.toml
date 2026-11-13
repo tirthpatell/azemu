@@ -1,0 +1,109 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/azemu",
+    "crates/testkit",
+    "crates/cosmos-sql",
+    "crates/amqp",
+    "crates/kafka",
+    "crates/statefile",
+    "crates/services/*",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tirthpatell/azemu"
+# Release channels are GitHub releases and the container image only; nothing here goes to crates.io.
+publish = false
+rust-version = "1.91"
+
+# Small debug info and no incremental data: keeps target/ and link memory small.
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
+
+# Key Vault: RSA key generation and big-number math are far too slow unoptimized.
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+[profile.dev.package.crypto-primes]
+opt-level = 3
+[profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.primeorder]
+opt-level = 3
+[profile.dev.package.p256]
+opt-level = 3
+[profile.dev.package.p384]
+opt-level = 3
+[profile.dev.package.p521]
+opt-level = 3
+[profile.dev.package.k256]
+opt-level = 3
+
+# The release build is what is shipped (`docs/releasing.md`): the Docker image and the binaries all use it.
+#  - `lto = "thin"` and `codegen-units = 4`: what was built and tested. A fat link with one unit (`lto = "fat"`,
+#    `codegen-units = 1`) was not tried: it links the program in one piece, which uses more memory on a small build machine.
+#  - `panic` stays at its default, "unwind". The emulator turns a panic in one request handler into a 500 for that
+#    request and carries on (a test run must not lose the whole emulator to one bad request); "abort" would end it.
+#  - `overflow-checks = true`: an integer that overflows panics (so one request gets a 500) instead of wrapping to a
+#    wrong number that is stored. Reviews found places where a debug build panicked and a release build wrapped
+#    silently. The cost was measured: see docs/releasing.md.
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+panic = "unwind"
+overflow-checks = true
+
+# Shared versions. Service crates use `foo.workspace = true`.
+[workspace.dependencies]
+azemu-core = { path = "crates/core" }
+
+# async runtime and HTTP
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "signal", "io-util", "fs"] }
+hyper = { version = "1.12.0", features = ["http1", "http2", "server", "client"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+http = "1.5.0"
+http-body-util = "0.1.5"
+bytes = { version = "1.12.1", features = ["serde"] }
+async-trait = "0.1.92"
+
+# TLS: ring only. aws-lc-rs needs cmake, which is not installed here.
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["tls12"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "pem", "ring"] }
+
+# data formats
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+serde_json = { version = "1.0.154", features = ["preserve_order"] }
+quick-xml = { version = "0.42.0", features = ["serialize"] }
+time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde", "std"] }
+uuid = { version = "1.29.2", features = ["v4"] }
+base64 = "0.23.1"
+percent-encoding = "2.3.2"
+# State files written with --data-dir (MessagePack: compact, and it can hold serde_json::Value).
+rmp-serde = "1.3"
+
+# crypto helpers
+hmac = "0.13.0"
+sha2 = "0.11.1"
+sha1 = "0.11.0"
+md-5 = "0.11.0"
+rand = "0.10.3"
+
+# misc
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
+clap = { version = "4.6.7", features = ["derive"] }
+thiserror = "2.0.21"
+anyhow = "1.0.104"
+parking_lot = "0.13.0"
+
+# For tests only. No TLS backend is enabled here; add one in your own crate if you need https.
+reqwest = { version = "0.13.5", default-features = false }

@@ -1,0 +1,47 @@
+[package]
+name = "azemu"
+description = "A local emulator of Azure services for development and tests; not affiliated with Microsoft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "azemu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu"
+path = "src/main.rs"
+
+# Both features are on by default; `cargo build --release -p azemu --no-default-features` leaves them out.
+#   cosmos-scripts  the JavaScript engine (boa) for Cosmos stored procedures, triggers and user-defined functions.
+#                   Off: those operations answer 501 "this build does not include the script engine".
+#   kafka           the Kafka endpoint of Event Hubs. Off: it is not mounted; the port and the admin path still answer
+#                   with an error that says the build does not include it (`kafka_off.rs`).
+[features]
+default = ["cosmos-scripts", "kafka"]
+cosmos-scripts = ["azemu-cosmos/scripts"]
+kafka = []
+
+[dependencies]
+azemu-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+azemu-blob = { path = "../services/blob" }
+azemu-queue = { path = "../services/queue" }
+azemu-table = { path = "../services/table" }
+azemu-keyvault = { path = "../services/keyvault" }
+azemu-identity = { path = "../services/identity" }
+azemu-appconfig = { path = "../services/appconfig" }
+azemu-cosmos = { path = "../services/cosmos", default-features = false }
+azemu-eventgrid = { path = "../services/eventgrid" }
+azemu-servicebus = { path = "../services/servicebus" }
+azemu-eventhubs = { path = "../services/eventhubs" }
+azemu-arm = { path = "../services/arm" }
+
+[dev-dependencies]
+azemu-core = { workspace = true, features = ["testing"] }

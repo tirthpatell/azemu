@@ -1,0 +1,86 @@
+# The replay: Microsoft's recordings of real Azure traffic (what the Azure SDKs' own tests sent and what Azure answered) are
+# sent to a release build of azemu, the answers are compared, and the job FAILS when a score is lower than the one stored in
+# fidelity/SCORES.md (tools/release/check_scores.py). See tools/replay/README.md.
+#
+# The recordings are not in this repository (they are Microsoft's, MIT licence, in github.com/Azure/azure-sdk-assets):
+# tools/fetch-refs.py fetches them at pinned commits (about 100 MB) and the job caches them.
+#
+# Runs by hand, every Sunday, and on a push to main that changes the emulator's code, the replay tool, the pins or the stored scores.
+name: Replay
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "43 4 * * 0" # Sunday 04:43 UTC
+  push:
+    branches: [main]
+    paths:
+      - "crates/**"
+      - "Cargo.lock"
+      - "tools/replay/**"
+      - "tools/fetch-refs.py"
+      - "tools/release/check_scores.py"
+      - "fidelity/SCORES.md"
+      - ".github/workflows/replay.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: replay-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.99.1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4"
+
+jobs:
+  replay:
+    name: Replay and compare scores
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p azemu
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/cache@v4
+        with:
+          path: refs/recordings
+          key: recordings-${{ hashFiles('tools/fetch-refs.py') }}
+      - name: fetch the recordings (pinned commits of Azure/azure-sdk-assets)
+        run: python3 tools/fetch-refs.py
+      - name: replay every package whose service the emulator has
+        run: >
+          python3 tools/replay/run_all.py --start-bin target/release/azemu
+          --scores "$RUNNER_TEMP/replay/SCORES.md" --out-dir "$RUNNER_TEMP/replay/reports"
+      - name: fail when a score is lower than the stored one
+        run: python3 tools/release/check_scores.py "$RUNNER_TEMP/replay/SCORES.md" | tee "$RUNNER_TEMP/replay/check.txt"
+      - name: summary
+        if: always()
+        run: |
+          {
+            echo '### Replay against the stored scores'
+            echo '```'
+            cat "$RUNNER_TEMP/replay/check.txt" 2>/dev/null || echo "the replay did not finish"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: keep the scores and the reports
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: replay-scores
+          path: ${{ runner.temp }}/replay
+          retention-days: 14
+          if-no-files-found: ignore

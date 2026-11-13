@@ -1,0 +1,39 @@
+[package]
+name = "azemu-servicebus"
+description = "azemu: Azure Service Bus (AMQP 1.0 data plane, ATOM management API)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu-servicebus"
+path = "src/main.rs"
+
+[dependencies]
+azemu-statefile = { path = "../../statefile" }
+azemu-core.workspace = true
+azemu-amqp = { path = "../../amqp" }
+azemu-servicebus-sql = { path = "sqlfilter" }
+tokio.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quick-xml.workspace = true
+time.workspace = true
+uuid.workspace = true
+base64.workspace = true
+percent-encoding.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+azemu-core = { workspace = true, features = ["testing"] }
+tokio.workspace = true

@@ -1,0 +1,364 @@
+# Continuous integration of azemu on GitHub's hosted runners (4 cores, 16 GB; no self-hosted runner is needed).
+#
+#   every pull request and every push to main:   clippy, the crates' own tests, a release build with a smoke test, the Python
+#                                                SDK suites (all but Service Bus and Event Hubs), the container test, licences
+#   pushes to main, the weekly schedule and by hand also: the two slow Python suites (Service Bus, Event Hubs; about half an
+#                                                hour each) and the JavaScript, Go, Java, .NET and Rust SDK suites
+#
+# The replay of Microsoft's recordings is another workflow (replay.yml), because it needs the recordings, which are fetched
+# from Microsoft's repositories (tools/fetch-refs.py). Releases are release.yml.
+#
+# No secrets: only the GITHUB_TOKEN that every run has, read-only here.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 6" # Saturday 03:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash # bash with -eo pipefail: `cmd | tee file` fails when cmd fails
+
+# A new push to a pull request or to main cancels the run it supersedes; the weekly run is never cancelled by a push.
+concurrency:
+  group: ci-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+env:
+  RUST_VERSION: "1.99.1" # what the Dockerfile builds with and what the tests were run with
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "4" # a hosted runner has 4 cores
+  RUST_BACKTRACE: "1"
+  PYTHON_VERSION: "3.13"
+
+jobs:
+  format:
+    name: Formatting
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      # rustfmt.toml at the root holds the style; the Rust SDK suites and the example are projects of their own
+      - run: cargo fmt --all --check
+      - run: cargo fmt --all --check --manifest-path tests/sdk-rust/Cargo.toml
+      - run: cargo fmt --all --check --manifest-path tests/sdk-rust/beta/Cargo.toml
+      - run: cargo fmt --all --check --manifest-path examples/rust/Cargo.toml
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy, every target
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: clippy, without the optional features
+        run: cargo clippy -p azemu --locked --no-default-features -- -D warnings
+
+  licences:
+    name: Licences and advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      # licences, bans and sources must hold; advisories are reported but do not stop a pull request (a new advisory
+      # against an old dependency is not the pull request's fault)
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses bans sources
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        continue-on-error: true
+        with:
+          command: check advisories
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - name: THIRD-PARTY-LICENSES.md is up to date
+        run: |
+          cargo fetch --locked
+          python3 tools/release/third_party_licenses.py > "$RUNNER_TEMP/third-party.md"
+          if ! diff -q THIRD-PARTY-LICENSES.md "$RUNNER_TEMP/third-party.md"; then
+            echo "::error file=THIRD-PARTY-LICENSES.md::out of date: run python3 tools/release/third_party_licenses.py > THIRD-PARTY-LICENSES.md"
+            exit 1
+          fi
+
+  unit-tests:
+    name: Crate tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --locked
+
+  build:
+    name: Release build and smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p azemu
+      - name: smoke test (start, health, a blob, a Cosmos stored procedure, stop)
+        run: python3 tools/release/smoke_test.py target/release/azemu --expect-commit any
+      - run: mkdir dist && cp target/release/azemu dist/azemu
+      - uses: actions/upload-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist/azemu
+          retention-days: 3
+          if-no-files-found: error
+
+  python-suites:
+    name: Python SDK suites (fast ones)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tests/sdk-python/requirements.txt
+      - run: pip install -r tests/sdk-python/requirements.txt
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      # every suite but servicebus and eventhubs (the slow-suites job below)
+      - name: run the suites
+        run: >
+          python tests/run_sdk_suites.py --bin dist/azemu --jobs 4
+          --only appconfig --only arm --only blob --only cosmos --only datalake --only eventgrid --only identity
+          --only kafka --only keyvault --only persistence --only queue --only storage_events --only table
+          | tee "$RUNNER_TEMP/python-suites.txt"
+      - name: summary
+        if: always()
+        run: |
+          { echo '### Python SDK suites (fast ones)'; echo '```'; cat "$RUNNER_TEMP/python-suites.txt" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  container:
+    name: Container test
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      # puts the binary into a small image (Dockerfile.dev), runs it next to a Python client on a Docker network and reaches
+      # eleven services by name on the standard ports
+      - run: tests/container/run.sh dist/azemu
+
+  # ---- not on pull requests: the long suites ------------------------------------------------------------------------
+
+  python-slow:
+    name: Python SDK suite ${{ matrix.suite }} (slow)
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [servicebus, eventhubs]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: tests/sdk-python/requirements.txt
+      - run: pip install -r tests/sdk-python/requirements.txt
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      - name: run the suite
+        run: python tests/run_sdk_suites.py --bin dist/azemu --jobs 4 --only ${{ matrix.suite }} | tee "$RUNNER_TEMP/suite.txt"
+      - name: summary
+        if: always()
+        run: |
+          { echo '### Python SDK suite ${{ matrix.suite }}'; echo '```'; cat "$RUNNER_TEMP/suite.txt" 2>/dev/null || echo "no output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  sdk-js:
+    name: JavaScript SDK suite
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-${{ runner.os }}-${{ hashFiles('tests/sdk-js/package.json', 'tests/sdk-js/package-lock.json') }}
+          restore-keys: npm-${{ runner.os }}-
+      - name: install the SDK packages
+        run: .github/scripts/install-js-suite.sh
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      - name: run the suite
+        working-directory: tests/sdk-js
+        env:
+          AZEMU_BIN: ${{ github.workspace }}/dist/azemu
+          JOBS: "3"
+        run: npm test
+
+  sdk-go:
+    name: Go SDK suite
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: tests/sdk-go/go.mod
+          cache-dependency-path: tests/sdk-go/go.sum
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      - name: run the suite
+        working-directory: tests/sdk-go
+        env:
+          AZEMU_BIN: ${{ github.workspace }}/dist/azemu
+        run: go test -count=1 -p 3 ./...
+
+  sdk-java:
+    name: Java SDK suite
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+          cache-dependency-path: tests/sdk-java/pom.xml
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      # run.sh uses Maven from the PATH (the runner has it)
+      - run: mvn --version
+      - name: run the suite
+        working-directory: tests/sdk-java
+        env:
+          AZEMU_BIN: ${{ github.workspace }}/dist/azemu
+        run: ./run.sh
+
+  sdk-dotnet:
+    name: .NET SDK suite
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: "10.0.x"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('tests/sdk-dotnet/**/*.csproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      # run.sh uses the .NET SDK from the PATH (setup-dotnet put it there)
+      - run: dotnet --version
+      - name: run the suite
+        env:
+          AZEMU_BIN: ${{ github.workspace }}/dist/azemu
+        run: tests/sdk-dotnet/run.sh
+
+  sdk-rust:
+    name: Rust SDK suite
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            tests/sdk-rust
+            tests/sdk-rust/beta
+      - uses: actions/download-artifact@v5
+        with:
+          name: azemu-linux-x86_64
+          path: dist
+      - run: chmod +x dist/azemu
+      - name: run the suite (stable SDK crates, then the beta crates)
+        env:
+          AZEMU_BIN: ${{ github.workspace }}/dist/azemu
+        run: |
+          (cd tests/sdk-rust && cargo test --no-fail-fast)
+          (cd tests/sdk-rust/beta && cargo test --no-fail-fast)
+
+  # One job to name in branch protection: it passes when every job that ran on this event passed (a skipped job is fine).
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [clippy, licences, unit-tests, build, python-suites, container, python-slow, sdk-js, sdk-go, sdk-java, sdk-dotnet, sdk-rust]
+    runs-on: ubuntu-latest
+    steps:
+      - name: every job that ran succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          echo "$RESULTS" | python3 -c '
+          import json, sys
+          bad = {k: v["result"] for k, v in json.load(sys.stdin).items() if v["result"] not in ("success", "skipped")}
+          print("jobs that did not succeed:", bad if bad else "none")
+          sys.exit(1 if bad else 0)'

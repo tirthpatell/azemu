@@ -1,0 +1,366 @@
+# Release: binaries, container image, checksums and the GitHub release page.
+#
+#   on a tag `v*` (v0.1.0):      builds everything, tests it, pushes the image to the GitHub Container Registry and creates the
+#                                 release. The tag must be the version in the root Cargo.toml, and the commit must be on main.
+#   by hand (Run workflow):      on a branch: a trial. Builds and tests everything and keeps the archives as workflow artifacts;
+#                                 it pushes no image and creates no release. On a tag: the same as the tag push.
+#
+# What it makes
+#   azemu-<version>-<target>.tar.gz   azemu, README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE, THIRD-PARTY-LICENSES.md, LICENSES/
+#   SHA256SUMS                        the checksums of the archives (`sha256sum -c SHA256SUMS`)
+#   <image>:<version> and :latest     linux/amd64 and linux/arm64, built on native runners (no emulation)
+# Targets: x86_64-unknown-linux-gnu and aarch64-unknown-linux-gnu (built on Debian 12; they need glibc 2.35 or newer),
+# x86_64-unknown-linux-musl (static: runs on any Linux), aarch64-apple-darwin (if that job fails the release goes on
+# without it).
+#
+# Permissions are given per job, the smallest that job needs. No secrets other than the GITHUB_TOKEN. The owner and repository
+# names come from the workflow context (github.repository); nothing is written in.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.99.1"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  prepare:
+    name: Version and notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.info.outputs.version }}
+      publish: ${{ steps.info.outputs.publish }}
+      image: ${{ steps.info.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: check the tag and read the version
+        id: info
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            ref="$GITHUB_REF_NAME"
+            publish=true
+            # a release is made from main only
+            git fetch --no-tags origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::the tag $GITHUB_REF_NAME is not on main; releases are made from main"
+              exit 1
+            fi
+          else
+            ref=-
+            publish=false
+          fi
+          python3 tools/release/release_info.py "$ref" --notes-out "$RUNNER_TEMP/notes.md" >> "$GITHUB_OUTPUT"
+          {
+            echo "publish=$publish"
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+          } >> "$GITHUB_OUTPUT"
+          { echo '### Release notes (from CHANGELOG.md)'; echo; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+  binary:
+    name: ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    # only a target marked experimental may fail without stopping the release
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64 (glibc)
+            target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            dockerfile: gnu
+            old_system: python:3.13-slim-bookworm # Debian 12, glibc 2.36: the oldest system the binary is promised to run on
+            experimental: false
+          - name: Linux x86-64 (musl, static)
+            target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            dockerfile: musl
+            old_system: python:3.13-alpine
+            experimental: false
+          - name: Linux arm64 (glibc)
+            target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm # GitHub's native arm64 Linux runner: no emulation, no cross compiler
+            dockerfile: gnu
+            old_system: python:3.13-slim-bookworm
+            experimental: false
+          - name: macOS arm64
+            target: aarch64-apple-darwin
+            runner: macos-latest
+            dockerfile: ""
+            old_system: ""
+            experimental: true
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # Linux: built inside a Docker build (Debian 12 for glibc, Alpine for musl), so that the binary does not need the
+      # runner's newer glibc. The Dockerfiles leave the file in out/.
+      - name: build in Docker
+        if: matrix.dockerfile != ''
+        run: docker build -f "tools/release/Dockerfile.${{ matrix.dockerfile }}" --build-arg CARGO_BUILD_JOBS=4 --target export --output type=local,dest=out .
+
+      # macOS: built on the runner.
+      - uses: dtolnay/rust-toolchain@stable
+        if: matrix.dockerfile == ''
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        if: matrix.dockerfile == ''
+      - name: build on the runner
+        if: matrix.dockerfile == ''
+        run: |
+          cargo build --release --locked -p azemu
+          mkdir -p out && cp target/release/azemu out/azemu
+
+      - name: file and size
+        run: |
+          file out/azemu || true
+          ls -l out/azemu
+          if command -v objdump >/dev/null 2>&1 && [ "${TARGET#*gnu}" != "$TARGET" ]; then
+            echo "highest glibc symbol version needed: $(objdump -T out/azemu | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: smoke test on the runner (start, health, a blob, a Cosmos stored procedure, stop)
+        run: python3 tools/release/smoke_test.py out/azemu --expect-version "$VERSION" --expect-commit "$GITHUB_SHA"
+
+      - name: smoke test on the oldest system the binary is promised to run on
+        if: matrix.old_system != ''
+        run: >
+          docker run --rm -v "$PWD:/work" -w /work "${{ matrix.old_system }}"
+          python3 tools/release/smoke_test.py out/azemu --expect-version "$VERSION" --expect-commit "$GITHUB_SHA"
+
+      - name: package
+        run: tools/release/package.sh out/azemu "$VERSION" "$TARGET" dist
+      - uses: actions/upload-artifact@v5
+        with:
+          name: archive-${{ matrix.target }}
+          path: dist/*.tar.gz
+          retention-days: 14
+          if-no-files-found: error
+
+  image:
+    name: Image ${{ matrix.platform }}
+    needs: prepare
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write # pushes the image by digest (on a release)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+            suffix: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            suffix: arm64
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-buildx-action@v3
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          labels: |
+            org.opencontainers.image.title=azemu
+            org.opencontainers.image.licenses=MIT OR Apache-2.0
+            org.opencontainers.image.version=${{ env.VERSION }}
+      - name: build the image (from the root Dockerfile) into the local Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: azemu:test
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            CARGO_BUILD_JOBS=4
+            VERSION=${{ env.VERSION }}
+            GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=image-${{ matrix.suffix }}
+          cache-to: type=gha,mode=max,scope=image-${{ matrix.suffix }}
+      - name: what the image carries
+        run: |
+          docker image inspect azemu:test --format 'size {{.Size}} bytes, user {{.Config.User}}, labels:{{json .Config.Labels}}'
+          docker create --name azemu-inspect azemu:test >/dev/null
+          docker cp azemu-inspect:/licenses ./image-licenses
+          docker rm azemu-inspect >/dev/null
+          find image-licenses -type f | sort
+          test -f image-licenses/LICENSE-MIT && test -f image-licenses/LICENSE-APACHE && test -f image-licenses/NOTICE \
+            && test -f image-licenses/THIRD-PARTY-LICENSES.md && test -f image-licenses/LICENSES/MIT-Microsoft.txt
+      - name: container test (the image next to a Python client on a Docker network; services by name on the standard ports)
+        run: AZEMU_IMAGE=azemu:test tests/container/run.sh
+      - uses: docker/login-action@v3
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Pushed by digest, without a tag: the tags go on the two images together in the next job. The provenance
+      # attestation is made there, for the finished multi-platform image.
+      - name: push the image by digest
+        id: push
+        if: needs.prepare.outputs.publish == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          provenance: false
+          sbom: false
+          labels: ${{ steps.meta.outputs.labels }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            CARGO_BUILD_JOBS=4
+            VERSION=${{ env.VERSION }}
+            GIT_COMMIT=${{ github.sha }}
+          cache-from: type=gha,scope=image-${{ matrix.suffix }}
+      - name: keep the digest
+        if: needs.prepare.outputs.publish == 'true'
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/digests"
+          touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
+      - uses: actions/upload-artifact@v5
+        if: needs.prepare.outputs.publish == 'true'
+        with:
+          name: digests-${{ matrix.suffix }}
+          path: ${{ runner.temp }}/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  image-merge:
+    name: Image tags (amd64 + arm64)
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # pushes the tags
+      id-token: write # the provenance attestation is signed with the run's identity
+      attestations: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/digests
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # :latest only for a release that is not a pre-release (a version with a dash, such as 0.2.0-rc1, is one)
+          tags: |
+            type=raw,value=${{ env.VERSION }}
+            type=raw,value=latest,enable=${{ !contains(env.VERSION, '-') }}
+      - name: one image name for both platforms
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          mapfile -t tags < <(jq -r '.tags[]' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          images=()
+          for d in *; do images+=("$IMAGE@sha256:$d"); done
+          args=()
+          for t in "${tags[@]}"; do args+=(-t "$t"); done
+          docker buildx imagetools create "${args[@]}" "${images[@]}"
+      - name: inspect
+        id: inspect
+        run: |
+          docker buildx imagetools inspect "$IMAGE:$VERSION"
+          digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: provenance attestation for the image
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.inspect.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    name: GitHub release
+    if: needs.prepare.outputs.publish == 'true'
+    needs: [prepare, binary, image-merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # creates the release and uploads the files
+      id-token: write # the provenance attestation of the archives
+      attestations: write
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      IMAGE: ${{ needs.prepare.outputs.image }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: checksums and the text of the release page
+        run: |
+          ls -l dist
+          tools/release/checksums.sh dist
+          python3 tools/release/release_info.py "$GITHUB_REF_NAME" --notes-out "$RUNNER_TEMP/notes.md" >/dev/null
+          {
+            cat "$RUNNER_TEMP/notes.md"
+            echo
+            echo '---'
+            echo
+            echo "**Install.** Download the archive for your system, check it with \`sha256sum -c SHA256SUMS\`, unpack it and run \`azemu\`."
+            echo "The container image: \`docker pull $IMAGE:$VERSION\` (linux/amd64 and linux/arm64)."
+            echo
+            echo "- \`x86_64-unknown-linux-gnu\` and \`aarch64-unknown-linux-gnu\`: need glibc 2.35 or newer (Debian 12, Ubuntu 22.04 and newer)."
+            echo "- \`x86_64-unknown-linux-musl\`: a static binary, runs on any x86-64 Linux."
+            echo "- \`aarch64-apple-darwin\`: macOS on Apple silicon, when it is listed below."
+          } > "$RUNNER_TEMP/release-body.md"
+      - name: provenance attestation for the archives
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: |
+            dist/azemu-*.tar.gz
+            dist/SHA256SUMS
+      - name: create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: azemu ${{ env.VERSION }}
+          body_path: ${{ runner.temp }}/release-body.md
+          prerelease: ${{ contains(env.VERSION, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/azemu-*.tar.gz
+            dist/SHA256SUMS

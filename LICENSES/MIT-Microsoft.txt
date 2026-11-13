@@ -1,0 +1,74 @@
+MIT licence of the Microsoft projects that this repository quotes, reads or checks itself against
+=================================================================================================
+
+This repository (azemu) is licensed MIT OR Apache-2.0 (LICENSE-MIT, LICENSE-APACHE). The files and passages listed in NOTICE and in
+the README files next to the fixtures were taken from the Microsoft projects below. Those projects publish them under the MIT licence;
+the copyright notices and the licence text are reproduced here, as the licence asks. The notices were read from the `LICENSE` files
+of the repositories on 2026-11-13. (Microsoft's prose on Microsoft Learn is under a different licence, CC BY 4.0: see NOTICE.)
+
+* Azure/azure-cosmosdb-js-server
+  https://github.com/Azure/azure-cosmosdb-js-server
+  Copyright (c) 2022 Microsoft
+  used for: stored procedure samples (Cosmos test fixtures)
+* MicrosoftDocs/azure-docs (file LICENSE-CODE: the code samples of Microsoft Learn)
+  https://github.com/MicrosoftDocs/azure-docs
+  Copyright (c) Microsoft Corporation
+  used for: code samples and query examples of Microsoft Learn, reproduced in tests
+* Azure/azure-cosmos-dotnet-v3
+  https://github.com/Azure/azure-cosmos-dotnet-v3
+  Copyright (c) Microsoft Corporation. All rights reserved.
+  used for: HybridRow batch schemas, Cosmos partition key hashing and resource ids
+* Azure/azure-sdk-for-net
+  https://github.com/Azure/azure-sdk-for-net
+  Copyright (c) 2015 Microsoft
+  used for: Event Hubs partition resolver, Azure Functions Blob extension (read for behaviour), test expectations
+* Azure/azure-sdk-for-js
+  https://github.com/Azure/azure-sdk-for-js
+  Copyright (c) 2018 Microsoft
+  used for: Event Hubs partition key hash (`hashPartitionKey`), test expectations
+* Azure/azure-sdk-for-java
+  https://github.com/Azure/azure-sdk-for-java
+  Copyright (c) 2015 Microsoft
+  used for: Cosmos resource id layout, test expectations
+* Azure/azure-sdk-for-python
+  https://github.com/Azure/azure-sdk-for-python
+  Copyright (c) Microsoft Corporation.
+  used for: SDK behaviour, test expectations, test inputs that mirror its tests
+* Azure/azure-sdk-for-go
+  https://github.com/Azure/azure-sdk-for-go
+  Copyright (c) Microsoft Corporation.
+  used for: test expectations
+* Azure/azure-sdk-for-rust
+  https://github.com/Azure/azure-sdk-for-rust
+  Copyright (c) Microsoft Corporation.
+  used for: Event Hubs partition resolver (cross-check), test expectations
+* Azure/azure-sdk-assets
+  https://github.com/Azure/azure-sdk-assets
+  Copyright (c) Microsoft Corporation.
+  used for: recorded Azure traffic: error texts, response shapes, byte fixtures
+* Azure/azure-rest-api-specs
+  https://github.com/Azure/azure-rest-api-specs
+  Copyright (c) 2017 Microsoft
+  used for: REST API specifications: names, shapes, status codes
+* Azure/Azurite
+  https://github.com/Azure/Azurite
+  Copyright (c) Microsoft Corporation.
+  used for: the well-known development account and key, and signing behaviour of older API versions
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

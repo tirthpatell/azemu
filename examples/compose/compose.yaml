@@ -1,0 +1,35 @@
+# The emulator and a client in one Compose project. The client reaches the emulator by the service name `azemu`, on
+# the standard ports, so nothing has to resolve under .localhost.
+#
+#   docker build -t azemu:latest ../..                    the release image (Dockerfile at the root of the repository)
+#   docker compose up --build --abort-on-container-exit --exit-code-from client
+#
+# AZEMU_IMAGE picks another image: `AZEMU_IMAGE=azemu:dev` for the one `Dockerfile.dev` builds around a binary of your own
+# (see Dockerfile.dev), or the image of your registry.
+services:
+  azemu:
+    image: ${AZEMU_IMAGE:-azemu:latest}
+    # The image's default command is `--host 0.0.0.0 --standard-ports`. https needs a certificate for the name the
+    # clients use, which is the service name.
+    environment:
+      AZEMU_TLS_NAME: azemu
+    # Only if programs on this machine (not in the project) need it; bind to 127.0.0.1, never to every address:
+    # the emulator has no sign-in.
+    # ports:
+    #   - "127.0.0.1:10000:10000"   # Blob
+    #   - "127.0.0.1:10001:10001"   # Queue
+    #   - "127.0.0.1:10010:10010"   # Key Vault
+    #   - "127.0.0.1:4577:4577"     # gateway, admin API
+    networks:
+      default:
+        # Event Hubs and Service Bus share the AMQP port; the host name decides. A name with the label `eventhub` is
+        # Event Hubs: use sb://eventhub:5672 for it and sb://azemu:5672 for Service Bus.
+        aliases: [eventhub]
+
+  client:
+    build: ../common
+    environment:
+      AZEMU_HOST: azemu
+    depends_on:
+      azemu:
+        condition: service_healthy     # the image's HEALTHCHECK: `azemu __healthcheck`

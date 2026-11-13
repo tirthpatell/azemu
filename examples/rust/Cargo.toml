@@ -1,0 +1,28 @@
+# A small Rust project that uses Blob, Queue, Key Vault and Cosmos DB through the Azure SDK for Rust, with tests that start azemu.
+# The versions are the ones this example was run with (azemu 0.1.0). Keep the Azure crates on one azure_core: this stable
+# set uses azure_core 1.1; azure_messaging_eventhubs 0.16 needs a 1.2 beta and cannot join it (docs/rust.md, "Pick the crates").
+[package]
+name = "azemu-rust-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of azemu's own workspace: this project has its own Cargo.lock and target directory.
+[workspace]
+
+[dependencies]
+azure_core = "=1.1.0"
+azure_identity = "=1.0.0"
+azure_storage_blob = "=1.1.0"
+azure_storage_queue = "=1.1.0"
+azure_security_keyvault_secrets = "=1.0.1"
+azure_data_cosmos = { version = "=1.0.0", features = ["key_auth", "control_plane"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# From a checkout of azemu this is a path. In your own project use the git form instead:
+#   azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.1.0" }
+azemu-testkit = { path = "../../crates/testkit" }

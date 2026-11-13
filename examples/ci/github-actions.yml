@@ -1,0 +1,25 @@
+# GitHub Actions: the emulator runs as a service container of the job, with its ports published to the runner. The
+# tests reach it on localhost, on the standard ports (a path-style address, http://localhost:10000/devstoreaccount1).
+# `examples/ci/check.sh github` runs the same arrangement on one machine with Docker (what works today). This file was not run on GitHub.
+#
+# The image is not published yet. Until the first release, build it from the root Dockerfile (`docker build -t azemu:latest .`), push it to a
+# registry the runner can pull from, and put that name in `image:`. After the first release use `ghcr.io/tirthpatell/azemu:<version>`.
+# The Python check below is only a stand-in for your tests. For a Rust project see github-actions-rust.yml.
+name: integration-tests
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      azemu:
+        image: ghcr.io/your-org/azemu:latest  # your own copy for now; later: ghcr.io/tirthpatell/azemu:<version>
+        ports:
+          - 10000:10000
+          - 10001:10001
+          - 10010:10010
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install azure-storage-blob azure-storage-queue azure-keyvault-secrets
+      - run: python examples/common/check.py
+        env:
+          AZEMU_HOST: localhost

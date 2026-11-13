@@ -1,0 +1,8 @@
+bin/
+obj/
+out*/
+node_modules/
+FuncApp/local.settings.json
+NodeApp/local.settings.json
+logs/
+.azemu-under-test

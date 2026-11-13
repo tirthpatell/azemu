@@ -1,0 +1,126 @@
+azemu
+Copyright (c) 2026 Tirth Patel
+
+azemu is dual licensed under the MIT licence (LICENSE-MIT) or the Apache licence, version 2.0 (LICENSE-APACHE), at your
+option. This file names what in the repository was taken from, generated from, or checked against the work of other
+projects, and under what terms those projects published it. Libraries that are linked into the binary are listed, with their
+licences, in THIRD-PARTY-LICENSES.md. The copyright notices and licence text of the Microsoft projects named below are in
+LICENSES/MIT-Microsoft.txt. If you redistribute azemu (source, binary or container image), keep LICENSE-MIT, LICENSE-APACHE,
+this NOTICE, THIRD-PARTY-LICENSES.md and the LICENSES directory with it; the Apache licence asks that the attributions in this
+file travel with the work.
+
+Trademarks. azemu is an independent open-source project. It is not made, sponsored, endorsed or approved by Microsoft or by
+the Apache Software Foundation. Microsoft, Azure, Azure Cosmos DB, Azure Event Hubs, Azure Service Bus, Azure Key Vault,
+Microsoft Entra and the other Microsoft product names are trademarks of the Microsoft group of companies. Apache Kafka and
+Apache Avro are trademarks of the Apache Software Foundation. Terraform is a trademark of HashiCorp. Azurite is the name of a
+Microsoft project. These names are used here only to say what azemu is compatible with.
+
+1. Apache Kafka (Apache License 2.0). The Kafka endpoint of Event Hubs (crates/kafka, crates/services/eventhubs/src/kafka) speaks
+   the Apache Kafka wire protocol. `crates/kafka/src/schemas.rs` is generated, by `crates/kafka/schema/gen.py`, from Apache
+   Kafka's own message definitions (`clients/src/main/resources/common/message/*.json`, tag 3.9.0, 21 APIs): the field layout
+   of every request and response, with the versions in which each field exists. Running the generator on those files
+   reproduces the file exactly. Apache Kafka, Copyright The Apache Software Foundation. This product includes software
+   developed at The Apache Software Foundation (https://www.apache.org/). The Apache licence text is LICENSE-APACHE.
+   `crates/kafka/tests/frames.txt` holds request bytes that librdkafka 2.16 (BSD-2-Clause) and the Apache Kafka Java client
+   sent to the emulator while the tests were written; they are wire data, not code of those projects.
+
+2. Microsoft's Azure SDKs and tools (MIT, Copyright Microsoft). Microsoft publishes its SDKs under the MIT licence. The
+   following were written after reading their source, and in places follow it closely:
+   - Event Hubs partition keys (crates/services/eventhubs/src/model.rs: `partition_for_key`, `hash_key`, `lookup3`): the hash
+     that chooses a partition from a partition key is the function of `hashPartitionKey` / `computeHash` in `@azure/event-hubs`
+     (JavaScript), `PartitionResolver` in Azure.Messaging.EventHubs (.NET) and `azure_messaging_eventhubs` (Rust). It is Bob
+     Jenkins' lookup3 (`hashlittle2`, public domain); the mixing steps are those of lookup3.
+   - Cosmos DB effective partition keys (crates/services/cosmos/src/epk.rs): MurmurHash3 (Austin Appleby, public domain), used
+     as the Cosmos SDKs use it to turn a partition key into a position in the key space.
+   - Cosmos DB batch rows (crates/services/cosmos/src/hybridrow.rs): HybridRow is Microsoft's row format. The two schemas it
+     reads and writes (`BatchOperation`, `BatchResult`) are those of `Microsoft.Azure.Cosmos/src/Batch/HybridRowBatchSchemas.json`
+     in Azure/azure-cosmos-dotnet-v3. The tests hold request bytes that Microsoft.Azure.Cosmos 3.64.0 (its HybridRow library) sent
+     while this project's own tests ran.
+   - Cosmos DB resource ids (crates/services/cosmos/src/rid.rs): the byte layout of `_rid` values, which the Java and .NET SDKs
+     parse (`ResourceId`), worked out from how those SDKs read them. No code was copied.
+   - The Azure Functions Blob extension (Microsoft.Azure.WebJobs.Extensions.Storage.Blobs, source in Azure/azure-sdk-for-net,
+     MIT) was read, in its public source, to see which Blob and Storage Analytics requests it makes (`$logs` format and the
+     container scan). No code of it is in this repository.
+   - Test inputs: the six SDK test suites (tests/sdk-*) were written from the SDKs' documentation and from the expectations of
+     Microsoft's live tests, not copied from them. Searched 2026-11-13 against the upstream test directories of the Python, Go,
+     JavaScript, .NET and Java SDKs: no test is a copy; a few small inputs mirror an upstream test because the recording they
+     are compared with was made by that test (for example the certificate policy of `test_policy` in
+     tests/sdk-python/keyvault/test_kv_certificates_basic.py).
+
+3. Samples and examples from Microsoft Learn and from Microsoft's sample repositories.
+   - crates/services/cosmos/tests/fixtures/scripts/*.js: Cosmos DB stored procedure, trigger and user-defined function samples:
+     nine from Microsoft Learn ("How to write stored procedures, triggers, and user-defined functions in Azure Cosmos DB"), each
+     with its source in its first line, and five byte for byte from Azure/azure-cosmosdb-js-server (`samples/stored-procedures`,
+     MIT, Copyright (c) 2022 Microsoft). Learn's code samples are published under the MIT licence (the `LICENSE-CODE` file of
+     MicrosoftDocs/azure-docs, Copyright (c) Microsoft Corporation). They are kept as test input and are not in the binary. The
+     README next to them gives each file's source. The same samples are quoted in tests/sdk-python/cosmos,
+     tests/sdk-js/test/cosmos_scripts.test.mjs and tests/sdk-dotnet (`CosmosScriptTests.cs`).
+   - crates/cosmos-sql/tests (`doc_examples.rs`, `select_from.rs`, `operators.rs`, `subqueries.rs`) and
+     crates/services/servicebus/sqlfilter/tests/docs_examples.rs: the query and filter examples of the Cosmos DB and Service Bus
+     documentation on Microsoft Learn, with the results the pages show; data sets were completed by the authors of azemu.
+     Same terms as the samples above (code samples: MIT, Copyright Microsoft).
+   - Prose of Microsoft Learn is published under Creative Commons Attribution 4.0 (CC BY 4.0,
+     https://creativecommons.org/licenses/by/4.0/; the `LICENSE` file of MicrosoftDocs/azure-docs). The documents under docs/
+     name Learn pages as their source and now and then quote a sentence of one, in quotation marks, with the page named next
+     to it (docs/services/eventgrid.md, storage-events.md, kafka.md, blob.md). Those quoted sentences remain under CC BY 4.0
+     and are not relicensed; no change other than choosing a sentence was made. The rest of the documentation is the authors' own.
+   - docs/services/cosmos-scripts.md and the code name the server-side API of Cosmos DB (`getContext`, `getCollection` and so on)
+     because scripts written for Cosmos DB call it. `crates/services/cosmos/src/js/prelude.js` is written for azemu; it was
+     compared with Microsoft's `utils/DocDbWrapperScript.js` (Azure/azure-cosmosdb-js-server, MIT) and has no code in common
+     with it beyond the `"use strict"` line.
+
+4. Recordings of real Azure traffic and REST specifications (MIT, Copyright Microsoft). Error message texts, response
+   shapes, header values and a few account property defaults (for example crates/services/blob/src/errors.rs and
+   crates/services/servicebus/src/admin/error.rs, and short bodies in tests) were taken from recordings made by the Azure SDK
+   test suites, which Microsoft publishes in Azure/azure-sdk-assets (MIT), and from the REST API specifications in
+   Azure/azure-rest-api-specs (MIT). These are short strings and values that a client needs to see to behave as it does against
+   Azure; they are reproduced as facts about a service's behaviour. Larger things that come from the recordings:
+   - crates/services/blob/src/query/avro_schema.json and crates/services/blob/src/query/testdata/*: the Avro schema of
+     "quick query" answers and answers of the real service, decoded from the recordings, as test data.
+   - crates/services/blob/src/query/avro.rs and the Storage Analytics log format (crates/services/blob/src/analytics.rs) follow
+     Microsoft's documentation ("Storage Analytics log format", "Storage Analytics logged operations and status messages").
+   The recordings and the specifications themselves are not in this repository (`refs/` is not shipped; `tools/fetch-refs.sh`
+   fetches them from Microsoft's repositories for the replay tool). Only scores computed from them are here
+   (fidelity/SCORES.md).
+
+5. Azurite and the development accounts. The development storage account `devstoreaccount1` and its key, and the key of the Cosmos DB
+   emulator, are published by Microsoft for local development and are used here as constants (Azurite, MIT, Copyright Microsoft).
+   crates/core/src/storage/sig/vectors.rs holds signature vectors made with the Azure SDK for Python, with the signing code of
+   Azurite for the older API versions, and by hand from the REST documentation; no Azurite code is in this repository.
+
+6. Specifications. The AMQP 1.0 types and framing (crates/amqp) follow the OASIS AMQP 1.0 standard; the WebSocket framing
+   (crates/core/src/websocket.rs) follows RFC 6455; HTTP, TLS, X.509 and DER, the cryptography that Key Vault offers, and the OData
+   and SQL dialects of the services follow their public specifications and documentation. A standard is a specification, not a
+   work copied into the repository. The AMQP, WebSocket, DER and SQL code was written for azemu; on 2026-11-13 it was compared,
+   five lines at a time, with every crate in the Cargo registry of the build machine (666 crates, among them fe2o3-amqp,
+   rcgen, der, asn1-rs, boa_parser, the Azure SDK for Rust crates) and with tungstenite, fastwebsockets, soketto, sqlparser,
+   apache-avro, kafka-protocol, rskafka, yasna and others: nothing was found beyond lookup3 (above), the field list of a Kafka record batch (whose order the protocol fixes) and short
+   boilerplate.
+
+7. Test keys. The keys, certificates and PKCS#12 files in crates/services/keyvault/tests/fixtures and the keys that tests
+   generate are made for the tests. They protect nothing; never use them (see the README in that directory).
+
+8. Dependencies. The Rust crates linked into the binary are listed in THIRD-PARTY-LICENSES.md with their licences (all
+   permissive: MIT, Apache-2.0, BSD-3-Clause, ISC, Zlib, Unicode-3.0, Unlicense, 0BSD, BSL-1.0; `cargo deny check` enforces this,
+   see deny.toml). `boa_engine` (MIT or Unlicense) runs the Cosmos DB stored procedures. The dependencies of the SDK test suites
+   (PyPI, npm, Maven, NuGet, Go modules, crates) are not part of this repository and are not redistributed; their lock files
+   list names and versions only.
+
+9. The container image. The image is built from the Dockerfile on gcr.io/distroless/cc-debian12 (Debian 12). Its base contains
+   Debian packages under their own licences: glibc (libc6, LGPL-2.1-or-later), libgcc-s1, libstdc++6 and libgomp1 (GPL-3.0 with
+   the GCC Runtime Library Exception), libssl3 (Apache-2.0), ca-certificates (the Mozilla certificate list: MPL-2.0), tzdata
+   (public domain) and base-files, netbase and media-types. Their copyright and licence files are in the image under
+   /usr/share/doc/<package>/copyright and /usr/share/common-licenses. Their source is the Debian source packages for Debian 12
+   (https://sources.debian.org, https://snapshot.debian.org). azemu links glibc, libgcc and libm dynamically and does not modify
+   them. The licence files of azemu itself are in the image under /licenses.
+
+Not shipped: `refs/`, the SDK test suites' own dependencies, and the directories of test output. A binary or an image built
+from this repository contains the crates listed in THIRD-PARTY-LICENSES.md, the code of this repository, and (in the image) the
+base above.
+
+musl libc
+---------
+The statically linked Linux build (target x86_64-unknown-linux-musl) contains musl libc, which is licensed under the
+MIT license (Copyright (c) 2005-2020 Rich Felker, et al.). Its full copyright notice, including the notices of the
+code it contains under other permissive licenses, is in LICENSES/musl-COPYRIGHT.txt and is shipped with that build.
+The other builds link the system C library dynamically and do not contain it.

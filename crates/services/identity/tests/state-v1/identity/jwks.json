@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "kty": "RSA",
+      "use": "sig",
+      "kid": "iiWjfH2aJWPjoT50x0fKpyi0V2uf",
+      "x5t": "iiWjfH2aJWPjoT50x0fKpyi0V2uf",
+      "n": "2mczBuTN1w8GjkggC9Vqz_ZsJgjvwngVQFNl7Bcmmq3gWxQiVUYMzpvnw_PF6g_KWeEeBeC840gqgOz3hNLQzf0NxqG5l8NTrsPicK1jvxIUAHSANInXVffuEElXR8qZP4qdM3A2QWnmm1POZtVAbEQMw2lOa3PpZprR-JKE-MuHOzjX4LQTkkIjg10mCeSTM63u74Z94akRAz3mdZdOTi-6TSQp_nUWi7VZuK8JkgV7HnPj3JkyLcqVLii8v9kflFl7S6uyIgcg3Dxhg8H7jKzQf4hGT7rUPGcaBBLwDiJiEPwe4PDNl4fdEUn8YqNIdxMOStl6TXm2_tRp4WQsgw",
+      "e": "AQAB"
+    }
+  ]
+}

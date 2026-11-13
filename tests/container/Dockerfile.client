@@ -1,0 +1,8 @@
+# The client side of the container test: Python SDKs, at the versions the Python suites use (tests/sdk-python/requirements.txt).
+FROM python:3.12-slim
+RUN pip install --no-cache-dir \
+    azure-core==1.41.0 azure-storage-blob==12.31.1 azure-storage-queue==12.18.1 azure-data-tables==12.7.0 \
+    azure-keyvault-secrets==4.12.0 azure-cosmos==4.17.1 azure-servicebus==7.15.0 azure-eventhub==5.15.1 \
+    azure-appconfiguration==1.10.0 azure-storage-file-datalake==12.26.1 azure-eventgrid==4.22.1
+COPY client.py /client.py
+ENTRYPOINT ["python", "/client.py"]

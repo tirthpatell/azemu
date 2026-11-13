@@ -1,0 +1,45 @@
+[package]
+name = "azemu-core"
+description = "Server, routing, TLS and helpers shared by every azemu service"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[features]
+default = []
+# In-process test server and client (`azemu_core::testing`). Off by default.
+testing = []
+
+[dependencies]
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+rustls.workspace = true
+tokio-rustls.workspace = true
+rcgen.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmp-serde.workspace = true
+time.workspace = true
+uuid.workspace = true
+base64.workspace = true
+sha2.workspace = true
+sha1.workspace = true
+percent-encoding.workspace = true
+parking_lot.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+# Turns the `testing` feature on for this crate's own tests, so a plain
+# `cargo test -p azemu-core` works.
+azemu-core = { path = ".", features = ["testing"] }

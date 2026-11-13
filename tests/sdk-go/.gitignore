@@ -1,0 +1,6 @@
+# the copy of the emulator under test and anything else generated
+.azemu-under-test
+*.log
+*.test
+*.out
+/tmp/

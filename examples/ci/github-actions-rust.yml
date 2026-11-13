@@ -1,0 +1,69 @@
+# GitHub Actions for a Rust project whose tests start azemu themselves (the `azemu-testkit` crate, or the pattern in docs/rust.md).
+# azemu is installed once and cached; each test binary starts its own copy on a free port, so no port is published and
+# parallel jobs on one runner do not collide.
+#
+# What works today: building azemu from a tag of its repository with `cargo install --git`, as in the active steps below. That needs
+# the tag to exist: the first release has not been published yet, so until then use `--rev <commit>` in place of `--tag`.
+# What needs the first release: the release archive and the container image, in the commented alternatives at the end.
+#
+# What was run, on one Linux machine: the install step (`cargo install --locked --git <local copy of the repository> --tag ... azemu --root <dir>`,
+# 3 minutes with two build jobs), then `cargo test` of examples/rust with that azemu on PATH (the 4 tests pass); the commands of alternative 1 on a
+# release archive made by tools/release/package.sh (the checksum check, the unpacking); and alternative 2 with a container made from a local binary,
+# its port published on the host. What was not run: this file on GitHub, any download from the release page, the image from the registry.
+name: test
+on: [push, pull_request]
+env:
+  AZEMU_TAG: v0.1.0
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The Event Hubs crate links OpenSSL. If your runner image lacks the headers: sudo apt-get install -y libssl-dev
+      - id: azemu-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.azemu-bin
+          key: azemu-${{ env.AZEMU_TAG }}-${{ runner.os }}-${{ runner.arch }}
+      - name: Install azemu (built from the tag, about 3 minutes the first time, then cached)
+        if: steps.azemu-cache.outputs.cache-hit != 'true'
+        run: cargo install --locked --git https://github.com/tirthpatell/azemu --tag "$AZEMU_TAG" azemu --root ~/.azemu-bin
+      - run: echo "$HOME/.azemu-bin/bin" >> "$GITHUB_PATH"
+      - run: azemu --version
+      - run: cargo test
+      - if: failure()         # the testkit keeps the emulator's log next to the build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: azemu-logs
+          path: target/tmp/azemu-testkit-*/azemu.log
+
+# Alternative 1, after the first release: the release archive instead of building (a few seconds). Replace the cache and install steps with:
+#
+#      - name: Install azemu from the release archive
+#        run: |
+#          version=0.1.0
+#          base=https://github.com/tirthpatell/azemu/releases/download/v$version
+#          curl -fsSLO "$base/azemu-$version-x86_64-unknown-linux-gnu.tar.gz"
+#          curl -fsSLO "$base/SHA256SUMS"
+#          sha256sum --check --ignore-missing SHA256SUMS
+#          tar -xzf "azemu-$version-x86_64-unknown-linux-gnu.tar.gz"
+#          mkdir -p "$HOME/.azemu-bin/bin"
+#          cp "azemu-$version-x86_64-unknown-linux-gnu/azemu" "$HOME/.azemu-bin/bin/"
+#
+# Alternative 2, after the first release: the container image as a service of the job, with the testkit using that emulator instead of starting one.
+# (Reaching `*.localhost` names on a GitHub runner: not tried.)
+#
+#    services:
+#      azemu:
+#        image: ghcr.io/tirthpatell/azemu:0.1.0
+#        ports:
+#          - 4577:4577
+#    steps:
+#      ...
+#      - run: curl -fsS http://127.0.0.1:4577/_azemu/ca.pem -o "$RUNNER_TEMP/azemu-ca.pem"
+#      - run: cargo test
+#        env:
+#          AZEMU_GATEWAY: http://127.0.0.1:4577
+#          AZEMU_CA_FILE: ${{ runner.temp }}/azemu-ca.pem

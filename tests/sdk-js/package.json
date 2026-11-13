@@ -1,0 +1,31 @@
+{
+  "name": "azemu-sdk-js-tests",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "test": "node run.mjs"
+  },
+  "dependencies": {
+    "@azure/app-configuration": "1.13.1",
+    "@azure/arm-resources": "8.0.0",
+    "@azure/arm-resourcesdeployments": "2.0.0",
+    "@azure/arm-servicebus": "7.0.0",
+    "@azure/arm-storage": "21.0.0",
+    "@azure/cosmos": "4.10.2",
+    "@azure/data-tables": "13.3.2",
+    "@azure/event-hubs": "6.0.4",
+    "@azure/eventgrid": "5.12.0",
+    "@azure/eventgrid-namespaces": "1.0.0",
+    "@azure/eventhubs-checkpointstore-blob": "2.0.0",
+    "@azure/identity": "4.14.1",
+    "@azure/keyvault-certificates": "4.11.0",
+    "@azure/keyvault-keys": "4.10.2",
+    "@azure/keyvault-secrets": "4.12.0",
+    "@azure/service-bus": "7.10.0",
+    "@azure/storage-blob": "12.34.0",
+    "@azure/storage-file-datalake": "12.31.0",
+    "@azure/storage-queue": "12.32.0",
+    "ws": "8.22.2"
+  }
+}

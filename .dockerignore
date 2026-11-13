@@ -1,0 +1,17 @@
+# The build context is nothing but what the release build needs. A working checkout can hold tens of GB of build output
+# and caches (`target/`, `refs/`, `.venv`, `node_modules`), so the rule is: leave everything out, then let these in.
+# A new top-level directory is therefore never sent by accident.
+*
+!Cargo.toml
+!Cargo.lock
+!crates
+!.git
+!LICENSE-MIT
+!LICENSE-APACHE
+!NOTICE
+!THIRD-PARTY-LICENSES.md
+!LICENSES
+# inside what is let in
+**/target
+**/node_modules
+**/__pycache__

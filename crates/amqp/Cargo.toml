@@ -1,0 +1,19 @@
+[package]
+name = "azemu-amqp"
+description = "azemu: AMQP 1.0 server side (codec, connection, session, link) for Service Bus and Event Hubs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+azemu-core.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+parking_lot.workspace = true

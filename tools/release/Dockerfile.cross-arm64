@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1
+# Linux arm64 (glibc) cross-compiled on an x86-64 Docker host: a quick local check that the code builds and links for aarch64.
+# Running the result needs an arm64 machine, or QEMU (`docker run --privileged tonistiigi/binfmt --install arm64`). The release
+# workflow builds and tests arm64 on a native runner instead. From the repository root:
+#
+#   docker build -f tools/release/Dockerfile.cross-arm64 --target export --output type=local,dest=$HOME/.cache/azemu-arm64 .
+#   file $HOME/.cache/azemu-arm64/azemu        # ELF 64-bit LSB pie executable, ARM aarch64
+#
+# On an arm64 host (Apple Silicon Docker, a Graviton or Ampere server) the root Dockerfile builds natively and needs none of this.
+ARG RUST_IMAGE=rust:1.99.1-bookworm
+FROM ${RUST_IMAGE} AS build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+ && rm -rf /var/lib/apt/lists/* && rustup target add aarch64-unknown-linux-gnu
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc \
+    AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+WORKDIR /src
+ARG CARGO_BUILD_JOBS=2
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_TERM_COLOR=never
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo .cargo
+COPY crates crates
+RUN cargo build --release --locked -p azemu --target aarch64-unknown-linux-gnu \
+ && install -D target/aarch64-unknown-linux-gnu/release/azemu /out/azemu
+
+FROM scratch AS export
+COPY --from=build /out/azemu /azemu

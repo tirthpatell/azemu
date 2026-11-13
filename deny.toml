@@ -1,0 +1,51 @@
+# Settings for `cargo deny` (https://embarkstudios.github.io/cargo-deny/). Run from the repository root:
+#
+#   cargo install --locked cargo-deny          # compiles for several minutes; do it on its own on a small machine
+#   cargo deny check                           # advisories, licenses, bans, sources
+#   cargo deny check licenses sources          # no network needed (the advisory database is fetched from GitHub)
+#
+# The workspace itself is `MIT OR Apache-2.0`. Everything it depends on has to be under a licence on the list below:
+# permissive licences only, nothing that asks for the source of the combined program to be published.
+
+[graph]
+# What ships: the Linux, macOS and Windows builds of the unified binary (see docs/install.md).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# Test-only dependencies are checked too (they are in the repository), but they are not in the binary.
+all-features = false
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "0BSD",
+    "BSL-1.0",
+]
+confidence-threshold = 0.9
+
+[advisories]
+version = 2
+# An advisory that does not apply is named here with the reason, never silenced silently.
+ignore = []
+
+[bans]
+# Two versions of a crate cost build time and size, but are no licence or safety problem: warn only.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

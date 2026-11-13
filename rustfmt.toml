@@ -1,0 +1,3 @@
+# Wide lines, and short constructs kept on one line: the style the code is written in.
+max_width = 140
+use_small_heuristics = "Max"

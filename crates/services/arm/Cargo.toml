@@ -1,0 +1,44 @@
+[package]
+name = "azemu-arm"
+description = "azemu: Azure Resource Manager control plane (management.azure.com)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu-arm"
+path = "src/main.rs"
+
+[dependencies]
+azemu-statefile = { path = "../../statefile" }
+azemu-core.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+base64.workspace = true
+sha2.workspace = true
+tracing.workspace = true
+percent-encoding.workspace = true
+# Services ARM drives.
+azemu-servicebus = { path = "../servicebus" }
+azemu-servicebus-sql = { path = "../servicebus/sqlfilter" }
+azemu-eventhubs = { path = "../eventhubs" }
+azemu-keyvault = { path = "../keyvault" }
+azemu-appconfig = { path = "../appconfig" }
+azemu-blob = { path = "../blob" }
+azemu-eventgrid = { path = "../eventgrid" }
+
+[dev-dependencies]
+azemu-core = { workspace = true, features = ["testing"] }
+tokio.workspace = true
+# The tests that need every service use the one wiring (crates/azemu/src/lib.rs).
+azemu = { path = "../../azemu" }

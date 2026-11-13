@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" role="img" aria-label="azemu">
+  <defs>
+    <linearGradient id="cloud" gradientUnits="userSpaceOnUse" x1="27" y1="33" x2="70" y2="63">
+      <stop offset="0" stop-color="#7C6CF2"/>
+      <stop offset="1" stop-color="#2BB8D6"/>
+    </linearGradient>
+  </defs>
+  <rect width="96" height="96" rx="20" fill="#1B2330"/>
+  <path d="M29 15H16v66h13" fill="none" stroke="#E6E9EE" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M67 15h13v66H67" fill="none" stroke="#E6E9EE" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="url(#cloud)" transform="translate(48 49) scale(1.2) translate(-48 -49)">
+    <circle cx="35.5" cy="54" r="8.5"/>
+    <circle cx="47" cy="45.5" r="12"/>
+    <circle cx="60" cy="53" r="9.5"/>
+    <rect x="35.5" y="50" width="24.5" height="12.5"/>
+  </g>
+</svg>

@@ -1,0 +1,39 @@
+[package]
+name = "azemu-eventhubs"
+description = "azemu: Azure Event Hubs (AMQP 1.0 data plane, JSON admin API)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "azemu-eventhubs"
+path = "src/main.rs"
+
+[dependencies]
+azemu-statefile = { path = "../../statefile" }
+azemu-core.workspace = true
+azemu-amqp = { path = "../../amqp" }
+azemu-kafka = { path = "../../kafka" }
+tokio.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+anyhow.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+quick-xml.workspace = true
+uuid.workspace = true
+percent-encoding.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["rust_backend"] }
+azemu-core = { workspace = true, features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+azemu-servicebus = { path = "../servicebus" }

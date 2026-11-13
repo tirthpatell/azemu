@@ -1,0 +1,7 @@
+bin/
+obj/
+.azemu-under-test
+.tmp/
+logs/
+*.log
+TestResults/

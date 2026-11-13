@@ -1,0 +1,45 @@
+[package]
+name = "azemu-sdk-rust-tests"
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Not a member of the emulator's workspace.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+azure_core = "=1.1.0"
+azure_identity = "=1.0.0"
+azure_storage_blob = "=1.1.0"
+azure_storage_queue = "=1.1.0"
+azure_security_keyvault_secrets = "=1.0.1"
+azure_security_keyvault_keys = "=1.0.1"
+azure_security_keyvault_certificates = "=1.0.1"
+azure_data_cosmos = { version = "=1.1.0-beta.2", features = ["key_auth", "control_plane", "unstable_patch"] }
+azure_messaging_eventhubs = "=0.15.0"
+azure_core_amqp = "=1.1.0"
+# Old generation crates (azure_core 0.21, October 2024), still the newest published by the Azure SDK team for these services.
+# rustls instead of OpenSSL; reqwest 0.12 ships webpki roots only, so they are used over plain HTTP (Tables) or are only checked for what they can do.
+azure_core_legacy = { package = "azure_core", version = "=0.21.0", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_storage_legacy = { package = "azure_storage", version = "=0.21.0", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+azure_data_tables = { version = "=0.21.0", default-features = false, features = ["enable_reqwest_rustls", "hmac_rust"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "process", "net"] }
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+async-trait = "0.1"
+url = "2"
+base64 = "0.22"
+rand = "0.9"
+
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
+[profile.dev.package."*"]
+debug = false
