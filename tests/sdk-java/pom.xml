@@ -58,7 +58,7 @@
     <dependency><groupId>com.azure.resourcemanager</groupId><artifactId>azure-resourcemanager-servicebus</artifactId></dependency>
 
     <!-- the reference Kafka client, for the Kafka endpoint of Event Hubs (KafkaTest) -->
-    <dependency><groupId>org.apache.kafka</groupId><artifactId>kafka-clients</artifactId><version>3.9.1</version></dependency>
+    <dependency><groupId>org.apache.kafka</groupId><artifactId>kafka-clients</artifactId><version>3.9.2</version></dependency>
     <dependency><groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope></dependency>
     <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-simple</artifactId><version>1.7.36</version><scope>test</scope></dependency>
   </dependencies>
