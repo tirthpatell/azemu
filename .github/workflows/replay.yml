@@ -46,16 +46,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p azemu
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: refs/recordings
           key: recordings-${{ hashFiles('tools/fetch-refs.py') }}
@@ -78,7 +78,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: keep the scores and the reports
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: replay-scores
           path: ${{ runner.temp }}/replay

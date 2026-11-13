@@ -48,7 +48,7 @@ jobs:
       publish: ${{ steps.info.outputs.publish }}
       image: ${{ steps.info.outputs.image }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: check the tag and read the version
@@ -113,7 +113,7 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Linux: built inside a Docker build (Debian 12 for glibc, Alpine for musl), so that the binary does not need the
       # runner's newer glibc. The Dockerfiles leave the file in out/.
@@ -153,7 +153,7 @@ jobs:
 
       - name: package
         run: tools/release/package.sh out/azemu "$VERSION" "$TARGET" dist
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: archive-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -182,10 +182,10 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       IMAGE: ${{ needs.prepare.outputs.image }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           labels: |
@@ -193,7 +193,7 @@ jobs:
             org.opencontainers.image.licenses=MIT OR Apache-2.0
             org.opencontainers.image.version=${{ env.VERSION }}
       - name: build the image (from the root Dockerfile) into the local Docker
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -217,7 +217,7 @@ jobs:
             && test -f image-licenses/THIRD-PARTY-LICENSES.md && test -f image-licenses/LICENSES/MIT-Microsoft.txt
       - name: container test (the image next to a Python client on a Docker network; services by name on the standard ports)
         run: AZEMU_IMAGE=azemu:test tests/container/run.sh
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@v4
         if: needs.prepare.outputs.publish == 'true'
         with:
           registry: ghcr.io
@@ -228,7 +228,7 @@ jobs:
       - name: push the image by digest
         id: push
         if: needs.prepare.outputs.publish == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           provenance: false
@@ -247,7 +247,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/digests"
           touch "$RUNNER_TEMP/digests/${DIGEST#sha256:}"
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         if: needs.prepare.outputs.publish == 'true'
         with:
           name: digests-${{ matrix.suffix }}
@@ -270,19 +270,19 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       IMAGE: ${{ needs.prepare.outputs.image }}
     steps:
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           pattern: digests-*
           merge-multiple: true
           path: ${{ runner.temp }}/digests
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.IMAGE }}
           # :latest only for a release that is not a pre-release (a version with a dash, such as 0.2.0-rc1, is one)
@@ -305,7 +305,7 @@ jobs:
           digest="$(docker buildx imagetools inspect "$IMAGE:$VERSION" --format '{{json .Manifest}}' | jq -r .digest)"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
       - name: provenance attestation for the image
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.IMAGE }}
           subject-digest: ${{ steps.inspect.outputs.digest }}
@@ -325,8 +325,8 @@ jobs:
       VERSION: ${{ needs.prepare.outputs.version }}
       IMAGE: ${{ needs.prepare.outputs.image }}
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           pattern: archive-*
           merge-multiple: true
@@ -349,13 +349,13 @@ jobs:
             echo "- \`aarch64-apple-darwin\`: macOS on Apple silicon, when it is listed below."
           } > "$RUNNER_TEMP/release-body.md"
       - name: provenance attestation for the archives
-        uses: actions/attest-build-provenance@v3
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/azemu-*.tar.gz
             dist/SHA256SUMS
       - name: create the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           name: azemu ${{ env.VERSION }}
           body_path: ${{ runner.temp }}/release-body.md

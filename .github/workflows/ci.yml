@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -61,7 +61,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -77,7 +77,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       # licences, bans and sources must hold; advisories are reported but do not stop a pull request (a new advisory
       # against an old dependency is not the pull request's fault)
       - uses: EmbarkStudios/cargo-deny-action@v2
@@ -104,7 +104,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -116,7 +116,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -125,7 +125,7 @@ jobs:
       - name: smoke test (start, health, a blob, a Cosmos stored procedure, stop)
         run: python3 tools/release/smoke_test.py target/release/azemu --expect-commit any
       - run: mkdir dist && cp target/release/azemu dist/azemu
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: azemu-linux-x86_64
           path: dist/azemu
@@ -138,14 +138,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: tests/sdk-python/requirements.txt
       - run: pip install -r tests/sdk-python/requirements.txt
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -168,8 +168,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/download-artifact@v5
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -191,14 +191,14 @@ jobs:
       matrix:
         suite: [servicebus, eventhubs]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ env.PYTHON_VERSION }}
           cache: pip
           cache-dependency-path: tests/sdk-python/requirements.txt
       - run: pip install -r tests/sdk-python/requirements.txt
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -217,18 +217,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.npm
           key: npm-${{ runner.os }}-${{ hashFiles('tests/sdk-js/package.json', 'tests/sdk-js/package-lock.json') }}
           restore-keys: npm-${{ runner.os }}-
       - name: install the SDK packages
         run: .github/scripts/install-js-suite.sh
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -247,12 +247,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
         with:
           go-version-file: tests/sdk-go/go.mod
           cache-dependency-path: tests/sdk-go/go.sum
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -270,14 +270,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-java@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
           cache: maven
           cache-dependency-path: tests/sdk-java/pom.xml
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -297,16 +297,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-dotnet@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
         with:
           dotnet-version: "10.0.x"
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: ~/.nuget/packages
           key: nuget-${{ runner.os }}-${{ hashFiles('tests/sdk-dotnet/**/*.csproj') }}
           restore-keys: nuget-${{ runner.os }}-
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
@@ -325,7 +325,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_VERSION }}
@@ -334,7 +334,7 @@ jobs:
           workspaces: |
             tests/sdk-rust
             tests/sdk-rust/beta
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
