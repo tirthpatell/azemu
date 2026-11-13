@@ -18,7 +18,6 @@ WORKDIR /src
 ARG CARGO_BUILD_JOBS=2
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_TERM_COLOR=never
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo .cargo
 COPY crates crates
 RUN cargo build --release --locked -p azemu --target aarch64-unknown-linux-gnu \
  && install -D target/aarch64-unknown-linux-gnu/release/azemu /out/azemu

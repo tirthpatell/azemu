@@ -16,7 +16,6 @@ ARG CARGO_BUILD_JOBS=2
 ARG CARGO_FEATURES=""
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS} CARGO_TERM_COLOR=never
 COPY Cargo.toml Cargo.lock ./
-COPY .cargo .cargo
 COPY crates crates
 COPY .git* ./.git/
 RUN cargo build --release --locked -p azemu ${CARGO_FEATURES} && install -D target/release/azemu /out/azemu

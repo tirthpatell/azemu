@@ -42,9 +42,11 @@ base64.workspace = true
 # the ICU data (`intl`) are left out to keep the build light. Needs Rust 1.91 (the workspace says 1.85).
 boa_engine = { version = "0.22.0", default-features = false, optional = true }
 
-# Operating system limits the worker sets on itself (address space, CPU time). A safe wrapper: no `unsafe` in this crate.
+# Operating system limits the worker sets on itself (address space, CPU time), and closing descriptors it inherited.
+# Safe wrappers: no `unsafe` in this crate.
 [target.'cfg(unix)'.dependencies]
 rlimit = "0.11.0"
+nix = { version = "0.31.3", default-features = false }
 
 [dev-dependencies]
 azemu-core = { workspace = true, features = ["testing"] }

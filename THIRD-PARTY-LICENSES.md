@@ -3,7 +3,7 @@
 What is linked into the `azemu` binary (Linux x86-64; the `windows-*` and Apple crates that other targets add are
 not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.lock`; `cargo deny check licenses` (see `deny.toml`) is the check that nothing outside the allowed list gets in.
 
-282 crates. Test data and recordings under `refs/` and the dependencies of the SDK test suites are not shipped and are not listed.
+283 crates. Test data and recordings under `refs/` and the dependencies of the SDK test suites are not shipped and are not listed.
 
 ## Crates
 
@@ -144,6 +144,7 @@ not in this list). Made by `tools/release/third_party_licenses.py` from `Cargo.l
 | minimal-lexical | 0.2.1 | MIT/Apache-2.0 |
 | miniz_oxide | 0.9.1 | MIT OR Zlib OR Apache-2.0 |
 | mio | 1.2.5 | MIT |
+| nix | 0.31.3 | MIT |
 | nom | 7.1.3 | MIT |
 | nu-ansi-term | 0.50.3 | MIT |
 | num-bigint | 0.4.8 | MIT OR Apache-2.0 |
@@ -6492,6 +6493,32 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 ```
 Copyright (c) 2014 Carl Lerche and other MIO contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+```
+
+### nix 0.31.3
+
+```
+The MIT License (MIT)
+
+Copyright (c) 2015 Carl Lerche + nix-rust Authors
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

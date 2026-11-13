@@ -50,7 +50,9 @@ A worker that starts and ends at once (for instance a program that does not know
 (If the emulator's executable is replaced on disk while it runs, Linux reports the old path as `... (deleted)` and the start fails: set `AZEMU_SCRIPT_WORKER` to the new file.)
 
 **What the worker gets.** An empty environment (only `MALLOC_ARENA_MAX=1`), pipes for standard input, output and error, and nothing else: every other descriptor of the emulator is
-close-on-exec (Rust opens them so), and a test (`a_worker_has_only_its_pipes_an_empty_environment_and_its_limits`) lists `/proc/<pid>/fd` of a running worker: `0 1 2`. The worker opens no file and no socket.
+close-on-exec (Rust opens them so), and the worker's first act is to close any descriptor above the three streams, which covers what the emulator itself inherited from
+the shell or CI runner that started it. A test (`a_worker_has_only_its_pipes_an_empty_environment_and_its_limits`) starts the emulator with two extra descriptors and
+lists `/proc/<pid>/fd` of a running worker: `0 1 2`. The worker opens no file and no socket.
 Its working directory is the emulator's.
 
 **Messages** (`js/proto.rs`): length (4 bytes, big endian) then JSON, over the worker's standard input and output. Standard error is only for the Rust runtime's last words
@@ -124,7 +126,7 @@ recursion, the source check, the one-step builders) are kept because they give f
 | Address-space limit (`RLIMIT_AS`) | **yes** | **no**: the setting is accepted but not enforced for ordinary allocation, and the current size is not cheaply readable, so it is not set. A script can use memory until the time limit, bounded only by the engine's one-step checks | **no** (no limit on a plain process; a Job Object would be needed) |
 | Processor-time limit (`RLIMIT_CPU`) | yes | yes (not run here) | no |
 | Emulator watches the worker's memory | not needed (the limit above holds) | no | no |
-| Empty environment, only the three standard streams | yes (checked in a test) | environment yes; descriptors: close-on-exec as on Linux (not checked) | environment cleared except `SystemRoot`; handles are not inherited by default (not checked) |
+| Empty environment, only the three standard streams | yes (checked in a test) | environment yes; descriptors closed the same way | environment cleared except `SystemRoot`; handles are not inherited by default (not checked) |
 
 Where an operating system limit does not exist, the emulator's kill at the time limit still holds (so time and slots are bounded everywhere), but memory is not. The code for macOS
 and Windows compiles on those targets only in principle: `rlimit` is a Unix-only dependency in `Cargo.toml` and the calls to it are behind `cfg(unix)`; neither platform was built or run.

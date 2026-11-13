@@ -92,7 +92,10 @@ impl Emu {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let dir = std::env::temp_dir().join(format!("azemu-sw-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut cmd = Command::new(BIN);
+        // Through a shell that opens two more descriptors and then becomes the emulator: the emulator inherits them, as it
+        // inherits whatever a terminal or a CI runner left open, and no worker may end up holding them.
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exec 8</dev/null 9</dev/null; exec \"$0\" \"$@\"", BIN]);
         cmd.args(["--port", &port.to_string(), "--host", "127.0.0.1", "--cert-dir"]).arg(&dir).stdout(Stdio::null()).stderr(Stdio::null());
         for (k, v) in env {
             cmd.env(k, v);
@@ -380,6 +383,9 @@ fn a_worker_has_only_its_pipes_an_empty_environment_and_its_limits() {
         std::fs::read_dir(format!("/proc/{pid}/fd")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     fds.sort();
     assert_eq!(fds, ["0", "1", "2"], "descriptors the worker holds");
+    // the emulator does hold the two descriptors it was started with, so the worker closed them itself
+    let held = |n: &str| std::path::Path::new(&format!("/proc/{}/fd/{n}", emu.pid())).exists();
+    assert!(held("8") && held("9"), "the emulator did not inherit the descriptors this test gives it");
     let env = std::fs::read(format!("/proc/{pid}/environ")).unwrap();
     assert_eq!(String::from_utf8_lossy(&env).trim_end_matches('\0'), "MALLOC_ARENA_MAX=1");
     let limits = std::fs::read_to_string(format!("/proc/{pid}/limits")).unwrap();

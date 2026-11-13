@@ -63,6 +63,7 @@ pub fn run(args: Vec<String>) -> ! {
             std::process::exit(EXIT_BAD_START);
         }
     };
+    close_inherited_descriptors();
     limit_cpu(cfg.cpu_secs);
     let (tx, rx) = channel::<ToWorker>();
     let reader = std::thread::Builder::new().name("script-worker-input".into()).spawn(move || {
@@ -217,6 +218,27 @@ fn call_udf(
     let script = call.borrow().clone().ok_or_else(|| Failure::Internal("the function call script is gone".into()))?;
     session.run_prepared_text(&script)
 }
+
+/// Close every descriptor but the three standard streams. The emulator opens its own descriptors close-on-exec, so none of
+/// them reaches a worker; but a descriptor that the emulator itself inherited from whatever started it (a shell, a CI
+/// runner) is passed on to every child, and a worker runs text a client wrote. Called first, while the worker has one
+/// thread and has opened nothing.
+#[cfg(unix)]
+fn close_inherited_descriptors() {
+    let list = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+    // read the whole list first: reading it holds a descriptor of its own, which is closed when the listing ends
+    let open: Vec<i32> = match std::fs::read_dir(list) {
+        Ok(entries) => entries.flatten().filter_map(|e| e.file_name().to_string_lossy().parse().ok()).filter(|fd| *fd > 2).collect(),
+        Err(_) => return,
+    };
+    for fd in open {
+        // an error means the number is not open any more (the listing's own descriptor): nothing to do
+        let _ = nix::unistd::close(fd);
+    }
+}
+
+#[cfg(not(unix))]
+fn close_inherited_descriptors() {}
 
 /// Processor time: `cpu_secs` of CPU, then the operating system ends the worker (the signal `SIGXCPU`; a second later `SIGKILL`).
 #[cfg(unix)]
