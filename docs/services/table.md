@@ -4,7 +4,8 @@
 transactions (`$batch`), stored access policies, service properties, CORS and SAS. Crate `azemu-table`, standalone binary `azemu-table`.
 
 **How to reach it.** `http(s)://{account}.table.core.localhost:4577/{table}` (any account name works without being created first). With `--standard-ports`:
-`http://azemu:10002/{account}/{table}`, the Azurite address, and `UseDevelopmentStorage=true` works.
+`http://azemu:10002/{account}/{table}`, the Azurite address, and `UseDevelopmentStorage=true` works. A table exists only after something creates it: the application, a
+test, or a seed file (`--seed`, [`docs/seed.md`](../seed.md)) that makes the tables at start and after every reset.
 
 **Not built.** The Cosmos DB Table API (`*.table.cosmos.azure.com`), throttling, quotas on tables or entities, logging and metrics (the settings are stored,
 nothing is logged or measured). A page is always full (Azure may return a short page). Signatures are verified only for `devstoreaccount1`; a SAS is
@@ -129,13 +130,17 @@ answered with `DataServiceVersion: 3.0;` (or `1.0;` for an empty body).
 
 ## Authentication
 
-- `Bearer` credentials are accepted without being verified. `SharedKey` and `SharedKeyLite`
-  are verified for `devstoreaccount1` only (see below); for any other account any
-  non-empty `Authorization` header counts. A request with no credentials
-  answers `403 AuthenticationFailed`, or, when its `x-ms-version` is `2020-12-06` or
-  later, `401 InvalidAuthenticationInfo` with the `WWW-Authenticate: Bearer authorization_uri=...`
-  challenge (the SDKs' token policies rely on it).
-- **SAS.** Honoured: expiry `se` and start `st` (`403 AuthorizationFailure`), protocol
+- `Bearer` credentials are accepted without being verified (a `Bearer` with no token is `400 InvalidAuthenticationInfo`). `SharedKey` and `SharedKeyLite`
+  are verified for `devstoreaccount1` only (see below); for any other account the form of the header and the date are checked, the signature is not compared.
+  A request with no credentials answers `401 NoAuthenticationInformation` with the `WWW-Authenticate: Bearer authorization_uri=...`
+  challenge (the SDKs' token policies rely on it), in JSON with the Content-Type `application/json`; when its `x-ms-version` is older than `2020-12-06`,
+  `404 ResourceNotFound`. An unknown scheme (`Foo bar`) is `403 AuthenticationFailed`. All of this was tried against Azure in November 2026.
+- **Checked for every account** (what needs no key; Azure refuses these as Blob and Queue do, see the list at the top of "Auth" in [`blob.md`](blob.md#auth), with the Table form of
+  the errors: JSON, no `AuthenticationErrorDetail`): a Shared Key signature that is not base64 is `400 InvalidAuthenticationInfo`; a SAS `sig` that is empty, not base64
+  or not 32 bytes, and a SAS `sv` that is not a date from 2012-02-12 on, are `403 AuthenticationFailed`; a Shared Key date more than 15 minutes old (or missing, or unreadable)
+  is `403 AuthenticationFailed`; an `x-ms-version` that is not a date from 2008-10-27 on, or lies too far ahead, is `400` in the XML document `<error xmlns="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata">`
+  with the code `InvalidHeaderValue`, and has no `x-ms-error-code` header. `AZEMU_LOOSE_AUTH=1` turns off the checks of signatures and dates (recorded traffic carries placeholders and old dates).
+- **SAS.** Honoured: expiry `se` and start `st` (a SAS that is not valid now, or whose expiry is not after its start: `403 AuthenticationFailed`, as Azure answers), `sip` (`403 AuthorizationFailure`, `AuthenticationFailed` for a `sip` that is no address), protocol
   `spr=https`, and the signature (see below). *Account SAS*: services `ss` must include
   `t` (`AuthorizationServiceMismatch`), resource types `srt` (entity operations need
   `o`, Create/Delete Table `c`, Query Tables `s` or `c`, service properties `s`:
@@ -151,13 +156,12 @@ answered with `DataServiceVersion: 3.0;` (or `1.0;` for an empty body).
 
 ## Known differences from Azure
 
-- **SAS signatures are checked only for the development account** `devstoreaccount1`
-  (its key is well known) and only when the signature looks real (32 or more
-  characters), so a tampered signature or widened permissions are rejected with `403
+- **SAS signatures are compared only for the development account** `devstoreaccount1`
+  (its key is well known), so a tampered signature or widened permissions are rejected with `403
   AuthenticationFailed`. For any other account name the key is derived by azemu and no
-  client can know it, so its signatures are accepted; permissions, expiry, ranges and
-  policies are still enforced. Placeholder signatures such as `Sanitized` (recorded
-  traffic) pass. `sip` (client IP) is not checked.
+  client can know it, so its well-formed signatures are accepted; permissions, expiry, ranges and
+  policies are still enforced. A signature that is made up (`sig=bad`, `Sanitized`) is refused for every account, as on Azure, so a test that expects a
+  refusal gets one for the right reason; recorded traffic needs `AZEMU_LOOSE_AUTH=1`. `sip` is checked against `X-Forwarded-For`, else `127.0.0.1`.
 - **Shared Key and Shared Key Lite are verified for `devstoreaccount1` only**, with the Table
   string to sign (Microsoft Learn, "Authorize with Shared Key", Table service): Shared Key is
   `VERB \n Content-MD5 \n Content-Type \n Date \n CanonicalizedResource` (no canonicalized
@@ -166,9 +170,7 @@ answered with `DataServiceVersion: 3.0;` (or `1.0;` for an empty body).
   as sent (the account twice on a path-style URL) + `?comp=value` when the query has `comp`; no
   other query parameter is signed. A well-formed signature (base64 of 32 bytes) that matches none
   is `403 AuthenticationFailed`, with Azure's message and no string to sign. As in Blob and Queue,
-  other accounts, placeholder signatures (under 20 characters, such as `Sanitized`) and
-  `AZEMU_LOOSE_AUTH=1` (read once at start; it also turns the SAS signature check off) are not
-  checked. The code is `azemu_core::storage::sig::verify_shared_key_table`. An invalid or expired
+  the signatures of other accounts are not compared, and `AZEMU_LOOSE_AUTH=1` (read once at start; it also turns the SAS signature check off) checks no signature. The code is `azemu_core::storage::sig::verify_shared_key_table`. An invalid or expired
   bearer token is not detected.
 - A comparison against a property the entity lacks, or has with another type, is false
   for every operator including `ne` (so `not (ghost eq 'x')` matches). `$select` of a
@@ -183,26 +185,26 @@ answered with `DataServiceVersion: 3.0;` (or `1.0;` for an empty body).
 - **CORS** follows the rules set with Set Table Service Properties
   (`azemu_core::storage::cors`, shared with Queue): an `OPTIONS` request needs no credentials and
   is judged against the service, not the table. Rules are tried in order; the first whose origin
-  (case-sensitive, `*` or a pattern like `http://*.contoso.com`) and method match is the only one that
+  (case-sensitive, `*` or a pattern like `http://*.contoso.com`) and method (as written: `get` does not match `GET`) match is the only one that
   counts, and every header in `Access-Control-Request-Headers` must be in its `AllowedHeaders` (names
   without case, a trailing `*` is a prefix). A match is `200` with `Access-Control-Allow-Origin` (the
-  origin, or `*` when the rule says `*`), `-Allow-Methods`, `-Allow-Headers`, `-Max-Age`, and for an
-  exact origin `-Allow-Credentials: true` and `Vary: Origin`. No match, or no rules, is `403
-  CorsPreflightFailure` (XML body); no `Origin` or no `Access-Control-Request-Method` is `400
-  MissingRequiredHeader`. An actual request with `Origin` gets `Access-Control-Allow-Origin` and
-  `Access-Control-Expose-Headers` from the matching rule (also on errors); a GET/HEAD without a match
-  gets `Vary: Origin`. Not copied from a recording of real Azure (there is none); the error body form is a guess.
+  origin, also for a rule that says `*`), `-Allow-Methods`, `-Allow-Headers` (as sent), `-Max-Age` and `-Allow-Credentials: true`; there is no `Vary`. No match, or no rules, is `403
+  CorsPreflightFailure`; no `Origin` or no `Access-Control-Request-Method` is `400
+  InvalidHeaderValue`, "A required CORS header is not present."; both in the Table service's own XML (`m:error`, no `<Error>`, no byte order mark). An actual
+  request gets `Access-Control-Allow-Origin` from the matching rule (`*` when the rule says `*`, and a request with no `Origin` is matched by a rule with `*`; otherwise the origin
+  with `-Allow-Credentials: true` and, on GET and HEAD, `Vary: Origin`) and `Access-Control-Expose-Headers`: the names of the rule, where a name ending in `*` stands for the headers
+  of that answer that start with it (also on errors); a GET/HEAD that no rule matches gets `Vary: Origin`. Checked against Azure in November 2026 (the rules need 5 to 25
+  seconds to reach every Azure front end; azemu applies them at once).
 - Table names are unique per account; there is no limit on the number of tables or
   entities, no request size limit beyond core's, and no throttling.
-- The service answers any `x-ms-version`; it is echoed back.
+- An `x-ms-version` that is not a date from 2008-10-27 on, or lies too far ahead, is refused (see "Auth"); any other is echoed back. Azure takes only the versions it has published; azemu does not carry that list.
 - JSON answers use `Content-Type: application/json; odata=...; streaming=true; charset=utf-8`
   (a space after each semicolon, as in 1,752 recorded answers) and escape non-ASCII characters as `\uXXXX`, as Azure does. The parts
   inside a `$batch` answer have the form without spaces (233 recorded parts). With `$select`, `odata.metadata` ends in `&$select=<the select>`
   (spaces as `%20`).
 - Choices not backed by a recording, made from the documentation: Delete Entity without
   `If-Match` is `400 MissingRequiredHeader`; a batch with operations on different tables
-  is `400 InvalidInput`; the 401 / 403 split for missing credentials follows the two
-  recorded API versions (`2020-12-06` and `2019-07-07`).
+  is `400 InvalidInput`; what a request with no credentials is told was tried against Azure in November 2026 (above).
 - Cosmos DB Table API (`*.table.cosmos.azure.com`) behaviour is not emulated (it allows
   underscores in table names, empty keys, other error codes).
 

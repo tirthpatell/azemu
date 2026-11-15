@@ -442,8 +442,10 @@ async fn permissions_umask_and_default_acl() {
     let r = l.d("HEAD", "/acls//?action=getAccessControl", &[], "").await;
     assert_eq!(r.header("x-ms-permissions"), Some("rwxr-xrwx"));
     // bad values
+    // an entry that is not valid: Azure names the code with a typo, `InvaldAccessControlList`
     let r = l.d("PATCH", "/acls/q2?action=setAccessControl", &[("x-ms-acl", "user::rwz")], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
+    assert_eq!((r.status, code(&r).as_str()), (400, "InvaldAccessControlList"));
+    assert!(r.text().contains("The access control list value is invalid."), "{}", r.text());
     let r = l.d("PUT", "/acls/bad?resource=file", &[("x-ms-permissions", "rwx")], "").await;
     assert_eq!(r.status, 400);
 
@@ -687,7 +689,7 @@ async fn errors_and_auth_on_the_dfs_endpoint() {
     let l = lake().await;
     l.fs("errs").await;
     // unknown operations are 501 in the dfs error form
-    let r = l.d("PUT", "/errs/f?bogus=1", &[], "").await;
+    let r = l.d("PATCH", "/errs/f?action=bogus", &[], "").await;
     assert_eq!(r.status, 501);
     assert!(r.text().contains("\"code\":\"NotImplemented\""), "{}", r.text());
     // anonymous: the authentication error as JSON
@@ -696,20 +698,20 @@ async fn errors_and_auth_on_the_dfs_endpoint() {
     assert!(r.header("www-authenticate").is_some());
     assert!(r.text().starts_with("{\"error\""), "{}", r.text());
     // a SAS with an expiry in the past, and one without the permission
-    let past = "sv=2021-08-06&sr=c&sp=rl&se=2001-01-01T00:00:00Z&sig=x";
+    let past = "sv=2021-08-06&sr=c&sp=rl&se=2001-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = l.srv.send("GET", &format!("{}/errs?resource=filesystem&recursive=true&{past}", l.dfs), &[], "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
-    let ok = "sv=2021-08-06&sr=c&sp=r&se=2099-01-01T00:00:00Z&sig=x";
+    let ok = "sv=2021-08-06&sr=c&sp=r&se=2099-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = l.srv.send("GET", &format!("{}/errs?resource=filesystem&recursive=true&{ok}", l.dfs), &[], "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthorizationPermissionMismatch"));
     let r = l.srv.send("PUT", &format!("{}/errs/created?resource=file&{ok}", l.dfs), &[], "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthorizationPermissionMismatch"));
     // ownership and permission changes need `o` / `p`
     l.file("errs/f", "x").await;
-    let w = "sv=2021-08-06&sr=c&sp=rw&se=2099-01-01T00:00:00Z&sig=x";
+    let w = "sv=2021-08-06&sr=c&sp=rw&se=2099-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = l.srv.send("PATCH", &format!("{}/errs/f?action=setAccessControl&{w}", l.dfs), &[("x-ms-permissions", "0777")], "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthorizationPermissionMismatch"));
-    let wp = "sv=2021-08-06&sr=c&sp=rwp&se=2099-01-01T00:00:00Z&sig=x";
+    let wp = "sv=2021-08-06&sr=c&sp=rwp&se=2099-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = l.srv.send("PATCH", &format!("{}/errs/f?action=setAccessControl&{wp}", l.dfs), &[("x-ms-permissions", "0777")], "").await;
     assert_eq!(r.status, 200, "{}", r.text());
     let r = l.srv.send("PATCH", &format!("{}/errs/f?action=setAccessControl&{wp}", l.dfs), &[("x-ms-owner", "me")], "").await;
@@ -798,7 +800,9 @@ mod dev_account {
     #[tokio::test]
     async fn shared_key_on_the_dfs_endpoint() {
         let (srv, d, _) = dev().await;
-        let date = "Fri, 27 Mar 2026 01:00:51 GMT";
+        // a Shared Key request may not be more than 15 minutes old
+        let now = azemu_core::time::rfc1123(azemu_core::time::OffsetDateTime::now_utc());
+        let date = now.as_str();
         let h = |auth: &str| {
             vec![
                 ("Authorization".to_string(), auth.to_string()),
@@ -848,7 +852,8 @@ mod dev_account {
     #[tokio::test]
     async fn directory_sas_covers_the_directory_and_what_is_below_it() {
         let (srv, d, b) = dev().await;
-        let key = [("Authorization", format!("SharedKey {DEV_ACCOUNT}:c2ln"))];
+        // (a bearer token is not compared; a placeholder Shared Key signature is refused for the development account)
+        let key = [("Authorization", "Bearer token".to_string())];
         let k: Vec<(&str, &str)> = key.iter().map(|(a, b)| (*a, b.as_str())).collect();
         srv.send("PUT", &format!("{d}/sas?resource=filesystem"), &k, "").await;
         for p in ["d1/sub/f.txt", "d2/f.txt"] {

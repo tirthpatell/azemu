@@ -111,12 +111,13 @@ func TestQueue_DeadLetteringOnExpirationMovesAnExpiredMessageToTheDeadLetterQueu
 	}
 }
 
+// Azure takes a full address as ForwardTo (a bare name is "Absolute URI must be provided") and the target has to exist.
 func TestQueue_AutoForwardMovesMessagesToTheTargetQueue(t *testing.T) {
 	ctx := context.Background()
 	ns := newNS()
 	a := newAdmin(t, ns)
 	a.CreateQueue(ctx, "fwd-target", nil)
-	if _, err := a.CreateQueue(ctx, "fwd-source", &admin.CreateQueueOptions{Properties: &admin.QueueProperties{ForwardTo: ptr("fwd-target")}}); err != nil {
+	if _, err := a.CreateQueue(ctx, "fwd-source", &admin.CreateQueueOptions{Properties: &admin.QueueProperties{ForwardTo: ptr("sb://" + ns + ".servicebus.windows.net/fwd-target")}}); err != nil {
 		t.Fatal(err)
 	}
 	c := newClient(t, ns)

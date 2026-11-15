@@ -410,11 +410,12 @@ pub fn describe_core() {
     describe("AZEMU_ALLOW_ORIGIN", "none", "Let web pages from this origin, host or `*.suffix` use the emulator although they are on another site; `*` turns the cross-site check off (comma separated). Option: `--allow-origin`.");
     describe("AZEMU_TLS_NAME", "none", "Extra names the local CA may sign for, besides localhost and loopback addresses (comma separated). A different set makes a new CA. Option: `--tls-name`.");
     describe("AZEMU_DATA_DIR", "none (state is kept in memory only)", "Keep state between runs in this directory. Option: `--data-dir`.");
+    describe("AZEMU_SEED", "none", "A JSON file of things to create at start and again after every reset: blob containers, queues, tables, Cosmos databases and containers, Key Vault secrets, App Configuration key-values (`docs/seed.md`). Option: `--seed`.");
     describe("AZEMU_SAVE_INTERVAL", "15 (seconds)", "Seconds between saves of changed state when a data directory is set; 0 saves only on `POST /_azemu/save` and at shutdown. Option: `--save-interval`.");
     describe(
         "AZEMU_LOOSE_AUTH",
         "off",
-        "Skip the signature checks of storage requests (Shared Key and SAS) for the one account whose key is known, `devstoreaccount1`.",
+        "Check no signature of a storage request (Blob, Queue, Table, Data Lake): a Shared Key or SAS signature that is malformed (`replay`, `Sanitized`) or wrong passes, so does an old `x-ms-date`. Without it azemu refuses a malformed signature for every account and a wrong one for `devstoreaccount1`, as Azure does. It is for replaying recorded traffic. A warning at start says it is on.",
     );
     describe("AZEMU_STANDARD_PORTS", "off", "Open one fixed port per service next to the gateway port: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 8081 Cosmos, 5672 and 5671 AMQP (plain and TLS on both), 9093 Kafka, and 443 when the process may bind it (a warning when it may not). Option: `--standard-ports`.");
     describe(

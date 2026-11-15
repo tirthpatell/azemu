@@ -142,7 +142,11 @@ pub fn parse(text: &str) -> Option<Ts> {
             day = digits(s, &mut i, 2, 2)?;
         }
     }
-    if i < s.len() && s[i] == b'T' {
+    // the service reads only the forms with a `T` (`2007-02-23` and `2007-02` are refused, `2007-02-23T` is midnight)
+    if i >= s.len() || s[i] != b'T' {
+        return None;
+    }
+    {
         i += 1;
         if i < s.len() {
             hour = digits(s, &mut i, 2, 2)?;
@@ -201,22 +205,23 @@ pub fn parse(text: &str) -> Option<Ts> {
     Some(Ts::from_civil(&Civil { year: i64::from(year), month, day, hour, minute, second, nanos, offset_min: offset }))
 }
 
-/// `2007-02-23T12:14:33.079Z`: the fraction only when there is one (trailing zeros dropped), `Z` for UTC.
+/// `2007-02-23T12:14:33+00:00`: as the service writes a timestamp (checked against Azure in November 2026): no fraction of a
+/// second, and the offset always as `+hh:mm` (`+00:00` for UTC, not `Z`).
 pub fn format(t: &Ts) -> String {
     let c = t.civil();
-    let mut s = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", c.year, c.month, c.day, c.hour, c.minute, c.second);
-    if c.nanos != 0 {
-        let f = format!("{:09}", c.nanos);
-        s.push('.');
-        s.push_str(f.trim_end_matches('0'));
-    }
-    if c.offset_min == 0 {
-        s.push('Z');
-    } else {
-        let a = c.offset_min.abs();
-        s.push_str(&format!("{}{:02}:{:02}", if c.offset_min < 0 { '-' } else { '+' }, a / 60, a % 60));
-    }
-    s
+    let a = c.offset_min.abs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{}{:02}:{:02}",
+        c.year,
+        c.month,
+        c.day,
+        c.hour,
+        c.minute,
+        c.second,
+        if c.offset_min < 0 { '-' } else { '+' },
+        a / 60,
+        a % 60
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -416,14 +421,27 @@ mod tests {
 
     #[test]
     fn iso_8601_forms() {
-        assert_eq!(format(&p("2007T")), "2007-01-01T00:00:00Z");
-        assert_eq!(format(&p("2007-02T")), "2007-02-01T00:00:00Z");
-        assert_eq!(format(&p("2007-02-23")), "2007-02-23T00:00:00Z");
-        assert_eq!(format(&p("2007-02-23T12:14Z")), "2007-02-23T12:14:00Z");
-        assert_eq!(format(&p("2007-02-23T12:14:33.079Z")), "2007-02-23T12:14:33.079Z");
+        assert_eq!(format(&p("2007T")), "2007-01-01T00:00:00+00:00");
+        assert_eq!(format(&p("2007-02T")), "2007-02-01T00:00:00+00:00");
+        assert_eq!(format(&p("2007-02-23T")), "2007-02-23T00:00:00+00:00");
+        assert_eq!(format(&p("2007-02-23T12:14Z")), "2007-02-23T12:14:00+00:00");
+        // the fraction is not written (Azure answer for TO_TIMESTAMP('2007-02-23T12:14:33.079Z'))
+        assert_eq!(format(&p("2007-02-23T12:14:33.079Z")), "2007-02-23T12:14:33+00:00");
         assert_eq!(format(&p("2018-11-09T00:00+05:30")), "2018-11-09T00:00:00+05:30");
         assert_eq!(p("2018-11-09T00:00+05:30").secs, p("2018-11-08T18:30Z").secs);
-        for bad in ["", "abc", "2007-13", "2007-02-30", "2007-02-23T25:00", "2007-02-23T12", "2007-02-23T12:14X", "20070223"] {
+        for bad in [
+            "",
+            "abc",
+            "2007-13",
+            "2007-02-30",
+            "2007-02-23T25:00",
+            "2007-02-23T12",
+            "2007-02-23T12:14X",
+            "20070223",
+            "2007-02-23",
+            "2007-02",
+            "2007",
+        ] {
             assert!(parse(bad).is_none(), "{bad}");
         }
     }
@@ -431,7 +449,7 @@ mod tests {
     #[test]
     fn documented_examples() {
         // DATE_ADD('minute', 1, '2017-01-02T03:04:05.006Z')
-        assert_eq!(format(&add(Part::Minute, 1, &p("2017-01-02T03:04:05.006Z")).unwrap()), "2017-01-02T03:05:05.006Z");
+        assert_eq!(format(&add(Part::Minute, 1, &p("2017-01-02T03:04:05.006Z")).unwrap()), "2017-01-02T03:05:05+00:00");
         // DATE_DIFF('hour','2018-11-09T00:00+05:30','2018-11-09T01:00:23-08:00'): 00:00+05:30 is 18:30Z the day before,
         // 01:00:23-08:00 is 09:00:23Z: 14 hours and a bit
         assert_eq!(diff(Part::Hour, &p("2018-11-09T00:00+05:30"), &p("2018-11-09T01:00:23-08:00")), Some(14));
@@ -442,13 +460,13 @@ mod tests {
 
     #[test]
     fn month_arithmetic_clamps_and_counts_whole_months() {
-        assert_eq!(format(&add(Part::Month, 1, &p("2020-01-31")).unwrap()), "2020-02-29T00:00:00Z");
-        assert_eq!(format(&add(Part::Year, -1, &p("2020-02-29")).unwrap()), "2019-02-28T00:00:00Z");
-        assert_eq!(diff(Part::Month, &p("2020-01-31"), &p("2020-02-29")), Some(0));
-        assert_eq!(diff(Part::Month, &p("2020-01-15"), &p("2020-03-15")), Some(2));
-        assert_eq!(diff(Part::Year, &p("2000-06-01"), &p("2005-05-31")), Some(4));
-        assert_eq!(diff(Part::Year, &p("2005-05-31"), &p("2000-06-01")), Some(-4));
-        assert_eq!(diff(Part::Day, &p("2020-01-01"), &p("2020-01-03T23:00Z")), Some(2));
+        assert_eq!(format(&add(Part::Month, 1, &p("2020-01-31T")).unwrap()), "2020-02-29T00:00:00+00:00");
+        assert_eq!(format(&add(Part::Year, -1, &p("2020-02-29T")).unwrap()), "2019-02-28T00:00:00+00:00");
+        assert_eq!(diff(Part::Month, &p("2020-01-31T"), &p("2020-02-29T")), Some(0));
+        assert_eq!(diff(Part::Month, &p("2020-01-15T"), &p("2020-03-15T")), Some(2));
+        assert_eq!(diff(Part::Year, &p("2000-06-01T"), &p("2005-05-31T")), Some(4));
+        assert_eq!(diff(Part::Year, &p("2005-05-31T"), &p("2000-06-01T")), Some(-4));
+        assert_eq!(diff(Part::Day, &p("2020-01-01T"), &p("2020-01-03T23:00Z")), Some(2));
         assert_eq!(diff(Part::Second, &p("2020-01-01T00:00:01Z"), &p("2020-01-01T00:00:00Z")), Some(-1));
     }
 

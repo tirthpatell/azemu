@@ -138,6 +138,18 @@ impl Service for IdentityService {
         vec![Mount::Host("login"), Mount::PathPrefix("/_azemu/identity"), Mount::PathPrefix("/metadata/identity")]
     }
 
+    /// The Entra paths at the root of a host that names no service, so that `AZURE_AUTHORITY_HOST=https://localhost:4577`
+    /// works for the SDKs that drop a path from the authority (Rust `azure_identity`).
+    fn claims_root_path(&self, path: &str) -> bool {
+        let lower: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(|s| s.to_ascii_lowercase()).collect();
+        let l: Vec<&str> = lower.iter().map(String::as_str).collect();
+        entra_route(&l).is_some() && tenant_ok(l[0])
+    }
+
+    fn root_path_forms(&self) -> Vec<&'static str> {
+        vec!["/{tenant}/oauth2/v2.0/token", "/{tenant}/v2.0/.well-known/openid-configuration"]
+    }
+
     /// Token requests are small forms; Azure documents no body limit. 1 MiB is generous.
     fn max_body_bytes(&self, _method: &azemu_core::http::Method, _path: &str) -> Option<usize> {
         Some(1024 * 1024)
@@ -177,6 +189,25 @@ impl Service for IdentityService {
     }
 }
 
+/// The Entra endpoint a lower-case path names, as (endpoint name, v1). The tenant is the first segment.
+fn entra_route<'a>(l: &[&str]) -> Option<(&'a str, bool)> {
+    match l {
+        [_, "discovery", "instance"] => Some(("instance", false)),
+        [_, "discovery", "keys"] | [_, "discovery", "v2.0", "keys"] => Some(("keys", false)),
+        [_, ".well-known", "openid-configuration"] => Some(("config", true)),
+        [_, "v2.0", ".well-known", "openid-configuration"] => Some(("config", false)),
+        [_, "oauth2", "token"] => Some(("token", true)),
+        [_, "oauth2", "v2.0", "token"] => Some(("token", false)),
+        [_, "oauth2", "devicecode"] => Some(("devicecode", true)),
+        [_, "oauth2", "v2.0", "devicecode"] => Some(("devicecode", false)),
+        [_, "oauth2", "authorize"] => Some(("authorize", true)),
+        [_, "oauth2", "v2.0", "authorize"] => Some(("authorize", false)),
+        [_, "oauth2", "deviceauth"] => Some(("deviceauth", false)),
+        [_, "userrealm", _] => Some(("userrealm", false)),
+        _ => None,
+    }
+}
+
 fn tenant_ok(t: &str) -> bool {
     !t.is_empty() && t.len() <= 256 && t.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
@@ -188,23 +219,8 @@ impl IdentityService {
         let l: Vec<&str> = lower.iter().map(String::as_str).collect();
         let m = req.method.as_str();
         let get = m == "GET" || m == "HEAD";
-        // (tenant, v1, endpoint name)
         let tenant = *segs.first().unwrap_or(&"");
-        let route: Option<(&str, bool)> = match l.as_slice() {
-            [_, "discovery", "instance"] => Some(("instance", false)),
-            [_, "discovery", "keys"] | [_, "discovery", "v2.0", "keys"] => Some(("keys", false)),
-            [_, ".well-known", "openid-configuration"] => Some(("config", true)),
-            [_, "v2.0", ".well-known", "openid-configuration"] => Some(("config", false)),
-            [_, "oauth2", "token"] => Some(("token", true)),
-            [_, "oauth2", "v2.0", "token"] => Some(("token", false)),
-            [_, "oauth2", "devicecode"] => Some(("devicecode", true)),
-            [_, "oauth2", "v2.0", "devicecode"] => Some(("devicecode", false)),
-            [_, "oauth2", "authorize"] => Some(("authorize", true)),
-            [_, "oauth2", "v2.0", "authorize"] => Some(("authorize", false)),
-            [_, "oauth2", "deviceauth"] => Some(("deviceauth", false)),
-            [_, "userrealm", _] => Some(("userrealm", false)),
-            _ => None,
-        };
+        let route = entra_route(&l);
         let Some((name, v1)) = route else {
             return not_built(req);
         };

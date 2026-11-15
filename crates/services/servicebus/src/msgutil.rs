@@ -19,6 +19,37 @@ pub fn message_id_string(m: &Message) -> Option<String> {
     })
 }
 
+/// Application property names are not case sensitive on Azure: properties whose names differ only in case are one property, which
+/// keeps the first spelling and the last value.
+pub fn merge_property_names(m: &mut Message) {
+    let Some(props) = m.application_properties.as_mut() else { return };
+    let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::with_capacity(props.len());
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(props.len());
+    for (k, v) in props.drain(..) {
+        if let Some(name) = k.as_str() {
+            match seen.entry(name.to_lowercase()) {
+                std::collections::hash_map::Entry::Occupied(e) => {
+                    out[*e.get()].1 = v;
+                    continue;
+                }
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(out.len());
+                }
+            }
+        }
+        out.push((k, v));
+    }
+    *props = out;
+}
+
+/// A message that asks for a time to live of zero is refused when it is sent.
+pub fn check_time_to_live(m: &Message) -> Result<(), crate::errors::SbError> {
+    match m.header.as_ref().and_then(|h| h.ttl) {
+        Some(0) => Err(crate::errors::SbError::zero_time_to_live()),
+        _ => Ok(()),
+    }
+}
+
 /// min(message ttl, entity default), None when neither is set.
 pub(crate) fn effective_ttl(m: &Message, default_ttl: Option<i64>) -> Option<i64> {
     let msg_ttl = m.header.as_ref().and_then(|h| h.ttl).filter(|t| *t > 0).map(|t| t as i64);
@@ -67,11 +98,13 @@ pub(crate) fn apply_modifications(m: &mut Message, modify: Option<Vec<(Value, Va
     }
 }
 
-/// `x-opt-message-state` of a message: 0 active, 1 deferred, 2 scheduled.
+/// `x-opt-message-state` of a message: 0 active, 1 deferred, 2 scheduled. A message that was scheduled is still `Scheduled`
+/// after it arrived (Azure shows it so, to a receiver and to a peek).
 pub fn state_code(m: &Msg) -> i32 {
     match m.state {
         MsgState::Deferred => 1,
         MsgState::Scheduled => 2,
+        _ if m.scheduled_ms.is_some() => 2,
         _ => 0,
     }
 }
@@ -97,8 +130,10 @@ pub fn render(m: &Msg, state_annotation: Option<i32>) -> Message {
     }
     out.set_annotation(ANN_ENQUEUED_TIME, Value::Timestamp(m.enqueued_ms));
     out.set_annotation(ANN_SEQUENCE_NUMBER, Value::Long(m.seq as i64));
-    // 0 for a message sent straight to this entity, the first sequence number for a forwarded one
-    out.set_annotation(ANN_ENQUEUE_SEQUENCE_NUMBER, Value::Long(m.enq_seq as i64));
+    // Azure sets it only on a message that came through a topic: the topic's sequence number
+    if m.enq_seq != 0 {
+        out.set_annotation(ANN_ENQUEUE_SEQUENCE_NUMBER, Value::Long(m.enq_seq as i64));
+    }
     if let Some(l) = &m.lock {
         if !l.via_session {
             out.set_annotation(ANN_LOCKED_UNTIL, Value::Timestamp(l.until_ms));

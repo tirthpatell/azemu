@@ -1489,9 +1489,14 @@ class TestPackageSettings:
         return next(p for p in run_all.PACKAGES if p.name == name)
 
     def test_each_package_names_the_settings_it_needs_and_why(self):
-        assert self.pkg("blob").env == {"AZEMU_BLOB_VERSIONING": "1"} and self.pkg("blob").why
+        assert self.pkg("blob").env == {"AZEMU_BLOB_VERSIONING": "1", "AZEMU_LOOSE_AUTH": "1"} and self.pkg("blob").why
         assert self.pkg("eventgrid").env == {"AZEMU_EVENTGRID_AUTOCREATE": "1"} and self.pkg("eventgrid").why
-        for name in ("queue", "table", "keyvault-secrets", "keyvault-keys", "keyvault-certificates", "appconfig", "servicebus", "datalake", "arm"):
+        # the storage recordings carry placeholder signatures and old dates, which azemu refuses unless told otherwise
+        for name in ("queue", "table", "datalake"):
+            assert self.pkg(name).env == {"AZEMU_LOOSE_AUTH": "1"} and self.pkg(name).why, name
+        # the Service Bus recordings come from a Standard namespace
+        assert self.pkg("servicebus").env == {"AZEMU_SERVICEBUS_TIER": "standard"} and self.pkg("servicebus").why
+        for name in ("keyvault-secrets", "keyvault-keys", "keyvault-certificates", "appconfig", "arm"):
             assert self.pkg(name).env == {}, name
         assert all("AZEMU_LENIENT" not in p.env for p in run_all.PACKAGES), "one switch for everything would hide which convenience a score needs"
 

@@ -149,9 +149,10 @@ async fn table_sas_validity_and_binding() {
         async move { with_sas(e, "GET", P, &t, "").await }
     };
     let expired = get(TableSas { table: "tbl", sp: "r", st: "2000-01-01T00:00:00Z", se: PAST, ..Default::default() }.token()).await;
-    assert_eq!((expired.status, code(&expired).as_str()), (403, "AuthorizationFailure"));
+    // every window that is not now is 403 AuthenticationFailed on Azure (checked in November 2026)
+    assert_eq!((expired.status, code(&expired).as_str()), (403, "AuthenticationFailed"));
     let early = get(TableSas { table: "tbl", sp: "r", st: "2098-01-01T00:00:00Z", se: FUTURE, ..Default::default() }.token()).await;
-    assert_eq!((early.status, code(&early).as_str()), (403, "AuthorizationFailure"));
+    assert_eq!((early.status, code(&early).as_str()), (403, "AuthenticationFailed"));
     let https_only = get(TableSas { table: "tbl", sp: "r", se: FUTURE, spr: "https", ..Default::default() }.token()).await;
     assert_eq!((https_only.status, code(&https_only).as_str()), (403, "AuthorizationProtocolMismatch"));
     // a SAS for another table
@@ -168,9 +169,19 @@ async fn table_sas_validity_and_binding() {
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
     let r = get(good.replace("sp=r", "sp=rau")).await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
-    // a placeholder signature (as in recorded traffic) is not checked
+    // a placeholder signature (as in recorded traffic) is refused, whatever the account; so is an `sv` Azure does not take
     let r = get("sv=Sanitized&se=Sanitized&sp=r&tn=tbl&sig=Sanitized".to_string()).await;
-    assert_eq!(r.status, 200);
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
+    let sig = "A".repeat(43) + "%3D";
+    for bad in [
+        format!("sv=2019-02-02&se={FUTURE}&sp=r&tn=tbl&sig=Sanitized"),
+        format!("sv=2019-02-02&se={FUTURE}&sp=r&tn=tbl&sig="),
+        format!("sv=2099-01-01&se={FUTURE}&sp=r&tn=tbl&sig={sig}"),
+        format!("sv=banana&se={FUTURE}&sp=r&tn=tbl&sig={sig}"),
+    ] {
+        let r = get(bad.clone()).await;
+        assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"), "{bad}");
+    }
 }
 
 #[tokio::test]
@@ -239,7 +250,7 @@ async fn account_sas() {
     // expiry and tampering
     let old = account_token("r", "t", "o", PAST);
     let r = with_sas(&e, "GET", "/tbl()", &old, "").await;
-    assert_eq!((r.status, code(&r).as_str()), (403, "AuthorizationFailure"));
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
     let r = with_sas(&e, "GET", "/tbl()", &o.replace("sp=r", "sp=rau"), "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
     // access policies are not available through an account SAS
@@ -274,6 +285,21 @@ async fn signatures_are_only_checked_for_the_development_account() {
     let other = env().await;
     other.create_table("tbl").await;
     assert_eq!(with_sas(&other, "GET", "/tbl()", &forged, "").await.status, 200);
+    // `sip`: a caller that is not that address is 403 AuthorizationFailure; one that is, passes (the caller is 127.0.0.1)
+    let sig = "A".repeat(43) + "%3D";
+    let r = with_sas(&other, "GET", "/tbl()", &format!("sv=2019-02-02&se={}&sp=r&tn=tbl&sip=203.0.113.9&sig={sig}", pct(FUTURE)), "").await;
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthorizationFailure"));
+    let r = with_sas(&other, "GET", "/tbl()", &format!("sv=2019-02-02&se={}&sp=r&tn=tbl&sip=banana&sig={sig}", pct(FUTURE)), "").await;
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
+    let r = with_sas(
+        &other,
+        "GET",
+        "/tbl()",
+        &format!("sv=2019-02-02&se={}&sp=r&tn=tbl&sip=127.0.0.0-127.255.255.255&sig={sig}", pct(FUTURE)),
+        "",
+    )
+    .await;
+    assert_eq!(r.status, 200);
     // the development account: the well-known key is checked
     let dev = seeded().await;
     let r = with_sas(&dev, "GET", "/tbl()", &forged, "").await;

@@ -103,13 +103,65 @@ async fn a_bad_message_is_refused_and_nothing_is_stored() {
     let n = m.len();
     m[n - 1] ^= 1;
     assert_eq!(code(&put(m, "1000").await), "Crc64Mismatch");
-    // Not a message at all (the plain data): 400 naming the header.
+    // Azure's text for a bad CRC (November 2026)
+    let mut m = message(&data, 400);
+    m[13 + 10 + 5] ^= 1;
+    assert!(put(m, "1000").await.text().contains("The CRC64 value specified in the request did not match"));
+    // Not a message at all (the plain data): `InvalidStructuredMessage`, as for every wrong layout (Azure, November 2026).
     let r = put(data.clone(), "1000").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidInput"));
-    assert!(r.text().contains("x-ms-structured-body"), "{}", r.text());
-    // Wrong content length.
-    let r = put(message(&data, 400), "999").await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidStructuredMessage"));
+    assert!(r.text().contains("The Structured Message was not valid."), "{}", r.text());
+    // A wrong layout: version, total length, flags, segment number, segment length, bytes after the trailer.
+    let one = message(&data, 4000);
+    let mut cases: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut m = one.clone();
+    m[0] = 2;
+    cases.push(("version 2", m));
+    let mut m = one.clone();
+    m[1] += 1;
+    cases.push(("total one too large", m));
+    let mut m = one.clone();
+    m[1] -= 1;
+    cases.push(("total one too small", m));
+    for flags in [0u8, 2] {
+        let mut m = one.clone();
+        m[9] = flags;
+        cases.push(("flags", m));
+    }
+    let mut m = one.clone();
+    m[13] = 2;
+    cases.push(("segment number 2", m));
+    let mut m = one.clone();
+    m[15..23].copy_from_slice(&2000u64.to_le_bytes());
+    cases.push(("segment length too large", m));
+    // one byte short: the layout is wrong before the CRC is looked at (Crc64Mismatch would be wrong here)
+    let mut m = one.clone();
+    m[15..23].copy_from_slice(&999u64.to_le_bytes());
+    cases.push(("segment length 1 short", m));
+    let mut m = one.clone();
+    m.extend_from_slice(&[0, 0]);
+    m[1] += 2;
+    cases.push(("two bytes after the trailer", m));
+    for (what, m) in cases {
+        let r = put(m, "1000").await;
+        assert_eq!((r.status, code(&r).as_str()), (400, "InvalidStructuredMessage"), "{what}");
+    }
+    // A body too short to be a message: the length header is refused (Azure: a 5 byte body with the value 5).
+    let r = put(vec![1, 0, 0, 0, 0], "5").await;
     assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
+    // Wrong content length for a good message.
+    let r = put(message(&data, 400), "999").await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidStructuredMessage"));
+    // Credentials come first: a broken message without credentials is 401, with a wrong signature 403, not 400.
+    let r = e
+        .anon(
+            "PUT",
+            "/cnt/b",
+            &[("x-ms-blob-type", "BlockBlob"), ("x-ms-structured-body", XSM), ("x-ms-structured-content-length", "1000")],
+            data.clone(),
+        )
+        .await;
+    assert_eq!(r.status, 401, "{}", r.text());
     // Unknown schema.
     let r = e
         .send(

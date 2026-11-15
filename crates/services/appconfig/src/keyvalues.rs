@@ -115,7 +115,9 @@ fn opt_string(v: Option<&Value>, name: &str) -> Result<Option<String>, Response>
     match v {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
-        Some(_) => Err(errors::invalid_body(&format!("'{name}' must be a string or null."))),
+        // a number is stored as its text (tried in November 2026)
+        Some(Value::Number(n)) if name == "value" => Ok(Some(n.to_string())),
+        Some(_) => Err(errors::invalid_body(name)),
     }
 }
 
@@ -123,10 +125,10 @@ fn parse_body(req: &Request) -> Result<Body, Response> {
     let v: Value = if req.body.iter().all(|b| b.is_ascii_whitespace()) {
         Value::Object(Default::default())
     } else {
-        serde_json::from_slice(&req.body).map_err(|e| errors::invalid_body(&format!("The body is not valid JSON: {e}")))?
+        serde_json::from_slice(&req.body).map_err(|_| errors::invalid_body("key"))?
     };
     let Value::Object(m) = v else {
-        return Err(errors::invalid_body("The body must be a JSON object."));
+        return Err(errors::invalid_body("key"));
     };
     let mut tags = Vec::new();
     match m.get("tags") {
@@ -135,11 +137,11 @@ fn parse_body(req: &Request) -> Result<Body, Response> {
             for (k, v) in t {
                 match v {
                     Value::String(s) => tags.push((k.clone(), s.clone())),
-                    _ => return Err(errors::invalid_body("Tag values must be strings.")),
+                    _ => return Err(errors::invalid_body("tags")),
                 }
             }
         }
-        Some(_) => return Err(errors::invalid_body("'tags' must be an object.")),
+        Some(_) => return Err(errors::invalid_body("tags")),
     }
     Ok(Body {
         value: opt_string(m.get("value"), "value")?,
@@ -149,22 +151,37 @@ fn parse_body(req: &Request) -> Result<Body, Response> {
     })
 }
 
+/// Does the `Content-Type` of a write say JSON? One that is missing passes; `text/plain` and the like are `415`.
+fn is_json(req: &Request) -> bool {
+    match req.header("content-type") {
+        None => true,
+        Some(c) => {
+            let main = c.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            main == "application/json" || main.ends_with("+json") || main.is_empty()
+        }
+    }
+}
+
 pub fn put(store: &mut Store, req: &Request) -> Response {
     let key = match key_from_path(req, "kv") {
         Ok(k) => k,
         Err(r) => return r,
     };
     let label = label_param(req);
+    if !is_json(req) {
+        return errors::unsupported_media_type(&req.ctx.request_id);
+    }
     let body = match parse_body(req) {
         Ok(b) => b,
         Err(r) => return r,
     };
     let existing = store.live_get(&key, label.as_deref());
-    if !matches!(conditions(req).evaluate(resource(existing), Access::Write), Outcome::Proceed) {
-        return errors::precondition_failed();
-    }
+    // a locked key says so before a condition that fails is looked at (tried in November 2026)
     if existing.map(|e| e.locked).unwrap_or(false) {
         return errors::key_locked(&key);
+    }
+    if !matches!(conditions(req).evaluate(resource(existing), Access::Write), Outcome::Proceed) {
+        return errors::precondition_failed();
     }
     let written = store.write(
         NewSetting {
@@ -194,11 +211,11 @@ pub fn delete(store: &mut Store, req: &Request) -> Response {
     if existing.is_none() && req.header("if-match").is_none() {
         return Resp::new(204u16).header("Content-Type", KV_CT).build();
     }
-    if !matches!(conditions(req).evaluate(resource(existing), Access::Write), Outcome::Proceed) {
-        return errors::precondition_failed();
-    }
     if existing.map(|e| e.locked).unwrap_or(false) {
         return errors::key_locked(&key);
+    }
+    if !matches!(conditions(req).evaluate(resource(existing), Access::Write), Outcome::Proceed) {
+        return errors::precondition_failed();
     }
     match store.delete(&key, label.as_deref(), req.ctx.time) {
         Some(s) => kv_response(200, &s, None, auth::is_newer(auth::version(req))),

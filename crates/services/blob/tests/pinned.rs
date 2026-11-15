@@ -17,9 +17,9 @@ async fn path_style_account_on_a_pinned_port() {
         .await
         .expect("start");
     let addr = emu.pinned_addr("blob").expect("pinned address");
-    let base = format!("http://{addr}/devstoreaccount1");
+    let base = format!("http://{addr}/pinacct");
     let c = Client::new();
-    let auth = [("Authorization", "SharedKey devstoreaccount1:c2ln")];
+    let auth = [("Authorization", "SharedKey pinacct:c2ln")];
 
     assert_eq!(c.send("PUT", &format!("{base}/pinc?restype=container"), &auth, "").await.status, 201);
     let r = c.send("PUT", &format!("{base}/pinc/dir/blob.txt"), &[auth[0], ("x-ms-blob-type", "BlockBlob")], "pinned").await;
@@ -29,7 +29,7 @@ async fn path_style_account_on_a_pinned_port() {
 
     // URLs in listings are the path-style URLs the client used
     let r = c.send("GET", &format!("{base}/pinc?restype=container&comp=list"), &auth, "").await;
-    assert!(r.text().contains(&format!("ServiceEndpoint=\"http://{addr}/devstoreaccount1/\"")), "{}", r.text());
+    assert!(r.text().contains(&format!("ServiceEndpoint=\"http://{addr}/pinacct/\"")), "{}", r.text());
     assert!(r.text().contains("<Name>dir/blob.txt</Name>"));
     let r = c.send("GET", &format!("{base}?comp=list"), &auth, "").await;
     assert!(r.text().contains("<Name>pinc</Name>"));
@@ -47,7 +47,7 @@ async fn path_style_account_on_a_pinned_port() {
 
     // a batch sub-request path carries the account in path style
     let boundary = "batch_pin";
-    let body = format!("--{boundary}\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nDELETE /devstoreaccount1/pinc/copy HTTP/1.1\r\nAuthorization: SharedKey devstoreaccount1:c2ln\r\nContent-Length: 0\r\n\r\n\r\n--{boundary}--\r\n");
+    let body = format!("--{boundary}\r\nContent-Type: application/http\r\nContent-ID: 0\r\n\r\nDELETE /pinacct/pinc/copy HTTP/1.1\r\nAuthorization: SharedKey pinacct:c2ln\r\nContent-Length: 0\r\n\r\n\r\n--{boundary}--\r\n");
     let ct = format!("multipart/mixed; boundary={boundary}");
     let r = c.send("POST", &format!("{base}/pinc?restype=container&comp=batch"), &[auth[0], ("Content-Type", &ct)], body).await;
     assert_eq!(r.status, 202);
@@ -55,7 +55,7 @@ async fn path_style_account_on_a_pinned_port() {
     assert_eq!(c.send("GET", &format!("{base}/pinc/copy"), &auth, "").await.status, 404);
 
     // SAS works the same on the pinned listener
-    let sas = "sv=2021-08-06&sr=b&sp=r&se=2099-01-01T00:00:00Z&sig=x";
+    let sas = "sv=2021-08-06&sr=b&sp=r&se=2099-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = c.send("GET", &format!("{base}/pinc/dir/blob.txt?{sas}"), &[], "").await;
     assert_eq!((r.status, r.text().as_str()), (200, "pinned"));
 

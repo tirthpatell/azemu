@@ -28,6 +28,18 @@ def client(request, emu, hub, track):
     return track(make_consumer(emu, hub))
 
 
+@pytest.fixture(params=["producer", "consumer"])
+def fresh_client(request, emu, fresh_hub, track):
+    """Like `client`, on a hub nothing was ever sent to (the shared hubs of an Azure run are not empty)."""
+    if request.param == "producer":
+        return track(make_producer(emu, fresh_hub))
+    return track(make_consumer(emu, fresh_hub))
+
+
+def last_enqueued(client, pids=None):
+    return {p: client.get_partition_properties(p)["last_enqueued_sequence_number"] for p in (pids or client.get_partition_ids())}
+
+
 # -- event hub ------------------------------------------------------------------------------------------------------
 def test_eventhub_properties_name_and_partition_ids(client, hub):
     props = client.get_eventhub_properties()
@@ -87,25 +99,25 @@ def test_partition_properties_name_and_id(client, hub):
     assert props["id"] == "2"
 
 
-def test_empty_partition_is_empty(client):
-    props = client.get_partition_properties("0")
+def test_empty_partition_is_empty(fresh_client):
+    props = fresh_client.get_partition_properties("0")
     assert props["is_empty"] is True
     assert isinstance(props["last_enqueued_offset"], str)
 
 
-def test_empty_partition_sequence_numbers_are_minus_one(client):
+def test_empty_partition_sequence_numbers_are_minus_one(fresh_client):
     # ASSUMED (see docs/sdk-notes.md): a partition that never held an event reports -1; the SDK only documents the "no time" sentinel.
-    props = client.get_partition_properties("0")
+    props = fresh_client.get_partition_properties("0")
     assert props["last_enqueued_sequence_number"] == -1
 
 
-def test_empty_partition_last_enqueued_time_is_the_no_time_sentinel(client):
+def test_empty_partition_last_enqueued_time_is_the_no_time_sentinel(fresh_client):
     # The SDK maps the AMQP "never" timestamp (year 1) to datetime.min (utils.utc_from_timestamp); ASSUMED that the service sends it.
-    assert client.get_partition_properties("0")["last_enqueued_time_utc"] == datetime.min.replace(tzinfo=timezone.utc)
+    assert fresh_client.get_partition_properties("0")["last_enqueued_time_utc"] == datetime.min.replace(tzinfo=timezone.utc)
 
 
-def test_all_partitions_of_a_fresh_hub_are_empty(client):
-    assert all(client.get_partition_properties(p)["is_empty"] for p in client.get_partition_ids())
+def test_all_partitions_of_a_fresh_hub_are_empty(fresh_client):
+    assert all(fresh_client.get_partition_properties(p)["is_empty"] for p in fresh_client.get_partition_ids())
 
 
 def test_partition_is_not_empty_after_a_send(emu, hub, producer):
@@ -115,9 +127,12 @@ def test_partition_is_not_empty_after_a_send(emu, hub, producer):
 
 
 def test_only_the_partition_that_received_events_is_not_empty(emu, hub, producer):
+    # (on a shared hub other partitions may hold older events, so look at what changed)
+    before = last_enqueued(producer)
     send_n(producer, 2, partition_id="2")
-    empties = {p: producer.get_partition_properties(p)["is_empty"] for p in producer.get_partition_ids()}
-    assert empties == {"0": True, "1": True, "2": False, "3": True}
+    after = last_enqueued(producer)
+    assert {p: after[p] - before[p] for p in after} == {"0": 0, "1": 0, "2": 2, "3": 0}
+    assert producer.get_partition_properties("2")["is_empty"] is False
 
 
 def test_last_enqueued_values_match_the_last_event(emu, hub, producer):
@@ -133,7 +148,11 @@ def test_last_enqueued_values_match_the_last_event(emu, hub, producer):
 def test_beginning_sequence_number_is_the_first_events_sequence_number(emu, hub, producer):
     send_n(producer, 3, partition_id="0")
     events = read_from_start(emu, hub, 3, partition_id="0")
-    assert producer.get_partition_properties("0")["beginning_sequence_number"] == events[0].sequence_number
+    begin = producer.get_partition_properties("0")["beginning_sequence_number"]
+    if ehutil.baseline_of(hub, "0") == -1:  # nothing was in the partition before this test
+        assert begin == events[0].sequence_number
+    else:  # a shared hub: older events are still retained
+        assert begin <= events[0].sequence_number
 
 
 def test_last_enqueued_sequence_number_advances_with_each_event(emu, hub, producer):
@@ -144,9 +163,12 @@ def test_last_enqueued_sequence_number_advances_with_each_event(emu, hub, produc
 
 
 def test_sequence_span_equals_event_count_minus_one(emu, hub, producer):
+    before = last_enqueued(producer, ["1"])["1"]
     send_n(producer, 7, partition_id="1")
     props = producer.get_partition_properties("1")
-    assert props["last_enqueued_sequence_number"] - props["beginning_sequence_number"] == 6
+    assert props["last_enqueued_sequence_number"] - before == 7
+    if before == -1:
+        assert props["last_enqueued_sequence_number"] - props["beginning_sequence_number"] == 6
 
 
 def test_last_enqueued_time_is_recent_and_in_utc(emu, hub, producer):
@@ -157,17 +179,46 @@ def test_last_enqueued_time_is_recent_and_in_utc(emu, hub, producer):
 
 
 def test_partition_properties_seen_by_consumer_client_after_producer_send(emu, hub, producer, track):
+    before = last_enqueued(producer, ["2"])["2"]
     send_n(producer, 4, partition_id="2")
     consumer = track(make_consumer(emu, hub))
     props = consumer.get_partition_properties("2")
     assert props["is_empty"] is False
-    assert props["last_enqueued_sequence_number"] - props["beginning_sequence_number"] == 3
+    assert props["last_enqueued_sequence_number"] - before == 4
 
 
 def test_last_enqueued_offset_is_a_string_of_digits_after_a_send(emu, hub, producer):
     send_n(producer, 1, partition_id="0")
     off = producer.get_partition_properties("0")["last_enqueued_offset"]
     assert isinstance(off, str) and off.lstrip("-").isdigit()
+
+
+# -- the reply as it comes off the wire ----------------------------------------------------------------------------------------
+def test_eventhub_reply_keys_and_types(emu, hub, producer):
+    # Checked against Azure: the keys and the Python types the SDKs read
+    info = ehutil.raw_management_reply(producer)
+    assert info[b"name"] == hub.encode()
+    assert info[b"type"] == b"com.microsoft:eventhub"
+    assert info[b"partition_count"] == 4 and info[b"partition_ids"] == [b"0", b"1", b"2", b"3"]
+    assert isinstance(info[b"created_at"], int)  # milliseconds since 1970
+    assert info[b"georeplication_factor"] == 1
+
+
+def test_empty_partition_reply_values(emu, fresh_hub, track):
+    # The values of a partition that never held an event; Azure answers exactly these (the docs left them open)
+    info = ehutil.raw_management_reply(track(make_producer(emu, fresh_hub)), "0")
+    assert info[b"type"] == b"com.microsoft:partition" and info[b"partition"] == b"0"
+    assert info[b"begin_sequence_number"] == -1 and info[b"last_enqueued_sequence_number"] == -1
+    assert info[b"last_enqueued_offset"] == b"-1"
+    assert info[b"last_enqueued_time_utc"] == -62135596800000  # 0001-01-01
+    assert info[b"is_partition_empty"] is True
+
+
+def test_partition_reply_epoch_fields(emu, hub, producer):
+    # both are -1 on a real namespace (November 2026); the Rust SDK reads last_enqueued_sequence_number_epoch
+    info = ehutil.raw_management_reply(producer, "0")
+    assert info[b"begin_sequence_number_epoch"] == -1
+    assert info[b"last_enqueued_sequence_number_epoch"] == -1
 
 
 # -- errors ---------------------------------------------------------------------------------------------------------------

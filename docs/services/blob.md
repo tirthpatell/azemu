@@ -6,9 +6,10 @@ Contents`). The Data Lake Gen2 `dfs` endpoint is served by the same crate over t
 
 **How to reach it.** `http(s)://{account}.blob.core.localhost:4577/{container}/{blob}` (any account name works without being created first). With
 `--standard-ports`: `http://azemu:10000/{account}/{container}/{blob}`, the Azurite address, and `UseDevelopmentStorage=true` works. From a container or
-from a Windows or macOS machine, use the standard ports (`docs/reaching-the-emulator.md`).
+from a Windows or macOS machine, use the standard ports (`docs/reaching-the-emulator.md`). A container exists only after something creates it, as on Azure: the
+application, a test, or a seed file (`--seed`, [`docs/seed.md`](../seed.md)) that makes the containers at start and after every reset.
 
-**Not built.** Rename Container, Create Container Session, Incremental Copy (501); quick query with Parquet input or Arrow output (501); Arrow listings; Set Blob
+**Not built.** Rename Container, Create Container Session, Incremental Copy (501); quick query with a real Parquet file as input, and Arrow output (501; any other blob sent as Parquet gets Azure's 400); Arrow listings; Set Blob
 Expiry on a flat container; encryption (a customer-provided key is checked and its hash stored, nothing is encrypted); object replication, container-level
 immutability, account-level soft delete; a static website endpoint; throttling. Signatures are verified only for `devstoreaccount1`. Blob versioning is off
 until it is turned on (see "Known differences").
@@ -76,7 +77,7 @@ port.
 | Get Account Information | `GET`/`HEAD ...?restype=account&comp=properties` | built (fixed `StorageV2` / `Standard_RAGRS`) |
 | Find Blobs by Tags (account, container) with the tag filter grammar | `GET /?comp=blobs`, `GET /{c}?restype=container&comp=blobs` | built |
 | Blob Batch (Delete Blob, Set Blob Tier sub-requests) | `POST /?comp=batch`, `POST /{c}?restype=container&comp=batch` | built; the answer is laid out as Azure writes it: a part without a body is the headers and one blank line, then the next delimiter; a part with a body has the body and a line break; no line break after the closing delimiter (the Java batch client fails every part otherwise) |
-| CORS preflight | `OPTIONS` | built on the `blob` and `dfs` endpoints with the shared code `azemu_core::storage::cors` (as Queue and Table): rules from the service properties, origin compared as written (case sensitive) with `*` and `http://*.contoso.com` patterns, no credentials needed, `403 CorsPreflightFailure` / `400 MissingRequiredHeader`; the same code adds the `Access-Control-*` headers to an actual request with a matching `Origin` |
+| CORS preflight | `OPTIONS` | built on the `blob` and `dfs` endpoints with the shared code `azemu_core::storage::cors` (as Queue and Table): rules from the service properties, origin compared as written (case sensitive) with `*` and `http://*.contoso.com` patterns, no credentials needed, `403 CorsPreflightFailure` / `400 InvalidHeaderValue` (checked against Azure in November 2026, with Azure's `MessageDetails`); the same code adds the `Access-Control-*` headers to an actual request with a matching `Origin` |
 | Create / Delete Container | `PUT`/`DELETE /{c}?restype=container` | built |
 | Get Container Properties / Metadata, Set Container Metadata | `GET`/`HEAD`/`PUT /{c}?restype=container[&comp=metadata]` | built |
 | Get / Set Container ACL (public access, up to 5 stored access policies) | `GET`/`PUT /{c}?restype=container&comp=acl` | built |
@@ -101,7 +102,7 @@ port.
 | Append Block, Append Block From URL, Append Blob Seal | `PUT ...?comp=appendblock`, `comp=seal` | built |
 | Put Page (update, clear), Put Page From URL, Get Page Ranges (and diff against a snapshot, paging) | `PUT ...?comp=page`, `GET ...?comp=pagelist` | built |
 | Set / Delete Immutability Policy, Set Legal Hold | `PUT`/`DELETE ...?comp=immutabilityPolicies`, `PUT ...?comp=legalhold` | built (enforced on delete and overwrite) |
-| Query Blob Contents (quick query: a SQL `SELECT` over a block blob, CSV and JSON in and out, answered as an Avro stream of data, progress and error records; conditions, lease, snapshot, version, customer-provided key) | `POST ...?comp=query` | built, except Parquet input and Arrow output (`501`, naming them); bounded by blob size, record size, answer size, time and four queries at once. See `docs/services/blob-query.md` |
+| Query Blob Contents (quick query: a SQL `SELECT` over a block blob, CSV and JSON in and out, answered as an Avro stream of data, progress and error records; conditions, lease, snapshot, version, customer-provided key) | `POST ...?comp=query` | built, except Parquet input of a real Parquet file and Arrow output (`501`, naming them); bounded by blob size, record size, answer size, time and four queries at once. See `docs/services/blob-query.md` |
 | Set Blob Expiry | `PUT ...?comp=expiry` | built for hierarchical (Data Lake) containers, 501 on flat ones |
 | Anything else | | 501 `NotImplemented`, the message names the operation |
 
@@ -115,17 +116,29 @@ see below), customer-provided key and encryption scope headers
 
 ## Auth
 
+**Credentials Azure refuses without a key.** These are checked for every account name. Each was tried against real Azure in November 2026 (a general-purpose v2 account) and the answers copied:
+
+- A Shared Key or Shared Key Lite header whose signature is not base64 (`replay`, `Sanitized`, empty, no colon, no account name) is `400 InvalidAuthenticationInfo`. Base64 of any size is read: a wrong one is the `403` below.
+- A SAS `sig` that is empty is `403 AuthenticationFailed` with the detail `sig is mandatory. Cannot be empty`; one that is not base64, `Signature fields not well formed.`; one that is not 32 bytes, `Signature size is invalid`. White space in a signature is ignored, as Azure does.
+- A SAS `sv` that is not a date from 2012-02-12 on, or lies too far ahead, is `403 AuthenticationFailed` (detail `SAS field 'sv' is not well formed.`); a SAS with no `sv`, `sv is mandatory. Cannot be empty`.
+- An `x-ms-version` that is not a date from 2008-10-27 on, or lies too far ahead, is `400 InvalidHeaderValue`.
+- The date of a Shared Key request (`x-ms-date`, else `Date`) more than 15 minutes old is `403 AuthenticationFailed` with `Request date header too old: '<date>'`; no date is `Request date header not specified`; one that cannot be read is `The Date header in the request is incorrect.` A date in the future is not refused, at any distance (tried up to 30 days).
+- An `Authorization` header of one word, or `Bearer` with no token, is `400 InvalidAuthenticationInfo`; a scheme Azure does not know (`Foo bar`) is `403 AuthenticationFailed`.
+- A request with no `x-ms-version` is a Shared Key request of the old kind: its string to sign is the one of Shared Key Lite (Azure refuses a signature made the SDK way for it).
+
+`AZEMU_LOOSE_AUTH=1` (read once at start) turns off everything in this list that is about signatures and dates: no signature is looked at, whatever its form, and the date is not checked. It is for replaying recorded traffic (`tools/replay` starts azemu with it), whose requests carry placeholder signatures such as `SharedKey devstoreaccount1:replay` and `sig=Sanitized` and the dates of the day they were recorded, and for a tool whose SAS layout azemu does not know. A warning at start says it is on.
+
+Not copied: a bearer token is never looked at, so Azure's `401` for a token that is garbage is not produced (there is no tenant to ask, and there are no role assignments); a `Shared Key` header that names another account than the request is not refused for an account other than the development account (every account name exists here); azemu accepts any `x-ms-version` and `sv` date inside the range, where Azure takes only the versions it has published (it refuses 2013-01-01); for an `x-ms-version` Azure refuses, the answer carries no `x-ms-error-code` or `x-ms-version` header on Azure and carries them here; the detail text of a Shared Key mismatch has its quotes written as `&apos;` (Azure writes `'`; both are the same XML).
+
 **Signature checks.** For the development account `devstoreaccount1` (the only account
 whose key a client can know) the signature of a Shared Key / Shared Key Lite request and of a SAS is verified: `SharedKey` and `SharedKeyLite` headers, account SAS, service SAS (resources `c`, `b`, `bs`, `bv`, `d`) and user delegation SAS. A well-formed
 signature (base64 of 32 bytes) that does not match is `403 AuthenticationFailed` with an
 `AuthenticationErrorDetail` ("The MAC signature found in the HTTP request ... is not the same as
 any computed signature. Server used following string to sign: ..." for Shared Key, "Signature did
 not match. String to sign used was ..." for a SAS). Because the signed resource is part of the
-signature, a SAS for one container or blob does not open another. Not checked, by design:
+signature, a SAS for one container or blob does not open another. The signature itself is not compared, by design, for:
 
-- any other account name (the key is invented by azemu, no client can know it);
-- a signature that is plainly a placeholder: not base64 of 32 bytes (the replay tool sends
-  `SharedKey devstoreaccount1:replay`, recordings carry `sig=Sanitized`);
+- any other account name (the key is invented by azemu, no client can know it; the form of its signatures is checked as above);
 - a SAS whose layout sources disagree on (user delegation SAS before 2020-02-10, signed request
   headers / query parameters `srh` / `srq`): the layouts are tried and, if none matches, the request
   is accepted and logged at debug level. A false rejection of a legitimate client is the worst
@@ -133,8 +146,9 @@ signature, a SAS for one container or blob does not open another. Not checked, b
   checked with the newest layout and refused when it does not match; the error detail says that the
   version is newer than the layouts azemu knows and names `AZEMU_LOOSE_AUTH=1`, in case a newer SDK
   changed the layout.);
-- batch sub-requests (the outer request carries the signature);
-- `AZEMU_LOOSE_AUTH=1` in the environment (read once at start) turns every signature check off.
+- batch sub-requests (the outer request carries the signature).
+
+A signature that is made up (`sig=bad` is not base64 of 32 bytes) is refused for every account, so a test that expects a refusal gets one for the right reason. To test a wrong signature that is well formed, change one character of a real one.
 
 Expiry, start, permission, resource-type, protocol and stored-policy checks below still apply to
 every account. SAS layouts implemented (`azemu_core::storage::sig`): service SAS 2012-02-12, 2013-08-15, 2015-02-21, 2015-04-05, 2018-11-09, 2020-12-06 (and later unchanged, up to the Go SDK's 2026-12-06); account SAS 2015-04-05, 2020-12-06; user delegation SAS 2018-11-09, 2020-02-10, 2020-12-06, 2025-07-05, 2026-04-06. Path-style endpoints
@@ -146,10 +160,14 @@ is verified without keeping state.
 Bearer tokens are accepted without a check. A SAS is also honoured for what it says:
 
 - expiry `se`, start `st` (both also from a stored access policy `si`; an unknown policy fails)
-  -> `403 AuthenticationFailed` with `AuthenticationErrorDetail`
+  -> `403 AuthenticationFailed` with `AuthenticationErrorDetail`. A start that is not given is the time of the request. An
+  expiry that is not after the start is `Signed expiry time [<se>] has to be after signed start time [<st>]` (`must` for a
+  service SAS, `has to` for an account SAS); otherwise a SAS that is not valid now is `Signature not valid in the specified
+  time frame: Start [..] - Expiry [..] - Current [..]` (tried against Azure in November 2026)
 - `spr=https` over HTTP -> `AuthorizationProtocolMismatch`
-- `sip` -> `AuthorizationSourceIPMismatch`; the client address is taken from
-  `X-Forwarded-For`, else assumed to be `127.0.0.1` (core does not hand the peer address to services)
+- `sip` that is not the caller -> `403 AuthorizationFailure` ("This request is not authorized to perform this operation.", as Azure
+  answers; there is no detail); a `sip` that is no address or range is `403 AuthenticationFailed`, `SAS field 'sip' is not well formed.`
+  The client address is taken from `X-Forwarded-For`, else assumed to be `127.0.0.1` (core does not hand the peer address to services)
 - account SAS `ss`, `srt` -> `AuthorizationServiceMismatch`, `AuthorizationResourceTypeMismatch`
 - permissions `sp` per operation -> `AuthorizationPermissionMismatch` (creating a new blob
   needs `c` or `w`, overwriting needs `w`, append needs `a` or `w`, delete `d`, delete version `x`,
@@ -158,17 +176,16 @@ Bearer tokens are accepted without a check. A SAS is also honoured for what it s
 A request with no credentials is anonymous: reads of blobs on containers with public access
 `blob` or `container`, list / properties on `container` access, nothing else; everything
 else is `401 NoAuthenticationInformation` with a `WWW-Authenticate` challenge. Creating, uploading,
-deleting and listing containers are always 401, whether or not the container exists. Three cases
+deleting and listing containers are always 401, whether or not the container exists, and so is a read of a container that does not exist (tried against Azure in
+November 2026: it makes no difference whether the container exists). A request that asks for an `x-ms-version` older than 2019-12-12, from before Entra ID could sign in, is
+`404 ResourceNotFound` instead, as on Azure. An anonymous Put Blob without `x-ms-blob-type` is `400 MissingRequiredHeader`: Azure reads the headers before the credential. Two cases
 have their own answer:
 
 - In an account that does not allow public access, an anonymous read is `409 PublicAccessNotPermitted`,
   a container cannot be made public (409), and a copy whose source is in such an account gets 409.
   An account that appears on first use allows public access; an account made through Resource Manager
   follows its `allowBlobPublicAccess` property, which is false unless set, as on Azure.
-- An anonymous read of a container that does not exist is `404 ResourceNotFound`. No recording
-  shows what Azure answers here, so this one is a guess.
-- An `Authorization` header that cannot be read (an unknown scheme, or `Bearer` with no token) is
-  `400 InvalidAuthenticationInfo`.
+- An `Authorization` header that cannot be read is `400 InvalidAuthenticationInfo` or, for a scheme Azure does not know, `403 AuthenticationFailed` (list above).
 
 ## Structured messages
 
@@ -177,15 +194,17 @@ structured message, a header, segments each with a CRC-64, and a trailer with th
 say so with `x-ms-structured-body: XSM/1.0; properties=crc64` and `x-ms-structured-content-length` (the Go SDK
 with `TransferValidationTypeComputeStructuredMessageCRC64`, the Python SDK with `validate_content="crc64"`).
 The service takes the message apart, checks every CRC, stores only the data, and puts `x-ms-structured-body`
-in the answer. A bad CRC is `400 Crc64Mismatch`; a message with the wrong layout is `400 InvalidInput`
-(its message names `x-ms-structured-body`); an unknown schema, or a missing or wrong
-`x-ms-structured-content-length`, is a 400 about that header. A Get Blob with `x-ms-structured-body` gets the data
+in the answer. A bad CRC is `400 Crc64Mismatch`; a message with the wrong layout is `400 InvalidStructuredMessage` ("The Structured Message was not
+valid."): a wrong version, total length, flags, segment number or segment length (also one byte short), bytes after the trailer, or an
+`x-ms-structured-content-length` that is not the length of the data. The layout is checked before any CRC, so a segment one byte short is a layout error,
+not a CRC error. A body too short to be a message (under 13 bytes) is `400 InvalidHeaderValue` for `x-ms-structured-content-length`. An unknown schema is
+`400 InvalidHeaderValue` for `x-ms-structured-body`; a missing `x-ms-structured-content-length` is `400 MissingRequiredHeader`. A Get Blob with `x-ms-structured-body` gets the data
 (or the range) wrapped in one message per 4 MiB, with `x-ms-structured-body` and `x-ms-structured-content-length`
 in the answer; `Content-MD5` and `x-ms-content-crc64` are left out because they describe the data, not the message.
 The code is `crates/services/blob/src/structured.rs`; the layout comes from the Go SDK
-(`azblob/internal/shared/structured_message.go`) and 22 recordings of the Python SDK. Error names for a wrong
-layout are not documented by Microsoft, so `InvalidInput` is a guess. The message is taken apart before the
-signature is checked, so a request with a broken message and no credentials gets 400 instead of 403.
+(`azblob/internal/shared/structured_message.go`) and 22 recordings of the Python SDK. The error names and their order were checked against Azure
+in November 2026 (a message built by hand, with each fault in turn). The credentials are checked first: a broken message without credentials is `401`, as on Azure.
+Not tried: a message with several segments and a fault in a later one, and bodies of 13 to 38 bytes (they get `InvalidStructuredMessage` here).
 
 ## Data Lake
 
@@ -198,6 +217,9 @@ are unchanged.
 
 ## Known differences from Azure
 
+- Set Immutability Policy, Delete Immutability Policy, Set Legal Hold and the immutability and legal hold headers of Put Blob are accepted on every container. The account that was
+  tried (November 2026) had no version-level immutability, and Azure answered all of them `400 ImmutableStorageWithVersioningIsNotEnabled` ("ImmutableStorageWithVersioning: feature is
+  not enabled."). That depends on a setting of the account, which this emulator does not have (it behaves as an account where the feature is on), so it is not copied.
 - `x-ms-delete-type-permanent` is `true` when nothing of the deleted blob stays recoverable (no soft delete, and no version kept by versioning) and `false` otherwise. The XML errors of a bad Set Service Properties body carry `LineNumber`/`LinePosition` 1/1 where Azure points into the document (the Queue service has the positions).
 
 - Put Page, Put Page From URL and Clear Pages take the range from `x-ms-range` or `Range` (`x-ms-range` wins when both are sent), as the REST docs say.
@@ -252,8 +274,7 @@ are unchanged.
   protection" for the account). A blob that is already deleted, a policy whose date is past, and a container-level policy (the emulator has none;
   `x-ms-has-legal-hold` and `x-ms-has-immutability-policy` of the container are always `false`) do not count.
 - **Cancel when the client goes away**: `abort_on_disconnect` is true for `GET` and for a `POST` on a blob path (Query Blob
-  Contents), false for everything else. The Data Lake service asks for `GET` only (its `POST` is a query or a lease, and the two cannot be told
-  apart from the path). A streamed answer that nobody reads is stopped by core in any case.
+  Contents), false for everything else. The Data Lake service asks for `GET` only (its `POST` is a lease). A streamed answer that nobody reads is stopped by core in any case.
 - **Container soft delete** follows the same delete retention policy (Azure has a separate
   account setting that is not reachable over the data plane).
 - **Copy** is synchronous and the source URL must point at this emulator (resolved from
@@ -302,8 +323,10 @@ Microsoft Learn, "Azure Storage Analytics logging", "Storage Analytics log forma
 website, the default service version or the delete retention policy (the page says these make it too; those do not stop it being deletable). It is an ordinary
 container of the account (so it is saved and loaded with the rest), with these differences: List Containers does not return it unless the request has
 `include=system`; the Data Lake filesystem list does not return it; Delete Container on it is refused once logging has been switched on (the page: "cannot be
-deleted once Storage Analytics has been enabled, though its contents can be deleted"; the page gives no error code, the answer here is `400 InvalidOperation`,
-a guess); its blobs can be deleted. No blob events are raised for it (as on Azure). Switching logging off keeps the container.
+deleted once Storage Analytics has been enabled, though its contents can be deleted"). Checked against Azure in November 2026: once logging was switched on (also after it
+is off again) Delete Container, Set Container Metadata, Set Container ACL, Lease Container and every write of a blob into `$logs` (Put Blob, Put Block, Put Block List,
+Append and Page blobs, Snapshot, Copy) are `403 InsufficientAccountPermissions` ("The account being accessed does not have sufficient permissions to execute this
+operation."); reading it, listing it and deleting a log blob (`404` for a blob that is not there) work. Which other changes of a log blob Azure refuses was not tried. No blob events are raised for it (as on Azure). Switching logging off keeps the container.
 Other special names, as the same pages say: `$web` is made with the static website setting and is a normal listed container; `$root` is the root container
 (a path with one segment is a blob in `$root`) and a normal one; the `$metrics*` names are Table service tables, not containers (not a Blob concern);
 `$blobchangefeed` belongs to the change feed, which is not built (nothing makes the container; it would also be left out of a plain List Containers).
@@ -365,12 +388,14 @@ Nothing is encrypted. What is checked (`src/cpk.rs`, `src/store.rs`):
 
 * Every request that carries `x-ms-encryption-key`, `-key-sha256` and `-algorithm` (or the `x-ms-source-encryption-*` set of a copy from a URL) must
   have them agree: a key without its hash or algorithm is `400 MissingRequiredHeader`; an algorithm other than `AES256`, a key that is not base64 of 32 bytes, or
-  a hash that is not the base64 SHA-256 of the key is `400 InvalidHeaderValue` (header `x-ms-encryption-key` for a hash mismatch; the key is never echoed). A hash alone
-  is accepted on reads (property requests); a write with a hash and no key is `400 MissingRequiredHeader`.
-* A blob written with a key stores the hash. Reading or writing it with no key, or with a key whose hash differs, is `409 BlobUsesCustomerSpecifiedEncryption`.
-  The missing-key case is recorded from Azure; the different-key case is a choice (same code and status: it is the only code the SDKs know for this; the
-  real answer is not in the specification or the recordings).
-* Not checked: a key sent for a blob that was not written with one is accepted (the real service most likely refuses it). Encryption scopes are only recorded, as before.
+  a hash that is not the base64 SHA-256 of the key is `400 InvalidHeaderValue` (header `x-ms-encryption-key-sha256` with the hash as its value; the key is never
+  echoed). A write with a hash and no key is accepted, and the blob is written without a key.
+* A blob written with a key stores the hash. Reading or writing it with no key header is `409 BlobUsesCustomerSpecifiedEncryption` (recorded; the hash alone does not
+  name the key, so the hash of the right key without the key gets the same answer here: Azure was tried only with the hash of another key); with a key whose hash
+  differs it is `409 BlobCustomerSpecifiedEncryptionMismatch` ("The given customer specified encryption does not match the encryption used to encrypt the blob.").
+* A key sent in Get Blob, Get Blob Properties, Set Blob Metadata or a query for a blob written without one is `409 BlobDoesNotUseCustomerSpecifiedEncryption`. A write is not
+  refused for that (Put Blob, Put Block and Put Block List with a key over a plain blob are `201`, recorded). Overwriting a key blob with Put Blob with no key or another key is `201`.
+* All of this was checked against Azure in November 2026, except Put Page and Append Block, which follow the key rule here without a probe. Encryption scopes are only recorded.
 
 ## What `GET /_azemu/unsupported` shows
 

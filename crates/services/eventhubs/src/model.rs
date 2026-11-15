@@ -13,6 +13,11 @@ pub const DEFAULT_CONSUMER_GROUP: &str = "$Default";
 pub const DEFAULT_PARTITIONS: u32 = 4;
 /// Azure's default message retention is one day.
 pub const DEFAULT_RETENTION_MS: i64 = 24 * 3600 * 1000;
+/// Partitions of an event hub that the Kafka endpoint makes (a producer or an admin client naming a topic, `CreateTopics` without a
+/// count): one (checked against a real namespace in November 2026).
+pub const KAFKA_DEFAULT_PARTITIONS: u32 = 1;
+/// Retention of an event hub that the Kafka endpoint makes without a retention: 7 days (the longest a Standard namespace keeps).
+pub const KAFKA_DEFAULT_RETENTION_MS: i64 = 7 * DEFAULT_RETENTION_MS;
 pub const MAX_PARTITIONS: u32 = 1024;
 /// Event hubs in one namespace (Azure: 10 on Standard, 100 per processing unit on Premium).
 pub const MAX_HUBS_PER_NAMESPACE: usize = 1000;
@@ -36,8 +41,15 @@ pub const EVENT_OVERHEAD: usize = 576;
 /// Events in one batch of one send (an AMQP batch message, a Kafka record batch). A batch is also limited in bytes
 /// ([`MAX_MESSAGE_SIZE`]); this stops a batch of nothing but empty events, which is a million of them in 7 MB.
 pub const MAX_EVENTS_PER_BATCH: usize = 50_000;
-/// Added to the size of an event to get the offset of the next one, so offsets grow like byte positions.
-const OFFSET_OVERHEAD: i64 = 32;
+/// How far the offset of the next event is from this one: offsets grow like byte positions. The rule fits what a real namespace gave for
+/// 45 events of 0 to 1,008 bytes of body, with and without a partition key, properties and a content type (checked in November 2026): the
+/// size of the encoded message `size`, plus 56 bytes, and 3 more once the message is 256 bytes or longer, rounded up to a multiple of 8.
+/// The first event of a partition has offset 0.
+pub fn offset_step(size: usize) -> i64 {
+    let size = size as i64;
+    let counted = size + 56 + if size >= 256 { 3 } else { 0 };
+    (counted + 7) / 8 * 8
+}
 
 static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -67,6 +79,8 @@ pub struct Event {
     pub partition_key: Option<String>,
     pub message: Message,
     pub size: usize,
+    /// Written through the Kafka endpoint (a Kafka consumer reads such a record as `LogAppendTime`, one that came over AMQP as `CreateTime`).
+    pub kafka: bool,
 }
 
 impl Event {
@@ -120,13 +134,15 @@ pub struct PreparedEvent {
     pub route_key: Option<String>,
     partition_key: Option<String>,
     size: usize,
+    /// Set by the Kafka endpoint (see [`Event::kafka`]).
+    pub kafka: bool,
 }
 
 pub fn prepare(mut message: Message) -> PreparedEvent {
     let route_key = message_partition_key(&message);
     let partition_key = strip_broker_annotations(&mut message);
     let size = message.encode().len();
-    PreparedEvent { message, route_key, partition_key, size }
+    PreparedEvent { message, route_key, partition_key, size, kafka: false }
 }
 
 impl Partition {
@@ -170,11 +186,11 @@ impl Partition {
     }
 
     pub fn append_prepared(&mut self, p: PreparedEvent, now: i64) -> Arc<Event> {
-        let PreparedEvent { message, partition_key, size, .. } = p;
+        let PreparedEvent { message, partition_key, size, kafka, .. } = p;
         let enqueued_ms = now.max(self.last_ms.unwrap_or(0));
-        let ev = Arc::new(Event { seq: self.next_seq, offset: self.next_offset, enqueued_ms, partition_key, message, size });
+        let ev = Arc::new(Event { seq: self.next_seq, offset: self.next_offset, enqueued_ms, partition_key, message, size, kafka });
         self.next_seq += 1;
-        self.next_offset += size as i64 + OFFSET_OVERHEAD;
+        self.next_offset += offset_step(size);
         self.last_offset = Some(ev.offset);
         self.last_ms = Some(enqueued_ms);
         self.total_events += 1;
@@ -212,13 +228,23 @@ impl Partition {
     }
 
     /// The sequence number of the first event a receiver with this start position gets. It may
-    /// be the next sequence number to be assigned (nothing there yet).
-    pub fn cursor_for(&self, pos: StartPosition) -> Result<i64, EhError> {
+    /// be the next sequence number to be assigned (nothing there yet). `tracker` names the partition in the error text
+    /// (`{namespace}:eventhub:{hub}~{partition}`).
+    ///
+    /// A sequence number or an offset past the last one is refused, inclusive or not, as Azure does (checked in November 2026):
+    /// the last one exclusive, or the one before the first inclusive, waits for the next event. An empty partition has last
+    /// sequence number -1 and last offset "-1". A time is never refused. Azure compares times finer than the millisecond it
+    /// reports, so an event is often left out when its own enqueued time is given inclusive; here the comparison is in milliseconds.
+    pub fn cursor_for(&self, pos: StartPosition, tracker: &str) -> Result<i64, EhError> {
         let first = self.first_seq();
         Ok(match pos {
             StartPosition::Beginning => first,
             StartPosition::Latest => self.next_seq,
             StartPosition::Offset { value, inclusive } => {
+                let last = self.last_offset.unwrap_or(-1);
+                if value > last {
+                    return Err(EhError::position_past_the_end("offset", value, last, tracker));
+                }
                 let idx = self.events.partition_point(|e| if inclusive { e.offset < value } else { e.offset <= value });
                 first + idx as i64
             }
@@ -227,14 +253,10 @@ impl Partition {
                 first + idx as i64
             }
             StartPosition::Sequence { value, inclusive } => {
-                let c = if inclusive { value } else { value.saturating_add(1) };
-                if c > self.next_seq {
-                    return Err(EhError::out_of_range(format!(
-                        "The supplied sequence number '{value}' is invalid. The last sequence number in the system is '{}'. TrackingId:{}",
-                        self.last_seq(),
-                        crate::errors::tracking_id()
-                    )));
+                if value > self.last_seq() {
+                    return Err(EhError::position_past_the_end("sequence number", value, self.last_seq(), tracker));
                 }
+                let c = if inclusive { value } else { value.saturating_add(1) };
                 c.max(first)
             }
         })
@@ -257,33 +279,51 @@ fn strip_broker_annotations(m: &mut Message) -> Option<String> {
     key
 }
 
-/// The partition a partition key goes to, as Azure's service chooses it. Microsoft's SDKs carry the same function so
-/// that a buffered producer picks the partition the service would (JavaScript: `@azure/event-hubs`,
-/// `impl/partitionKeyToIdMapper.js`; .NET: `PartitionResolver`): Bob Jenkins' lookup3 (`hashlittle2`) over the UTF-8
-/// bytes of the key with both seeds 0, the two result words `c` and `b` combined with XOR and cut to 16 bits as a
-/// signed number, and the absolute value of that modulo the number of partitions.
+/// Positions on the ring a partition key is placed on: the hash is taken modulo this.
+pub const KEY_RING: u32 = 32_767;
+
+/// The partition a partition key goes to, as Azure's service chooses it (worked out in November 2026 from the partition
+/// of about 600 keys on event hubs with 2 to 32 partitions, and matching every one of them; the Microsoft SDKs' own function,
+/// which their buffered producers use, gives other partitions): the key is cut to ASCII and put in upper case ([`key_bytes`]),
+/// hashed with Bob Jenkins' lookup3 (see [`lookup3`]), and the two result words XOR-ed make a 32-bit number whose remainder
+/// modulo [`KEY_RING`] is the position of the key. The positions `0..32767` are divided between the partitions in order: every
+/// partition gets `32767 / n` of them and the first `32767 % n` partitions one more.
 pub fn partition_for_key(key: &str, partitions: usize) -> usize {
     if partitions == 0 {
         return 0;
     }
-    (hash_key(key) as i32 % partitions as i32).unsigned_abs() as usize
+    let n = partitions.min(KEY_RING as usize);
+    let pos = key_position(key) as usize;
+    let (width, extra) = (KEY_RING as usize / n, KEY_RING as usize % n);
+    let wide = extra * (width + 1);
+    if pos < wide {
+        pos / (width + 1)
+    } else {
+        extra + (pos - wide) / width
+    }
 }
 
-/// The 16-bit hash of a partition key (`hashPartitionKey` in the JavaScript SDK).
-pub fn hash_key(key: &str) -> i16 {
-    let (b, c) = lookup3(key.as_bytes());
-    (c ^ b) as u16 as i16
+/// Where a partition key sits on the ring of [`KEY_RING`] positions.
+pub fn key_position(key: &str) -> u32 {
+    let (b, c) = lookup3(&key_bytes(key));
+    (b ^ c) % KEY_RING
+}
+
+/// What Azure hashes of a key: each UTF-16 code unit as one byte, `?` for a unit that is not ASCII (so a character outside the
+/// Basic Multilingual Plane gives two), and letters in upper case: `a` and `A` go to the same partition, so do `é` and `ü`.
+pub fn key_bytes(key: &str) -> Vec<u8> {
+    key.encode_utf16().map(|u| if u < 128 { (u as u8).to_ascii_uppercase() } else { b'?' }).collect()
 }
 
 fn read_u32(d: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([d[at], d[at + 1], d[at + 2], d[at + 3]])
 }
 
-/// lookup3 as written in the JavaScript SDK (`computeHash`): returns `(b, c)`.
+/// lookup3 (`hashlittle2` with both seeds 0): returns `(b, c)`.
 ///
 /// The algorithm is Bob Jenkins' lookup3 (`hashlittle2`, public domain, https://burtleburtle.net/bob/c/lookup3.c). Microsoft's
 /// Event Hubs SDKs (JavaScript, .NET `PartitionResolver`, Rust `azure_messaging_eventhubs`; MIT, Copyright Microsoft) carry the same
-/// function so that a client picks the partition the service picks; this version follows them. The mixing steps are
+/// function for their buffered producers; this version follows them. The mixing steps are
 /// the ones lookup3 defines and so read the same in every port (they match the Rust SDK's line for line). See NOTICE.
 fn lookup3(data: &[u8]) -> (u32, u32) {
     let init = 0xdead_beef_u32.wrapping_add(data.len() as u32);
@@ -415,8 +455,13 @@ impl Hub {
         (0..self.partitions.len()).map(|i| i.to_string()).collect()
     }
 
-    pub fn parse_pid(&self, pid: &str) -> Result<usize, EhError> {
-        pid.trim().parse::<usize>().ok().filter(|p| *p < self.partitions.len()).ok_or_else(|| EhError::bad_partition(pid))
+    /// `link`: the id came with a sender or receiver attach (its error text has a second line, see [`EhError::bad_partition`]).
+    pub fn parse_pid(&self, pid: &str, link: bool) -> Result<usize, EhError> {
+        pid.trim()
+            .parse::<usize>()
+            .ok()
+            .filter(|p| *p < self.partitions.len())
+            .ok_or_else(|| EhError::bad_partition(self.partitions.len(), link))
     }
 
     pub fn has_consumer_group(&self, cg: &str) -> bool {
@@ -477,6 +522,21 @@ pub fn message_partition_key(m: &Message) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offsets_step_like_a_real_namespace() {
+        // body size -> how far the next offset was, for events with nothing but a body (a real Standard namespace, November 2026)
+        let seen =
+            [(0, 64), (1, 64), (3, 64), (4, 72), (9, 72), (16, 80), (24, 88), (100, 168), (191, 256), (250, 312), (251, 320), (255, 320)];
+        let more = [(256, 328), (258, 328), (1000, 1072), (1005, 1072), (1006, 1080), (5000, 5072), (20000, 20072)];
+        for (body, step) in seen.into_iter().chain(more) {
+            let size = Message::data(vec![b'x'; body]).encode().len();
+            assert_eq!(offset_step(size), step, "body of {body} bytes");
+        }
+        let mut p = Partition::default();
+        let offsets: Vec<i64> = (0..3).map(|_| p.append(Message::data(vec![b'x'; 1]), 1).offset).collect();
+        assert_eq!(offsets, vec![0, 64, 128]);
+    }
 
     #[test]
     fn event_overhead_covers_the_memory_of_an_event() {

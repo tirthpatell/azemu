@@ -29,11 +29,28 @@ t!(unknown_in_right_side_of_in, "1 IN (y, 1)", props(), true);
 t!(long_double_equal, "n = 2.0", props().user("n", 2), true);
 t!(double_long_equal, "n = 2", props().user("n", 2.0), true);
 t!(long_double_less, "n < 2.5", props().user("n", 2), true);
-t!(string_vs_number_unknown_eq, "n = 1", props().user("n", "1"), false);
-t!(string_vs_number_unknown_ne, "n <> 1", props().user("n", "1"), false);
-t!(bool_vs_number_unknown, "n = 1", props().user("n", true), false);
+
+// Azure (checked in November 2026): `=` and `<>` of two different types is an error (FilterException), not "unknown".
+#[test]
+fn comparing_different_types_is_an_error() {
+    let err = |sql: &str, p: MapProperties| Filter::parse(sql).unwrap().try_matches(&p, &Params::new()).unwrap_err().message;
+    assert_eq!(err("n = 1", props().user("n", "1")), "Operator '==' cannot be applied to operands of type 'string' and 'long'");
+    assert_eq!(err("n <> 1", props().user("n", "1")), "Operator '!=' cannot be applied to operands of type 'string' and 'long'");
+    assert_eq!(err("n = 1", props().user("n", true)), "Operator '==' cannot be applied to operands of type 'bool' and 'long'");
+    assert_eq!(err("n IN ('a', 'b')", props().user("n", 3)), "Operator '==' cannot be applied to operands of type 'long' and 'string'");
+    // a missing property is unknown, not an error
+    assert!(!Filter::parse("n = 1").unwrap().try_matches(&props(), &Params::new()).unwrap());
+}
 t!(string_compare_is_case_sensitive, "n = 'Red'", props().user("n", "red"), false);
-t!(arith_on_string_prop_unknown, "n * 2 = 4", props().user("n", "2"), false);
+
+#[test]
+fn arithmetic_on_a_string_is_an_error_except_plus() {
+    let err = |sql: &str| Filter::parse(sql).unwrap().try_matches(&props().user("n", "2"), &Params::new()).unwrap_err().message;
+    assert_eq!(err("n * 2 = 4"), "Operator '*' cannot be applied to operands of type 'string' and 'long'");
+    assert_eq!(err("n - 1 = 4"), "Operator '-' cannot be applied to operands of type 'string' and 'long'");
+    // + joins text, so it is the comparison that fails
+    assert_eq!(err("n + 1 > 4"), "Operator '>' cannot be applied to operands of type 'string' and 'long'");
+}
 t!(int_div_by_zero_is_error_no_match, "1 / 0 = 1", props(), false);
 t!(int_mod_by_zero_is_error_no_match, "NOT (1 % 0 = 1)", props(), false);
 t!(double_div_by_zero_is_infinity, "1.0 / 0 > 1000", props(), true);
@@ -169,9 +186,8 @@ fn param_names_are_case_sensitive_keys_without_at() {
 }
 
 #[test]
-fn bare_param_as_boolean() {
-    assert!(m_with("@b", &props(), &params(&[("b", Value::Bool(true))])));
-    assert!(!m_with("@b", &props(), &params(&[("b", Value::Bool(false))])));
+fn bare_param_is_not_a_filter() {
+    assert!(Filter::parse("@b").is_err());
 }
 
 #[test]

@@ -46,7 +46,7 @@ fn docs() -> Vec<Value> {
 fn a_udf_works_in_select_where_and_nested_expressions() {
     let (r, calls) = run("SELECT VALUE udf.double(c.n) FROM c", &docs());
     assert_eq!(r.unwrap(), vec![json!(2.0), json!(10.0)], "an undefined result leaves the row out");
-    assert_eq!(calls.0.lock().unwrap().len(), 3, "once per row");
+    assert_eq!(calls.0.lock().unwrap().len(), 2, "once per row that has the argument");
     let (r, _) = run("SELECT c.id FROM c WHERE udf.double(c.n) > 5", &docs());
     assert_eq!(r.unwrap(), vec![json!({"id": "b"})]);
     let (r, _) = run("SELECT c.id, udf.double(udf.double(c.n)) AS q, udf.obj(1, 2).b AS b FROM c WHERE IS_DEFINED(c.n)", &docs());
@@ -54,10 +54,13 @@ fn a_udf_works_in_select_where_and_nested_expressions() {
 }
 
 #[test]
-fn undefined_arguments_arrive_as_none() {
+fn a_function_is_not_called_with_an_undefined_argument() {
+    // as on Azure: the call is left out and its result is undefined, so the row with no `n` gives nothing
     let (r, calls) = run("SELECT VALUE udf.isUndefined(c.n) FROM c", &docs());
-    assert_eq!(r.unwrap(), vec![json!(false), json!(false), json!(true)]);
-    assert_eq!(calls.0.lock().unwrap()[2].1, vec![None]);
+    assert_eq!(r.unwrap(), vec![json!(false), json!(false)]);
+    let calls = calls.0.lock().unwrap();
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().all(|(_, args)| args.iter().all(Option::is_some)));
 }
 
 #[test]
@@ -85,7 +88,8 @@ fn without_a_host_a_udf_call_is_unsupported() {
 #[test]
 fn a_udf_is_part_of_the_syntax_with_case_kept() {
     assert!(parse("SELECT udf.Tax(c.income) FROM c").is_ok());
-    assert!(parse("SELECT UDF.Tax(c.income) FROM c").is_ok(), "the prefix is not case sensitive");
+    // the keyword is lower case on Azure: `UDF.Tax(..)` is a path followed by a bracket, a syntax error at the bracket
+    assert_eq!(parse("SELECT UDF.Tax(c.income) FROM c").unwrap_err().code, "SC1001");
     assert!(parse("SELECT udf.Tax FROM c").is_err());
     assert!(parse("SELECT udf. (1) FROM c").is_err());
     let calls = Arc::new(Calls::default());
@@ -95,10 +99,9 @@ fn a_udf_is_part_of_the_syntax_with_case_kept() {
 }
 
 #[test]
-fn order_by_on_a_udf_orders_by_its_result_and_drops_undefined_like_any_other_sort_value() {
-    let docs = vec![json!({"id": "x", "n": 9}), json!({"id": "y", "n": 1}), json!({"id": "z"}), json!({"id": "w", "n": 4})];
-    let (r, _) = run("SELECT VALUE c.id FROM c ORDER BY udf.double(c.n)", &docs);
-    assert_eq!(r.unwrap(), vec![json!("y"), json!("w"), json!("x")]);
-    let (r, _) = run("SELECT VALUE c.id FROM c ORDER BY udf.double(c.n) DESC", &docs);
-    assert_eq!(r.unwrap(), vec![json!("x"), json!("w"), json!("y")]);
+fn order_by_takes_a_path_so_a_udf_there_is_refused() {
+    let docs = vec![json!({"id": "x", "n": 9}), json!({"id": "y", "n": 1})];
+    let _ = &docs;
+    let e = parse("SELECT VALUE c.id FROM c ORDER BY udf.double(c.n)").unwrap_err();
+    assert_eq!(e.code, "2206", "Azure: ORDER BY item expression could not be mapped to a document path");
 }

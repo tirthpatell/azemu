@@ -1,0 +1,26 @@
+# The emulator with a seed file, and a client that finds what the seed made without creating anything. On Azure the
+# container, the queue, the Cosmos database and container and the secret come from infrastructure code; here the seed file
+# does that job. The client reaches the emulator by the service name `azemu`, on the standard ports.
+#
+#   docker build -t azemu:latest ../..                    the release image (or AZEMU_IMAGE=azemu:dev, see ../README.md)
+#   docker compose up --build --abort-on-container-exit --exit-code-from client
+#
+# The names in seed.json are what the client's host name and path give: the account `devstoreaccount1` in the path on the
+# Blob and Queue ports, and the host name `azemu` for the Cosmos account and the Key Vault vault.
+services:
+  azemu:
+    image: ${AZEMU_IMAGE:-azemu:latest}
+    environment:
+      AZEMU_TLS_NAME: azemu
+      AZEMU_SEED: /seed.json
+    volumes:
+      # the file must exist on the host (Docker makes a directory for a missing one); the image's user must be able to read it
+      - ./seed.json:/seed.json:ro
+
+  client:
+    build: .
+    environment:
+      AZEMU_HOST: azemu
+    depends_on:
+      azemu:
+        condition: service_healthy     # the image's HEALTHCHECK: `azemu __healthcheck`

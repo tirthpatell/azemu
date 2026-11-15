@@ -304,7 +304,8 @@ def test_sequence_numbers_are_per_partition(emu, hub, producer):
     send_n(producer, 3, partition_id="1")
     a = [e.sequence_number for e in read_from_start(emu, hub, 3, partition_id="0")]
     b = [e.sequence_number for e in read_from_start(emu, hub, 3, partition_id="1")]
-    assert a == b == [a[0], a[0] + 1, a[0] + 2]
+    # (each partition counts for itself: on a shared hub the two may start at different numbers)
+    assert a == [a[0], a[0] + 1, a[0] + 2] and b == [b[0], b[0] + 1, b[0] + 2]
 
 
 def test_sequence_numbers_continue_across_batches_and_single_events(emu, hub, producer):
@@ -365,6 +366,14 @@ def test_partition_key_is_in_system_properties_when_sent(emu, hub, producer):
         (ev,) = col.wait_events(1)
     assert ev.system_properties[b"x-opt-partition-key"] == b"pk-1"
     assert ev.partition_key == b"pk-1"
+
+
+def test_the_service_sets_exactly_four_annotations(emu, hub, producer):
+    # Checked against a real namespace (November 2026): the epoch of the sequence numbers is always -1 (an int)
+    ev = roundtrip(emu, hub, producer, EventData("annotations"))
+    ann = {k.decode(): v for k, v in ev.raw_amqp_message.annotations.items()}
+    assert sorted(ann) == ["x-opt-enqueued-time", "x-opt-offset", "x-opt-sequence-number", "x-opt-sequence-number-epoch"]
+    assert ann["x-opt-sequence-number-epoch"] == -1
 
 
 def test_str_and_repr_of_a_received_event_show_the_metadata(emu, hub, producer):

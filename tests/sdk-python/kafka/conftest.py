@@ -5,12 +5,16 @@ The suite needs the unified binary (`target/debug/azemu`): the cross-protocol te
 wrote and the other way round, so AMQP and Kafka must share one process. Expectations come from the Kafka and
 librdkafka documentation and from Microsoft Learn ("Use Azure Event Hubs from Apache Kafka applications", "Exchange events
 between consumers and producers that use different protocols"), not from the emulator's code.
+
+With AZEMU_AZURE=1 the suite runs against the Kafka endpoint of a real namespace (kutil.azure_conf): every test makes its topics (event hubs)
+through Resource Manager or the Kafka admin API and they are deleted when the test ends.
 """
 
 import pytest
 
 import autocreate_gate
-import kutil
+import kutil  # first: it puts ../eventhubs on the path
+import azure_eh
 
 
 @pytest.fixture(scope="session")
@@ -31,8 +35,33 @@ def pytest_collection_modifyitems(config, items):
 def _needs_ca(request):
     if "tls" in request.keywords:
         emu = request.getfixturevalue("emu")
-        if not emu.ca_file:
+        if not emu.ca_file and not emu.azure:
             pytest.skip("no CA file: the emulator under test was not started by the fixture (set AZEMU_CA_FILE)")
+
+
+@pytest.fixture(autouse=True)
+def _azure_topics_are_removed(emu):
+    """Against Azure every test makes its own topics (event hubs) and they go when the test ends: the namespace holds at most 10."""
+    yield
+    if emu.azure:
+        while kutil.CREATED:
+            name = kutil.CREATED.pop()
+            try:
+                azure_eh.delete_hub(name)
+            except Exception:  # noqa: BLE001 - already deleted by the test itself
+                pass
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _azure_namespace_is_left_as_it_was(emu):
+    """What a test made through the Kafka admin API and did not delete (a failed test) goes at the end. Hubs of the Event Hubs suite
+    (`azemu-...`) and anything that was there before the session are left alone."""
+    before = set(azure_eh.list_hubs()) if emu.azure else set()
+    yield
+    if emu.azure:
+        for name in azure_eh.list_hubs():
+            if name not in before and not name.startswith("azemu-"):
+                azure_eh.delete_hub(name)
 
 
 @pytest.fixture

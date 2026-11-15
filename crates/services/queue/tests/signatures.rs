@@ -1,5 +1,5 @@
-//! Signature checks for the development account. Other accounts are never checked (the
-//! other test files use `acct1`); real client signatures are covered by the SDK tests.
+//! Signature checks. The signature itself is compared for the development account only (the other test files use `acct1`);
+//! the form of a signature is checked for every account. Real client signatures are covered by the SDK tests.
 
 use std::sync::Arc;
 
@@ -43,7 +43,9 @@ async fn wrong_shared_key_signature_is_rejected_with_azures_error() {
 #[tokio::test]
 async fn correct_shared_key_and_shared_key_lite_signatures_are_accepted() {
     let (srv, base) = dev().await;
-    let date = "Fri, 27 Mar 2026 01:00:51 GMT";
+    // a Shared Key request may not be more than 15 minutes old
+    let now = azemu_core::time::rfc1123(azemu_core::time::OffsetDateTime::now_utc());
+    let date = now.as_str();
     let key = B64.decode(DEV_ACCOUNT_KEY).unwrap();
     let sign = |sts: &str| B64.encode(hmac_sha256(&key, sts.as_bytes()));
     let full = format!("GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:{date}\nx-ms-version:2023-11-03\n/{DEV_ACCOUNT}/\ncomp:list");
@@ -57,14 +59,19 @@ async fn correct_shared_key_and_shared_key_lite_signatures_are_accepted() {
 }
 
 #[tokio::test]
-async fn placeholders_and_other_accounts_are_not_checked() {
+async fn a_malformed_signature_is_refused_for_every_account() {
     let (srv, base) = dev().await;
-    for sig in ["replay", "Sanitized"] {
-        let auth = format!("SharedKey {DEV_ACCOUNT}:{sig}");
-        let r = srv.send("GET", &format!("{base}/?comp=list"), &[("Authorization", &auth)], "").await;
-        assert_eq!(r.status, 200, "{sig}");
-    }
     let other = srv.url("queue", "someoneelse");
+    // not base64 (placeholders as recorded traffic carries them): 400, as Azure answers (November 2026)
+    for url in [&base, &other] {
+        for sig in ["replay", "Sanitized", ""] {
+            let account = if url == &base { DEV_ACCOUNT } else { "someoneelse" };
+            let auth = format!("SharedKey {account}:{sig}");
+            let r = srv.send("GET", &format!("{url}/?comp=list"), &[("Authorization", &auth)], "").await;
+            assert_eq!((r.status, r.header("x-ms-error-code")), (400, Some("InvalidAuthenticationInfo")), "{sig}");
+        }
+    }
+    // well formed: compared for the development account only
     let auth = format!("SharedKey someoneelse:{}", garbage());
     assert_eq!(srv.send("GET", &format!("{other}/?comp=list"), &[("Authorization", &auth)], "").await.status, 200);
 }

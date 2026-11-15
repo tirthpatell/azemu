@@ -96,7 +96,9 @@ async fn service_properties_roundtrip_and_validation() {
     // cors preflight
     let r = e.anon("OPTIONS", "/cnt/b", &[("Origin", "https://x.example"), ("Access-Control-Request-Method", "PUT")], "").await;
     assert_eq!(r.status, 200);
-    assert_eq!(r.header("access-control-allow-origin"), Some("*"));
+    // the origin is echoed, also for a rule with `*`, with credentials allowed (checked against Azure in November 2026)
+    assert_eq!(r.header("access-control-allow-origin"), Some("https://x.example"));
+    assert_eq!(r.header("access-control-allow-credentials"), Some("true"));
     let r = e.anon("OPTIONS", "/cnt/b", &[("Origin", "https://x.example"), ("Access-Control-Request-Method", "DELETE")], "").await;
     assert_eq!((r.status, code(&r).as_str()), (403, "CorsPreflightFailure"));
 }

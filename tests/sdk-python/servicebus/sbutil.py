@@ -6,10 +6,17 @@ Connection setup (see docs/sdk-notes.md): one connection string, `UseDevelopment
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import os
+import re
 import time
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse
+from urllib.parse import quote, quote_plus, urlparse
 
 from azure.servicebus import (
     ServiceBusClient,
@@ -37,12 +44,34 @@ def uniq(prefix: str = "q") -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
 
+def azure_conn_str() -> str:
+    """The connection string of the real namespace (AZEMU_AZURE=1): the variable AZ_SERVICEBUS_CONN_STR."""
+    return os.environ["AZ_SERVICEBUS_CONN_STR"].rstrip(";")
+
+
+def key(emu) -> str:
+    """The shared access key the clients of this run use."""
+    if getattr(emu, "azure", False):
+        for part in azure_conn_str().split(";"):
+            if part.lower().startswith("sharedaccesskey="):
+                return part.split("=", 1)[1]
+    return KEY
+
+
 def host(emu, namespace: str = "default") -> str:
-    """`<namespace>.servicebus.localhost:<port>` (what goes after `sb://` and after `https://`)."""
+    """`<namespace>.servicebus.localhost:<port>` (what goes after `sb://` and after `https://`).
+    Against Azure: the host of the real namespace."""
+    if getattr(emu, "azure", False):
+        for part in azure_conn_str().split(";"):
+            if part.lower().startswith("endpoint="):
+                return urlparse(part.split("=", 1)[1]).netloc
     return urlparse(emu.url("servicebus", namespace)).netloc
 
 
 def conn_str(emu, namespace: str = "default", entity: str | None = None) -> str:
+    if getattr(emu, "azure", False):
+        # one real namespace: `namespace` is ignored (tests that need a second namespace are emulator_only)
+        return azure_conn_str() + (f";EntityPath={entity}" if entity else "")
     s = (
         f"Endpoint=sb://{host(emu, namespace)};SharedAccessKeyName={KEY_NAME};SharedAccessKey={KEY};"
         "UseDevelopmentEmulator=true"
@@ -58,7 +87,9 @@ def make_client(emu, namespace: str = "default", **kwargs) -> ServiceBusClient:
 
 
 def make_admin(emu, namespace: str = "default", **kwargs) -> ServiceBusAdministrationClient:
-    kw = {**ADMIN_KW, "connection_verify": emu.ca_file, **kwargs}
+    kw = {**ADMIN_KW, **kwargs}
+    if not getattr(emu, "azure", False):
+        kw["connection_verify"] = emu.ca_file
     return ServiceBusAdministrationClient.from_connection_string(conn_str(emu, namespace), **kw)
 
 
@@ -72,7 +103,9 @@ def make_async_client(emu, namespace: str = "default", **kwargs):
 def make_async_admin(emu, namespace: str = "default", **kwargs):
     from azure.servicebus.aio.management import ServiceBusAdministrationClient as AioAdmin
 
-    kw = {**ADMIN_KW, "connection_verify": emu.ca_file, **kwargs}
+    kw = {**ADMIN_KW, **kwargs}
+    if not getattr(emu, "azure", False):
+        kw["connection_verify"] = emu.ca_file
     return AioAdmin.from_connection_string(conn_str(emu, namespace), **kw)
 
 
@@ -195,3 +228,36 @@ async def async_wait_until(fn, timeout: float = 5.0, interval: float = 0.2):
 
 def td(seconds: float) -> timedelta:
     return timedelta(seconds=seconds)
+
+
+# -- raw management requests against real Azure (used to empty the namespace) ---------------------------
+def azure_http(method: str, path: str, api: str = "2021-05") -> tuple:
+    """One HTTPS request to the real namespace with a SAS token made from the shared key: (status, body).
+    api-version 2021-05 on purpose: with 2024-05 Azure answers a topic that was changed with the Python SDK with a
+    duplicated block of elements, and the SDK can not read that (see the findings)."""
+    cs = dict(p.split("=", 1) for p in azure_conn_str().split(";") if "=" in p)
+    netloc = urlparse(cs["Endpoint"]).netloc
+    resource = quote_plus(f"https://{netloc}/")
+    expiry = str(int(time.time()) + 600)
+    sig = base64.b64encode(hmac.new(cs["SharedAccessKey"].encode(), f"{resource}\n{expiry}".encode(), hashlib.sha256).digest())
+    token = f"SharedAccessSignature sr={resource}&sig={quote_plus(sig)}&se={expiry}&skn={cs['SharedAccessKeyName']}"
+    sep = "&" if "?" in path else "?"
+    req = urllib.request.Request(f"https://{netloc}/{path}{sep}api-version={api}", method=method, headers={"Authorization": token})
+    for attempt in range(4):  # GET and DELETE can be repeated; a handshake or a read now and then times out
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode()
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 3:
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
+def azure_entity_names(kind: str) -> list:
+    """Names of all queues (`kind="queues"`) or topics ("topics") of the real namespace, the first 100."""
+    status, body = azure_http("GET", f"$Resources/{kind}?$top=100&$skip=0")
+    if status != 200:
+        raise RuntimeError(f"listing {kind} answered {status}")
+    return [t for t in re.findall(r"<title[^>]*>([^<]*)</title>", body) if t.lower() != kind]

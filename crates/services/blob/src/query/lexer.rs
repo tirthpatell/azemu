@@ -1,6 +1,6 @@
 //! Turning the text of an expression into tokens.
 
-use super::sql::{err, SqlError, MAX_NODES};
+use super::sql::{err, ErrKind, SqlError, MAX_NODES};
 
 type R<T> = Result<T, SqlError>;
 
@@ -54,27 +54,15 @@ pub(super) fn lex(text: &str) -> R<Vec<Lexed>> {
                     i += 1;
                 }
             }
-            if i < chars.len() && matches!(chars[i].1, 'e' | 'E') {
-                let mut j = i + 1;
-                if j < chars.len() && matches!(chars[j].1, '+' | '-') {
-                    j += 1;
-                }
-                if j < chars.len() && chars[j].1.is_ascii_digit() {
-                    float = true;
-                    i = j;
-                    while i < chars.len() && chars[i].1.is_ascii_digit() {
-                        i += 1;
-                    }
-                }
-            }
+            // no exponent: the service reads `1e3` as the number 1 followed by the alias `e3` (checked against Azure)
             let s: String = chars[st..i].iter().map(|x| x.1).collect();
             tok = if float {
-                Tok::Float(s.parse().map_err(|_| SqlError { message: "bad number".into(), pos })?)
+                Tok::Float(s.parse().map_err(|_| SqlError { message: "bad number".into(), pos, kind: ErrKind::Syntax })?)
             } else {
                 match s.parse::<i64>() {
                     Ok(n) => Tok::Int(n),
                     // too big for an INT: a FLOAT, as a number in a query is
-                    Err(_) => Tok::Float(s.parse().map_err(|_| SqlError { message: "bad number".into(), pos })?),
+                    Err(_) => Tok::Float(s.parse().map_err(|_| SqlError { message: "bad number".into(), pos, kind: ErrKind::Syntax })?),
                 }
             };
         } else if c == '\'' || c == '"' {
@@ -106,7 +94,6 @@ pub(super) fn lex(text: &str) -> R<Vec<Lexed>> {
                 ">=" => Some(">="),
                 "<>" => Some("<>"),
                 "!=" => Some("!="),
-                "||" => Some("||"),
                 _ => None,
             };
             if let Some(s) = sym {

@@ -13,7 +13,8 @@ use crate::headers::{blob_headers, hash_headers, md5_header, write_headers};
 use crate::lease::{self, Scope};
 use crate::state::{join, Blob, BlobEntry, BlobKind, OutBody, Piece};
 use crate::store::{
-    check_container_scope, check_cpk, check_mutable, check_scope_write, install, keep_deleted, new_id, new_spec, roll_version,
+    check_container_scope, check_cpk, check_cpk_read, check_mutable, check_scope_write, install, keep_deleted, new_id, new_spec,
+    roll_version,
 };
 use crate::util::*;
 
@@ -111,7 +112,7 @@ pub fn get_blob(cx: &mut Cx, container: &str, name: &str, head: bool) -> ApiResu
         || (snapshot.is_none() && version.is_none());
     let b = e.find(snapshot.as_deref(), version.as_deref()).ok_or_else(blob_not_found)?;
 
-    check_cpk(b, req)?;
+    check_cpk_read(b, req)?;
     if snapshot.is_none() && version.is_none() {
         lease::check_read(&b.lease, hdr(req, "x-ms-lease-id"), Scope::Blob)?;
     }

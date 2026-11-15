@@ -124,7 +124,7 @@ pub(crate) fn lex(src: &str) -> Result<Vec<Token>, ParseError> {
             '*' => simple(Tok::Star, 1),
             '/' => simple(Tok::Slash, 1),
             '%' => simple(Tok::Percent, 1),
-            '=' if next == Some('=') => simple(Tok::Eq, 2),
+            // Azure has no `==`: the second `=` is a syntax error (`a ==` is "unexpected EQ" at column 3)
             '=' => simple(Tok::Eq, 1),
             '!' if next == Some('=') => simple(Tok::Ne, 2),
             '<' if next == Some('>') => simple(Tok::Ne, 2),

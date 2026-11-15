@@ -4,7 +4,8 @@
 #                                                the container test, licences, the Python SDK suites (all but Service Bus and
 #                                                Event Hubs), and the Go and Rust SDK suites
 #   only when started by hand (Run workflow):    the two slow Python suites (Service Bus, Event Hubs; about half an hour
-#                                                each) and the JavaScript, Java and .NET SDK suites
+#                                                each), the JavaScript, Java and .NET SDK suites, and the Rust tests on
+#                                                macOS (macos-rust: not part of ci-passed)
 #
 # Nothing runs on a schedule.
 #
@@ -55,6 +56,7 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo fmt --all --check --manifest-path tests/sdk-rust/Cargo.toml
       - run: cargo fmt --all --check --manifest-path tests/sdk-rust/beta/Cargo.toml
+      - run: cargo fmt --all --check --manifest-path tests/sdk-rust/older/Cargo.toml
       - run: cargo fmt --all --check --manifest-path examples/rust/Cargo.toml
 
   clippy:
@@ -164,7 +166,7 @@ jobs:
           suites() {
             python tests/run_sdk_suites.py --bin dist/azemu --jobs 4 \
               --only appconfig --only arm --only blob --only cosmos --only datalake --only eventgrid --only identity \
-              --only kafka --only keyvault --only persistence --only queue --only storage_events --only table \
+              --only kafka --only keyvault --only persistence --only queue --only seed --only storage_events --only table \
               | tee "$RUNNER_TEMP/python-suites.txt"
           }
           suites || { echo "::warning::the Python suites failed once; running them again"; suites; }
@@ -347,17 +349,79 @@ jobs:
           workspaces: |
             tests/sdk-rust
             tests/sdk-rust/beta
+            tests/sdk-rust/older
       - uses: actions/download-artifact@v8
         with:
           name: azemu-linux-x86_64
           path: dist
       - run: chmod +x dist/azemu
-      - name: run the suite (stable SDK crates, then the beta crates)
+      - name: run the suite (stable SDK crates, then the beta crates, then the older versions)
         env:
           AZEMU_BIN: ${{ github.workspace }}/dist/azemu
         run: |
-          suite() { (cd tests/sdk-rust && cargo test --no-fail-fast) && (cd tests/sdk-rust/beta && cargo test --no-fail-fast); }
+          suite() {
+            (cd tests/sdk-rust && cargo test --no-fail-fast) &&
+              (cd tests/sdk-rust/beta && cargo test --no-fail-fast) &&
+              (cd tests/sdk-rust/older && cargo test --no-fail-fast)
+          }
           suite || { echo "::warning::the Rust suite failed once; running it again"; suite; }
+
+  # The Rust SDK crates on macOS, started by hand. There the TLS stack asks the Keychain and does not read SSL_CERT_FILE, so the
+  # emulator's certificate authority is put in the System keychain (docs/rust.md, section 3). Not part of ci-passed.
+  # Passed on macos-26-arm64 in November 2026.
+  macos-rust:
+    name: Rust SDK tests on macOS (by hand)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 90
+    env:
+      AZEMU_PORT: "4577"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            tests/sdk-rust
+            examples/rust
+      - run: cargo build --locked -p azemu
+      - name: start azemu with a certificate directory that stays
+        run: |
+          certs="$RUNNER_TEMP/azemu-certs"
+          mkdir -p "$certs" && chmod 700 "$certs"
+          target/debug/azemu --port "$AZEMU_PORT" --cert-dir "$certs" > "$RUNNER_TEMP/azemu.out" 2> "$RUNNER_TEMP/azemu.log" &
+          echo "$!" > "$RUNNER_TEMP/azemu.pid"
+          for _ in $(seq 1 60); do
+            curl -fsS "http://127.0.0.1:$AZEMU_PORT/_azemu/health" > /dev/null 2>&1 && break
+            sleep 1
+          done
+          curl -fsS "http://127.0.0.1:$AZEMU_PORT/_azemu/health"
+          echo "AZEMU_GATEWAY=http://127.0.0.1:$AZEMU_PORT" >> "$GITHUB_ENV"
+          echo "AZEMU_CA_FILE=$certs/ca.pem" >> "$GITHUB_ENV"
+      - name: trust the certificate authority in the System keychain
+        run: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$AZEMU_CA_FILE"
+      # The tests reach the emulator by names such as acct.blob.core.localhost, which macOS resolves from version 26 on
+      # (docs/install.md). Say so here instead of failing in the tests with a connection error.
+      - name: names under .localhost resolve
+        run: |
+          if ! python3 -c 'import socket; socket.getaddrinfo("azemu-check.blob.core.localhost", 4577)'; then
+            echo "::error::azemu-check.blob.core.localhost does not resolve on this runner ($(sw_vers -productVersion)); the tests need macOS 26 or newer, or a resolver for .localhost"
+            exit 1
+          fi
+      - name: examples/rust (the testkit uses the emulator that is running)
+        run: cargo test --manifest-path examples/rust/Cargo.toml
+      - name: the Rust SDK suite, Blob, Cosmos DB and identity
+        working-directory: tests/sdk-rust
+        run: cargo test --test blob --test cosmos --test identity
+      - name: azemu log
+        if: always()
+        run: tail -n 100 "$RUNNER_TEMP/azemu.log" || true
+      - name: stop azemu (the runner is thrown away, so the keychain needs no clean-up)
+        if: always()
+        run: kill "$(cat "$RUNNER_TEMP/azemu.pid")" 2>/dev/null || true
 
   # One job to name in branch protection: it passes when every job that ran on this event passed (a skipped job is fine).
   ci-passed:

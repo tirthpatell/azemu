@@ -6,7 +6,9 @@ use azemu_core::serde_json::Value;
 use azemu_core::testing::{TestResponse, TestServer};
 use azemu_table::TableService;
 
-pub const AUTH: (&str, &str) = ("Authorization", "SharedKey acct:c2ln");
+/// A bearer token: not compared with anything. (A Shared Key signature is compared for the development account, so a
+/// placeholder one would be refused there; the tests of the signatures are in `shared_key` and `sas`.)
+pub const AUTH: (&str, &str) = ("Authorization", "Bearer token");
 pub const JSON: (&str, &str) = ("Content-Type", "application/json");
 
 pub struct Env {

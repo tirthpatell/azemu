@@ -90,6 +90,10 @@ impl TableService {
         if secondary && !matches!(req.method, Method::GET | Method::HEAD) {
             return Err((ApiError::new(403, "InsufficientAccountPermissions", "Write operations are not allowed."), xml));
         }
+        // an `x-ms-version` Azure does not know is refused before anything else
+        if azemu_core::storage::credentials::refused_version(req).is_some() {
+            return Err((errors::invalid_version(), false));
+        }
         let mut st = self.state.lock();
         let acct = st.account(&req.account);
 
@@ -261,17 +265,19 @@ impl Service for TableService {
         let preflight = req.method == Method::OPTIONS;
         let mut resp = if preflight {
             // CORS preflight: no credentials, judged against the service's CORS rules.
-            azemu_core::storage::cors::preflight(&req, &self.cors_rules(&req.account))
+            azemu_core::storage::cors::preflight_table(&req, &self.cors_rules(&req.account))
         } else {
             match self.dispatch(&req) {
                 Ok(r) => with_data_service_version(r, &req),
                 Err((e, xml)) => render(&e, &req.ctx, xml),
             }
         };
-        if !preflight && req.header("origin").is_some() {
+        // the common headers first: `Access-Control-Expose-Headers` names the ones the answer has
+        resp = finish(resp, &req, SERVER);
+        if !preflight {
             azemu_core::storage::cors::apply(&mut resp, &req, &self.cors_rules(&req.account));
         }
-        finish(resp, &req, SERVER)
+        resp
     }
 
     fn reset(&self) {

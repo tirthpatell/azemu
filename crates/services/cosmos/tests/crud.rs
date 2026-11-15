@@ -195,7 +195,8 @@ async fn scripts_users_and_sproc_execution() {
     // executing needs the partition key (scripts are scoped to one logical partition)
     let r = h.json("POST", "dbs/d/colls/c/sprocs/sp", &[], &json!([])).await;
     assert_eq!(r.status, 400);
-    assert!(r.json()["message"].as_str().unwrap().contains("PartitionKey value must be supplied"));
+    assert!(r.json()["message"].as_str().unwrap().contains("has fewer components than defined in the the collection"));
+    assert_eq!(r.header("x-ms-substatus"), Some("1001"));
     let r = h.json("POST", "dbs/d/colls/c/sprocs/sp", &[("x-ms-documentdb-partitionkey", "[\"p\"]")], &json!([])).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let r = h.json("POST", "dbs/d/users", &[], &json!({"id": "u1"})).await;
@@ -203,7 +204,7 @@ async fn scripts_users_and_sproc_execution() {
     let p = json!({"id": "p1", "permissionMode": "read", "resource": "dbs/d/colls/c"});
     let r = h.json("POST", "dbs/d/users/u1/permissions", &[], &p).await;
     assert_eq!(r.status, 201);
-    assert_eq!(r.json()["permissionMode"], "Read");
+    assert_eq!(r.json()["permissionMode"], "read", "the case is kept as it was sent");
     assert!(r.json()["_token"].is_string());
     let r = h.req("GET", "dbs/d/users/u1/permissions", &[], "").await;
     assert_eq!(r.json()["_count"], 1);

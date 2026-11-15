@@ -243,8 +243,14 @@ async fn key_soft_delete_recover_purge() {
     assert_eq!(kv.get("/keys/k/versions").await.json()["value"].as_array().unwrap().len(), 2);
     assert_eq!(kv.get(&format!("/keys/k/{}", kid_version(&created))).await.json()["tags"]["a"], "b");
 
+    // purge and recover of a key that is in the other state (tried against Azure in November 2026)
     let r = kv.call("DELETE", "/deletedkeys/k", None).await;
-    assert_eq!((r.status, r.json()["error"]["message"].as_str().unwrap()), (404, "Deleted Key not found: k"));
+    assert_eq!(
+        (r.status, code(&r).as_str(), r.json()["error"]["message"].as_str().unwrap()),
+        (400, "MethodNotAllowed", "Key must be deleted prior to being purged.")
+    );
+    let r = kv.call("POST", "/deletedkeys/k/recover", None).await;
+    assert_eq!((r.status, r.json()["error"]["message"].as_str().unwrap()), (400, "Key exists already: k"));
     kv.call("DELETE", "/keys/k", None).await;
     assert_eq!(kv.call("DELETE", "/deletedkeys/k", None).await.status, 204);
     assert_eq!(kv.get("/deletedkeys/k").await.status, 404);

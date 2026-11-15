@@ -24,6 +24,7 @@ def test_produce_and_consume_over_tls(emu, track):
     assert (m.value(), m.partition()) == (b"over tls", 1)
 
 
+@pytest.mark.emulator_only  # namespaces by name and the emulator's broker address
 def test_the_tls_server_name_is_the_namespace_and_the_broker_address(emu, track):
     hub = kutil.uniq("ns")
     kutil.admin_create(emu, hub, 1, namespace="alpha")
@@ -46,6 +47,7 @@ def test_sasl_plain_over_tls_with_a_connection_string(emu, track):
     assert consume(c, 1)[0].value() == b"hello sasl"
 
 
+@pytest.mark.emulator_only  # plain Kafka on the emulator's port; Azure serves port 9093 with TLS only
 def test_sasl_plain_without_tls_takes_the_namespace_from_the_connection_string(emu, track):
     hub = kutil.uniq("saslplain")
     kutil.admin_create(emu, hub, 1, namespace=kutil.NS)
@@ -61,17 +63,20 @@ def test_sasl_plain_without_tls_takes_the_namespace_from_the_connection_string(e
     assert hub not in kutil.admin(sasl_plain(emu, "gamma")).list_topics(timeout=10).topics
 
 
+@pytest.mark.emulator_only  # the emulator accepts every credential, Azure does not
 def test_sasl_plain_accepts_any_credentials(emu, track):
     conf = {**sasl_plain(emu), "sasl.username": "whoever", "sasl.password": "Endpoint=sb://myns.eventhub.localhost/;SharedAccessKeyName=x;SharedAccessKey=anything"}
     assert kutil.admin(conf).list_topics(timeout=10) is not None
 
 
+@pytest.mark.emulator_only  # as above
 def test_sasl_plain_with_a_password_that_is_not_a_connection_string_still_works(emu, track):
     conf = {**sasl_plain(emu), "sasl.password": "not a connection string"}
     md = kutil.admin(conf).list_topics(timeout=10)
     assert len(md.brokers) == 1
 
 
+@pytest.mark.emulator_only  # Azure needs SASL
 def test_a_client_that_skips_sasl_is_accepted(emu, track):
     hub = kutil.uniq("nosasl")
     kutil.admin_create(emu, hub, 1)  # namespace default
@@ -79,6 +84,7 @@ def test_a_client_that_skips_sasl_is_accepted(emu, track):
     produce_all(p, hub, [b"x"])
 
 
+@pytest.mark.emulator_only  # Azure wants a real Microsoft Entra token
 def test_oauthbearer_is_accepted_with_any_token(emu, track):
     hub = kutil.uniq("oauth")
     kutil.admin_create(emu, hub, 1, namespace=kutil.NS)
@@ -94,6 +100,7 @@ def test_oauthbearer_is_accepted_with_any_token(emu, track):
     assert calls
 
 
+@pytest.mark.emulator_only  # Azure's certificate is trusted by the system store
 def test_a_client_that_does_not_trust_the_ca_cannot_connect(emu):
     conf = {**tls(emu), "ssl.ca.location": None}
     conf.pop("ssl.ca.location")
@@ -106,6 +113,7 @@ def test_a_client_that_does_not_trust_the_ca_cannot_connect(emu):
         kutil.admin(conf).list_topics(timeout=6)
 
 
+@pytest.mark.emulator_only  # one port for both
 def test_plain_and_tls_work_on_the_same_port_at_the_same_time(emu, track):
     hub = kutil.uniq("both")
     kutil.admin_create(emu, hub, 1, namespace=kutil.NS)
@@ -119,7 +127,7 @@ def test_plain_and_tls_work_on_the_same_port_at_the_same_time(emu, track):
 def test_amqp_and_kafka_share_the_port(emu, track):
     # AMQP over plain TCP and TLS keep working next to Kafka (the first bytes tell the protocols apart)
     hub = kutil.uniq("amqp")
-    ehutil.admin_create_hub(emu, hub, 1)
+    kutil.admin_create(emu, hub, 1, namespace=ehutil.NAMESPACE)
     prod = track(ehutil.make_producer(emu, hub))
     ehutil.send_n(prod, 2, partition_id="0")
     p = track(producer(tls(emu)))

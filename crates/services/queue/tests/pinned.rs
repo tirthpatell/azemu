@@ -10,7 +10,8 @@ mod common;
 use common::{error_code, msg_body, tag, tags};
 
 const KEY: &str = "Authorization";
-const AUTH: &str = "SharedKey devstoreaccount1:c2ln";
+// a bearer token: a Shared Key signature of the development account is compared, so a placeholder would be refused
+const AUTH: &str = "Bearer token";
 
 #[tokio::test]
 async fn path_style_account_on_a_pinned_port() {
@@ -52,8 +53,10 @@ async fn path_style_account_on_a_pinned_port() {
     let r = c.send("GET", &format!("{base}/?comp=list"), &h, "").await;
     assert_eq!(r.status, 200);
 
-    // SAS works the same on the pinned listener
-    let sas = "sv=2021-08-06&sp=r&se=2099-01-01T00:00:00Z&sig=x";
+    // SAS works the same on the pinned listener (another account than the development account: its signatures are compared)
+    let base = format!("http://{addr}/pinacct");
+    assert_eq!(c.send("PUT", &format!("{base}/pinq"), &h, "").await.status, 201);
+    let sas = "sv=2021-08-06&sp=r&se=2099-01-01T00:00:00Z&sig=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     let r = c.send("GET", &format!("{base}/pinq/messages?peekonly=true&{sas}"), &[], "").await;
     assert_eq!(r.status, 200);
 
@@ -88,7 +91,7 @@ async fn host_style_and_path_style_see_the_same_account() {
 async fn gateway_service_url_is_host_style() {
     let srv = TestServer::start(vec![Arc::new(QueueService::new())]).await;
     let base = srv.url("queue", "myacct");
-    let h = [(KEY, "SharedKey myacct:x")];
+    let h = [(KEY, "SharedKey myacct:AAAA")];
     let r = srv.send("GET", &format!("{base}/?comp=list"), &h, "").await;
     assert!(r.text().contains(&format!("ServiceEndpoint=\"{base}/\"")), "{}", r.text());
     // the same over TLS

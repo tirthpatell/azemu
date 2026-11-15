@@ -13,8 +13,13 @@ from pathlib import Path
 # the Event Hubs suite's helpers (AMQP side of the cross-protocol tests)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "eventhubs"))
 
+import azure_eh
 from confluent_kafka import Consumer, KafkaError, Producer
 from confluent_kafka.admin import AdminClient
+
+# True when the suite runs against a real namespace (AZEMU_AZURE=1; tests/sdk-python/README.md, "Running a suite against Azure").
+AZURE = azure_eh.enabled()
+SCALE = 2.0 if AZURE else 1.0  # a real broker needs longer to form a group and answer than an emulator on the same machine
 
 DEFAULT_NS = "default"
 NS = "myns"
@@ -28,10 +33,22 @@ def uniq(prefix="t") -> str:
 
 
 def conn_string(emu, namespace=NS) -> str:
+    if emu.azure:
+        return azure_eh.conn_str_base()
     return f"Endpoint=sb://{namespace}.eventhub.localhost:{emu.port}/;SharedAccessKeyName={KEY_NAME};SharedAccessKey={KEY}"
 
 
+# Topics a test made on Azure; the autouse fixture in conftest.py deletes them when the test ends (a namespace holds at most 10 hubs).
+CREATED = []
+
+
 def admin_create(emu, hub, partitions=4, namespace=DEFAULT_NS, groups=(), retention_seconds=None):
+    if emu.azure:  # a topic is an event hub: made through Resource Manager (the Kafka admin API is tested in test_admin.py)
+        azure_eh.ensure_hub(partitions, name=hub, retention_days=max(1, -(-(retention_seconds or 0) // 86400)))
+        CREATED.append(hub)
+        for g in groups:
+            azure_eh.ensure_group(hub, g)
+        return
     spec = {"partitionCount": partitions, "consumerGroups": list(groups)}
     if retention_seconds:
         spec["retentionSeconds"] = retention_seconds
@@ -43,6 +60,15 @@ def admin_create(emu, hub, partitions=4, namespace=DEFAULT_NS, groups=(), retent
 
 
 def admin_get(emu, hub, namespace=DEFAULT_NS):
+    """The event hub behind a topic as {"partitionCount", "retentionSeconds", "consumerGroups"}, or None when there is none."""
+    if emu.azure:
+        r = azure_eh._arm("GET", f"eventhubs/{hub}", ok=(200, 404))
+        if r.status_code == 404:
+            return None
+        props = r.json()["properties"]
+        groups = [g["name"] for g in azure_eh._arm("GET", f"eventhubs/{hub}/consumergroups").json().get("value", [])]
+        return {"partitionCount": props["partitionCount"], "retentionSeconds": props.get("messageRetentionInDays", 0) * 86400,
+                "consumerGroups": groups}
     try:
         with urllib.request.urlopen(f"{emu.gateway}/_azemu/eventhubs/{namespace}/hubs/{hub}", timeout=10) as r:
             return json.loads(r.read())
@@ -57,13 +83,30 @@ def admin_groups(emu, namespace=DEFAULT_NS):
         return json.loads(r.read())["groups"]
 
 
+def azure_conf(emu) -> dict:
+    """The namespace's Kafka endpoint: port 9093, TLS, SASL PLAIN with the connection string (the only way in on Azure)."""
+    return {
+        "bootstrap.servers": f"{azure_eh.fqdn()}:9093",
+        "security.protocol": "SASL_SSL",
+        "sasl.mechanism": "PLAIN",
+        "sasl.username": "$ConnectionString",
+        "sasl.password": azure_eh.conn_str_base(),
+        "socket.timeout.ms": 10000,
+        "log.connection.close": False,
+    }
+
+
 def plain(emu) -> dict:
-    """Plain text, no SASL, namespace `default`."""
+    """Plain text, no SASL, namespace `default` (on Azure: the only kind of connection there is, see `azure_conf`)."""
+    if emu.azure:
+        return azure_conf(emu)
     return {"bootstrap.servers": f"127.0.0.1:{emu.port}", "socket.timeout.ms": 10000, "log.connection.close": False}
 
 
 def sasl_plain(emu, namespace=NS) -> dict:
     """SASL_PLAINTEXT with the connection string as the password (the namespace comes from its Endpoint)."""
+    if emu.azure:
+        return azure_conf(emu)
     return {
         **plain(emu),
         "security.protocol": "SASL_PLAINTEXT",
@@ -75,6 +118,8 @@ def sasl_plain(emu, namespace=NS) -> dict:
 
 def tls(emu, namespace=NS) -> dict:
     """TLS, the emulator's CA, and the host name that carries the namespace (SNI)."""
+    if emu.azure:
+        return azure_conf(emu)
     return {
         "bootstrap.servers": f"{namespace}.eventhub.localhost:{emu.port}",
         "security.protocol": "ssl",
@@ -85,6 +130,8 @@ def tls(emu, namespace=NS) -> dict:
 
 
 def sasl_ssl(emu, namespace=NS) -> dict:
+    if emu.azure:
+        return azure_conf(emu)
     return {
         **tls(emu, namespace),
         "security.protocol": "SASL_SSL",
@@ -129,6 +176,7 @@ def produce_all(p, topic, items, **kw):
 
 def consume(c, n, timeout=20.0, quiet_ok=False):
     """Poll until `n` messages arrive (or `timeout`); errors other than end-of-partition fail the test."""
+    timeout *= SCALE
     out = []
     end = time.time() + timeout
     while len(out) < n and time.time() < end:
@@ -146,6 +194,7 @@ def consume(c, n, timeout=20.0, quiet_ok=False):
 
 
 def wait_assignment(c, timeout=20.0):
+    timeout *= SCALE
     end = time.time() + timeout
     while time.time() < end:
         c.poll(0.2)

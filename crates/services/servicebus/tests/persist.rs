@@ -120,7 +120,7 @@ async fn every_kind_of_state_survives_a_restart() {
     let mut corr = azemu_servicebus::rules::CorrelationFilter { label: Some("blue".into()), ..Default::default() };
     corr.properties.insert("n".into(), azemu_servicebus_sql::Value::Long(3));
     let mut params = azemu_servicebus_sql::Params::new();
-    params.insert("@x".into(), azemu_servicebus_sql::Value::Str("v".into()));
+    params.insert("x".into(), azemu_servicebus_sql::Value::Str("v".into()));
     let sql = Rule::sql_filter("sqlrule", "color = @x AND n > 1", params, 123)
         .unwrap()
         .with_action("SET out = 'yes'", azemu_servicebus_sql::Params::new())

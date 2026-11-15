@@ -9,7 +9,7 @@ import time
 import pytest
 from azure.cosmos.exceptions import CosmosHttpResponseError
 
-pytestmark = pytest.mark.not_on_vnext(reason="vnext has no server-side JavaScript")
+pytestmark = [pytest.mark.not_on_vnext(reason="vnext has no server-side JavaScript"), pytest.mark.emulator_only]  # the hostile-script cases test the emulator's own worker
 
 HELLO = "function () { getContext().getResponse().setBody('Hello, World'); }"
 FIB = "function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }"

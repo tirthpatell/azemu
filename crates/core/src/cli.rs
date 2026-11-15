@@ -85,6 +85,12 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     data_dir: Option<PathBuf>,
 
+    /// A JSON file of things that exist from the start: blob containers, queues, tables, Cosmos databases and containers, Key
+    /// Vault secrets, App Configuration key-values. They are created again after every POST /_azemu/reset, and left as they
+    /// are when they already exist (state read from --data-dir). Also AZEMU_SEED. The format is in docs/seed.md.
+    #[arg(long, value_name = "FILE")]
+    seed: Option<PathBuf>,
+
     /// Seconds between saves of changed state when --data-dir is set (also AZEMU_SAVE_INTERVAL). 0: save only on
     /// POST /_azemu/save and at shutdown.
     #[arg(long, value_name = "SECONDS")]
@@ -540,6 +546,10 @@ pub async fn run_cli(services: Vec<Arc<dyn Service>>, raw: Vec<Arc<dyn RawProtoc
     } else if cli.save_interval.is_some() || cli.data_discard_unreadable {
         bail!("--save-interval and --data-discard-unreadable need --data-dir (or AZEMU_DATA_DIR)");
     }
+    // `--seed` and AZEMU_SEED
+    if let Some(file) = cli.seed.clone().or_else(|| crate::settings::text("AZEMU_SEED").map(PathBuf::from)) {
+        b = b.seed_file(file);
+    }
     for (i, ip) in hosts.iter().enumerate() {
         // With the default host list only the first (IPv4) address is mandatory:
         // machines without IPv6 cannot bind ::1.
@@ -561,6 +571,8 @@ pub async fn run_cli(services: Vec<Arc<dyn Service>>, raw: Vec<Arc<dyn RawProtoc
         }
     }
 
+    // before the start, so that a signal sent the moment the ready line appears (or during a long load) stops azemu cleanly
+    let stop_signal = wait_for_signal();
     let running = b.start().await.map_err(|e| explain_start_error(e, &plan))?;
     // Settings are read when the services are built; a name nobody read is most likely a typing mistake. A setting
     // that a crate describes but reads later (on first use) is not reported.
@@ -571,11 +583,11 @@ pub async fn run_cli(services: Vec<Arc<dyn Service>>, raw: Vec<Arc<dyn RawProtoc
     announce(&running)?;
     if cli.exit_on_stdin_close {
         tokio::select! {
-            _ = wait_for_signal() => {}
+            _ = stop_signal => {}
             _ = wait_for_stdin_end() => tracing::info!("standard input was closed"),
         }
     } else {
-        wait_for_signal().await;
+        stop_signal.await;
     }
     tracing::info!("shutting down (a second Ctrl-C or SIGTERM quits at once, without saving)");
     let result = tokio::select! {
@@ -672,25 +684,35 @@ async fn wait_for_stdin_end() {
     .await;
 }
 
-async fn wait_for_signal() {
+/// A future that ends at Ctrl-C or SIGTERM. The handlers are installed when this is called, not when the future is first
+/// polled: a signal that arrives in between is kept and ends the future at once. (Installed later, a SIGTERM sent the
+/// moment the ready line appears would kill the process the way the system does, with no save and no exit code.)
+fn wait_for_signal() -> impl std::future::Future<Output = ()> {
     #[cfg(unix)]
-    {
+    let (term, int) = {
         use tokio::signal::unix::{signal, SignalKind};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
+        (signal(SignalKind::terminate()).ok(), signal(SignalKind::interrupt()).ok())
+    };
+    async move {
+        #[cfg(unix)]
+        match (term, int) {
+            (Some(mut term), Some(mut int)) => {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
+                    _ = int.recv() => {}
                     _ = term.recv() => {}
                 }
             }
-            Err(_) => {
+            (Some(mut one), None) | (None, Some(mut one)) => {
+                let _ = one.recv().await;
+            }
+            (None, None) => {
                 let _ = tokio::signal::ctrl_c().await;
             }
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = tokio::signal::ctrl_c().await;
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
     }
 }
 

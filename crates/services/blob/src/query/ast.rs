@@ -20,7 +20,6 @@ pub enum BinOp {
     Mul,
     Div,
     Mod,
-    Concat,
     Eq,
     Ne,
     Lt,
@@ -69,10 +68,6 @@ pub enum Expr {
     Neg(Box<Expr>),
     Not(Box<Expr>),
     Bin(BinOp, Box<Expr>, Box<Expr>),
-    IsNull {
-        e: Box<Expr>,
-        neg: bool,
-    },
     IsMissing {
         e: Box<Expr>,
         neg: bool,
@@ -132,6 +127,8 @@ pub enum Projection {
 pub struct Select {
     pub projection: Projection,
     pub from: Vec<FromStep>,
+    /// A path was written after `BlobStorage` (`[*]`, `.a`): not allowed over delimited text.
+    pub has_path: bool,
     pub filter: Option<Expr>,
     pub limit: Option<u64>,
     /// Every select item is an aggregate: one row comes out at the end.

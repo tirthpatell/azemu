@@ -32,7 +32,7 @@ fn needs_query_plan_table() {
         ("SELECT c.id FROM c WHERE c.x = 1", false),
         ("SELECT VALUE c.id FROM c JOIN t IN c.tags WHERE t = 1", false),
         ("SELECT VALUE (SELECT VALUE COUNT(1) FROM x IN c.arr) FROM c", false),
-        ("SELECT VALUE ARRAY(SELECT VALUE x FROM x IN c.arr ORDER BY x) FROM c", false),
+        ("SELECT VALUE ARRAY(SELECT VALUE x FROM x IN c.arr) FROM c", false),
         ("SELECT * FROM c WHERE EXISTS(SELECT VALUE 1 FROM x IN c.a)", false),
         ("SELECT 1", false),
         ("SELECT * FROM c ORDER BY c.id", true),
@@ -45,9 +45,9 @@ fn needs_query_plan_table() {
         ("SELECT TOP 3 * FROM c", true),
         ("SELECT TOP @n * FROM c", true),
         ("SELECT VALUE MAX(c.x) FROM c WHERE c.y = 1", true),
-        ("SELECT VALUE COUNT(1) FROM (SELECT DISTINCT VALUE c.x FROM c)", true),
+        ("SELECT VALUE COUNT(1) FROM (SELECT DISTINCT VALUE c.x FROM c) t", true),
         ("SELECT * FROM (SELECT * FROM c) t", false),
-        ("SELECT * FROM (SELECT TOP 1 * FROM c) t", true),
+        ("SELECT TOP 1 * FROM (SELECT * FROM c) t", true),
     ] {
         assert_eq!(parse(sql).unwrap().needs_query_plan(), expect, "{sql}");
     }
@@ -74,9 +74,10 @@ fn info_fields() {
 
     let i = parse("SELECT * FROM c OFFSET 5 LIMIT 10").unwrap().info(&p0());
     assert_eq!((i.offset, i.limit, i.top), (Some(5), Some(10), None));
-    assert_eq!(i.rewritten_query, "SELECT TOP 15 *\nFROM c");
+    // the partition sends the first offset + limit rows, written the way a real account plans it
+    assert_eq!(i.rewritten_query, "SELECT *\nFROM c\nOFFSET 0 LIMIT 15");
     let i = parse("select distinct c.a, c.b from c where c.x = 1 offset 2 limit 3").unwrap().info(&p0());
-    assert_eq!(i.rewritten_query, "SELECT DISTINCT TOP 5 c.a, c.b\nfrom c\nWHERE c.x = 1");
+    assert_eq!(i.rewritten_query, "SELECT DISTINCT c.a, c.b\nfrom c\nWHERE c.x = 1\nOFFSET 0 LIMIT 5");
     assert_eq!(i.distinct_type, DistinctType::Unordered);
 
     let i = parse("SELECT DISTINCT VALUE c.x FROM c ORDER BY c.x").unwrap().info(&p0());
@@ -88,10 +89,10 @@ fn info_fields() {
     assert_eq!(i.order_by_expressions, vec!["c.age", "c.name"]);
     assert_eq!(
         i.rewritten_query,
-        "SELECT c._rid, [{\"item\": c.age}, {\"item\": c.name}] AS orderByItems, {\"id\": c.id, \"name\": c.name} AS payload\nFROM c\nWHERE ({documentdb-formattableorderbyquery-filter}) AND (c.age > 3)\nORDER BY c.age DESC, c.name ASC"
+        "SELECT c._rid, [{\"item\": c.age}, {\"item\": c.name}] AS orderByItems, {\"id\": c.id, \"name\": c.name} AS payload\nFROM c\nWHERE ((c.age > 3) AND ({documentdb-formattableorderbyquery-filter}))\nORDER BY c.age DESC, c.name"
     );
     let i = parse("SELECT * FROM c ORDER BY c.age").unwrap().info(&p0());
-    assert_eq!(i.rewritten_query, "SELECT c._rid, [{\"item\": c.age}] AS orderByItems, c AS payload\nFROM c\nWHERE ({documentdb-formattableorderbyquery-filter})\nORDER BY c.age ASC");
+    assert_eq!(i.rewritten_query, "SELECT c._rid, [{\"item\": c.age}] AS orderByItems, c AS payload\nFROM c\nWHERE ({documentdb-formattableorderbyquery-filter})\nORDER BY c.age");
     let i = parse("SELECT VALUE c.id FROM c ORDER BY c[\"a b\"]").unwrap().info(&p0());
     assert_eq!(i.order_by_expressions, vec!["c[\"a b\"]"]);
     assert!(i.rewritten_query.contains("c.id AS payload"));
@@ -101,11 +102,14 @@ fn info_fields() {
     assert!(i.rewritten_query.starts_with("SELECT TOP 5 c._rid,"), "{}", i.rewritten_query);
     assert!(!i.rewritten_query.to_uppercase().contains("OFFSET"));
     let i = parse("SELECT DISTINCT VALUE c.x FROM c ORDER BY c.x").unwrap().info(&p0());
-    // ordered DISTINCT without TOP / OFFSET LIMIT: all rows with `_rid` (the SDKs remove the repeats; the Java SDK needs the `_rid`)
-    assert_eq!(i.rewritten_query, "SELECT c._rid, [{\"item\": c.x}] AS orderByItems, c.x AS payload\nFROM c\nWHERE ({documentdb-formattableorderbyquery-filter})\nORDER BY c.x ASC");
-    // with TOP the partition must remove the repeats before it counts
+    // ordered DISTINCT: all rows with `_rid` (the SDKs remove the repeats; the Java SDK needs the `_rid`), the filter keeps
+    // out the items without the value, as a real account plans it
+    let want = "SELECT c._rid, [{\"item\": c.x}] AS orderByItems, c.x AS payload\nFROM c\nWHERE (({documentdb-formattableorderbyquery-filter}) AND IS_DEFINED(c.x))\nORDER BY c.x";
+    assert_eq!(i.rewritten_query, want);
+    // also with TOP: the plan carries the count, the partition sends every row and no TOP
     let i = parse("SELECT DISTINCT TOP 2 VALUE c.x FROM c ORDER BY c.x").unwrap().info(&p0());
-    assert_eq!(i.rewritten_query, "SELECT DISTINCT TOP 2 VALUE {\"orderByItems\": [{\"item\": c.x}], \"payload\": c.x}\nFROM c\nWHERE ({documentdb-formattableorderbyquery-filter})\nORDER BY c.x ASC");
+    assert_eq!(i.top, Some(2));
+    assert_eq!(i.rewritten_query, want);
 
     let i = parse("SELECT VALUE COUNT(1) FROM c").unwrap().info(&p0());
     assert_eq!(i.aggregates, vec![AggregateKind::Count]);
@@ -160,10 +164,13 @@ fn info_json_shape() {
     assert_eq!(j["distinctType"], "None");
     assert_eq!(j["top"], Value::Null);
     assert_eq!(j["groupByAliasToAggregateType"], json!({"city": null, "n": "Count"}));
-    let i = parse("SELECT DISTINCT VALUE COUNT(1) FROM c ORDER BY c.x DESC").unwrap();
+    let i = parse("SELECT DISTINCT VALUE c.x FROM c ORDER BY c.x DESC").unwrap();
     let j = i.info(&p0()).to_json();
     assert_eq!(j["orderBy"], json!(["Descending"]));
     assert_eq!(j["distinctType"], "Ordered");
+    // ORDER BY next to an aggregate without GROUP BY is not part of the plan
+    let j = parse("SELECT VALUE COUNT(1) FROM c ORDER BY c.x DESC").unwrap().info(&p0()).to_json();
+    assert_eq!(j["orderBy"], json!([]));
     assert_eq!(j["aggregates"], json!(["Count"]));
     let j = parse("SELECT TOP 4 VALUE AVG(c.x) FROM c").unwrap().info(&p0()).to_json();
     assert_eq!(j["aggregates"], json!(["Average"]));
@@ -271,7 +278,7 @@ fn sdk_run(sql: &str, docs: &[Value], parts: usize) -> Vec<Value> {
             }
             results.push(match kind {
                 AggregateKind::Count => Some(json!(count)),
-                AggregateKind::Sum => sum.map(|s| json!(s)),
+                AggregateKind::Sum => sum.map(num),
                 AggregateKind::Average => avg.filter(|(_, c)| *c > 0).map(|(s, c)| json!(s / c as f64)),
                 _ => best,
             });
@@ -338,7 +345,17 @@ fn sdk_pipeline_matches_single_pass() {
         let expected = parse(sql).unwrap().execute(&docs, &p0(), &fixed_clock_opts()).unwrap();
         for parts in [1, 2, 3, 7] {
             let got = sdk_run(sql, &docs, parts);
-            assert_eq!(got, expected, "{sql} over {parts} partitions");
+            if sql.contains(" DESC") || (sql.contains("DISTINCT") && !sql.contains("ORDER BY")) {
+                // rows with equal keys come last-arrived first in one pass (a backwards index scan) and in the order of the
+                // partitions when the client merges: the same rows, in a different order within a tie
+                let key = |v: &Value| v.to_string();
+                let (mut a, mut b) = (got.clone(), expected.clone());
+                a.sort_by_key(key);
+                b.sort_by_key(key);
+                assert_eq!(a, b, "{sql} over {parts} partitions");
+            } else {
+                assert_eq!(got, expected, "{sql} over {parts} partitions");
+            }
         }
     }
 }
@@ -351,8 +368,7 @@ fn rewritten_result_shapes() {
     let rows = run_rw("SELECT c.id FROM c ORDER BY c.age");
     assert_eq!(rows[0], json!({"orderByItems": [{"item": 25}], "payload": {"id": "b"}}));
     assert_eq!(rows.len(), 7);
-    let mut o = fixed_clock_opts();
-    o.order_by_excludes_undefined = false;
+    let o = fixed_clock_opts();
     let rows = parse("SELECT c.id FROM c ORDER BY c.score").unwrap().execute_rewritten(&docs, &p0(), &o).unwrap();
     assert_eq!(rows[0], json!({"orderByItems": [{}], "payload": {"id": "c"}}));
     // _rid is part of the row when the document has one
@@ -365,14 +381,15 @@ fn rewritten_result_shapes() {
     assert_eq!(run_rw("SELECT VALUE AVG(c.score) FROM c"), vec![json!([{"item": {"sum": 25.5, "count": 6}}])]);
     assert_eq!(run_rw("SELECT VALUE MAX(c.age) FROM c"), vec![json!([{"item": "old"}])]);
     assert_eq!(run_rw("SELECT VALUE MIN(c.age) FROM c"), vec![json!([{"item": 25}])]);
-    assert_eq!(run_rw("SELECT VALUE SUM(c.nothing) FROM c"), vec![json!([{}])]);
-    // AVG without values: the SDK skips items that have no "sum" key
-    assert_eq!(run_rw("SELECT VALUE AVG(c.nothing) FROM c"), vec![json!([{"item": {"count": 0}}])]);
+    assert_eq!(run_rw("SELECT VALUE SUM(c.nothing) FROM c"), vec![json!([{"item": 0}])]); // the sum of no values is 0
+                                                                                          // AVG without values: `{"sum": 0, "count": 0}`, as a real account answers
+    assert_eq!(run_rw("SELECT VALUE AVG(c.nothing) FROM c"), vec![json!([{"item": {"sum": 0, "count": 0}}])]);
     assert_eq!(run_rw("SELECT VALUE COUNT(1) FROM c WHERE false"), vec![json!([{"item": 0}])]);
     // GROUP BY
     let rows = run_rw("SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city");
-    assert_eq!(rows[0], json!({"groupByItems": [{"item": "Seattle"}], "payload": {"city": "Seattle", "n": {"item": 2}}}));
-    assert_eq!(rows[2], json!({"groupByItems": [{}], "payload": {"n": {"item": 1}}}));
+    // one GROUP BY expression: ascending by the key, the group without it first
+    assert_eq!(rows[0], json!({"groupByItems": [{}], "payload": {"n": {"item": 1}}}));
+    assert_eq!(rows[rows.len() - 1], json!({"groupByItems": [{"item": "Seattle"}], "payload": {"city": "Seattle", "n": {"item": 2}}}));
     // no rewriting needed: the original query is executed
     assert_eq!(run_rw("SELECT VALUE c.id FROM c WHERE c.age = 25"), vec![json!("b"), json!("d")]);
     // the placeholder is accepted as `true`, also written by the gateway in other positions
@@ -396,6 +413,15 @@ fn rewritten_result_shapes() {
     assert_eq!(rows.len(), 4);
     assert_eq!(rows[0]["payload"], json!({"id": "a"}));
     let _ = EvalOptions::default();
+}
+
+/// A number as the service writes it: a whole value below 2^53 is an integer.
+fn num(f: f64) -> Value {
+    if f.fract() == 0.0 && f.abs() < 9007199254740992.0 {
+        json!(f as i64)
+    } else {
+        json!(f)
+    }
 }
 
 fn pk(sql: &str, paths: &[&str], params: Value) -> Option<Vec<Value>> {
@@ -442,7 +468,7 @@ fn partition_key_filter_cases() {
         ("SELECT * FROM c WHERE c.pk = 'a'", vec!["/other"]),
         ("SELECT * FROM c WHERE c.pk = 'a'", vec!["/pk", "/pk2"]),
         ("SELECT * FROM c IN c.items WHERE c.pk = 1", vec!["/pk"]),
-        ("SELECT * FROM c.inner i WHERE i.pk = 1", vec!["/pk"]),
+        ("SELECT * FROM c.inn i WHERE i.pk = 1", vec!["/pk"]),
         ("SELECT * FROM (SELECT * FROM c) t WHERE t.pk = 1", vec!["/pk"]),
         ("SELECT * FROM c WHERE c.PK = 'a'", vec!["/pk"]),
         ("SELECT * FROM c WHERE (SELECT VALUE c.pk) = 'a'", vec!["/pk"]),
@@ -528,7 +554,7 @@ impl JsAgg {
     fn result(&self, kind: Option<AggregateKind>) -> Option<Value> {
         match kind {
             Some(AggregateKind::Count) => Some(json!(self.count as i64)),
-            Some(AggregateKind::Sum) => self.sum.map(|s| json!(s)),
+            Some(AggregateKind::Sum) => self.sum.map(num),
             Some(AggregateKind::Average) => self.sum.filter(|_| self.count > 0.0).map(|s| json!(s / self.count)),
             _ => self.value.clone(),
         }
@@ -665,21 +691,24 @@ fn composite_min_max_is_asked_for_only_by_options() {
     let q = parse("SELECT VALUE MIN(c.age) FROM c").unwrap();
     // default: the bare value (the Python SDK)
     assert_eq!(q.info(&p0()).rewritten_query, "SELECT VALUE [{\"item\": MIN(c.age)}]\nFROM c");
-    // composite: {"min", "count"} (the JavaScript SDK); an empty partition has count 0 and no min
+    // composite: `item` stays the bare value and `item2` is {"min", "count"} (the JavaScript SDK reads it); an empty partition
+    // has count 0 and no min, as a real account answers
     let info = q.info_for(&p0(), PlanOptions { composite_min_max: true, ..PlanOptions::default() });
-    assert_eq!(info.rewritten_query, "SELECT VALUE [{\"item\": {\"min\": MIN(c.age), \"count\": COUNT(c.age)}}]\nFROM c");
+    assert_eq!(
+        info.rewritten_query,
+        "SELECT VALUE [{\"item\": MIN(c.age), \"item2\": {\"min\": MIN(c.age), \"count\": COUNT(c.age)}}]\nFROM c"
+    );
     assert_eq!(info.aggregates, vec![AggregateKind::Min]);
     let rows = parse(&info.rewritten_query).unwrap().execute(&people(), &p0(), &fixed_clock_opts()).unwrap();
-    assert_eq!(rows, vec![json!([{"item": {"min": 25, "count": 7}}])]);
+    assert_eq!(rows, vec![json!([{"item": 25, "item2": {"min": 25, "count": 7}}])]);
     let none = parse(&info.rewritten_query).unwrap().execute(&[] as &[Value], &p0(), &fixed_clock_opts()).unwrap();
-    assert_eq!(none, vec![json!([{"item": {"count": 0}}])]);
+    assert_eq!(none, vec![json!([{"item2": {"count": 0}}])]);
     // MAX and GROUP BY use the same form
     let g = parse("SELECT c.city, MAX(c.age) AS m FROM c GROUP BY c.city")
         .unwrap()
         .info_for(&p0(), PlanOptions { composite_min_max: true, ..PlanOptions::default() });
     assert!(
-        g.rewritten_query.contains("\"m\": {\"item\": {\"max\": MAX(c.age), \"count\": COUNT(c.age)}}")
-            || g.rewritten_query.contains("\"m\": {\"item\": {\"max\""),
+        g.rewritten_query.contains("\"m\": {\"item\": MAX(c.age), \"item2\": {\"max\": MAX(c.age), \"count\": COUNT(c.age)}}"),
         "{}",
         g.rewritten_query
     );
@@ -694,7 +723,8 @@ fn select_value_aggregate_with_group_by_names_its_operator_and_wraps_the_payload
     let i = q.info(&p0());
     assert_eq!(i.aggregates, vec![AggregateKind::Count]);
     assert!(i.has_select_value);
-    assert_eq!(i.group_by_aliases, vec!["$1".to_string()]);
+    // a real account plans no alias for the value form
+    assert!(i.group_by_aliases.is_empty());
     assert_eq!(
         i.rewritten_query,
         "SELECT [{\"item\": c.city}] AS groupByItems, [{\"item\": COUNT(1)}] AS payload\nFROM c\nWHERE c.age > 1\nGROUP BY c.city"
@@ -723,7 +753,7 @@ fn select_list_of_aggregates_without_group_by_is_planned_like_one_group_for_clie
     );
     assert_eq!(
         info.rewritten_query,
-        "SELECT VALUE {\"payload\": {\"n\": {\"item\": COUNT(1)}, \"hi\": {\"item\": MAX(c.age)}, \"$1\": {\"item\": {\"sum\": SUM(c.age), \"count\": COUNT(c.age)}}}}\nFROM c\nWHERE c.age > 1"
+        "SELECT {\"n\": {\"item\": COUNT(1)}, \"hi\": {\"item\": MAX(c.age)}, \"$1\": {\"item\": {\"sum\": SUM(c.age), \"count\": COUNT(c.age)}}} AS payload\nFROM c\nWHERE c.age > 1"
     );
     // each partition answers one object with a payload, also when it has no row
     let docs = vec![json!({"age": 30}), json!({"age": 40})];
@@ -731,7 +761,8 @@ fn select_list_of_aggregates_without_group_by_is_planned_like_one_group_for_clie
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["payload"]["n"], json!({"item": 2}));
     let none = parse(&info.rewritten_query).unwrap().execute(&Vec::<Value>::new(), &p0(), &fixed_clock_opts()).unwrap();
-    assert_eq!(none, vec![json!({"payload": {"n": {"item": 0}, "hi": {}, "$1": {"item": {"count": 0}}}})]);
+    // AVG of no values is `{"sum": 0, "count": 0}`, as a real account answers
+    assert_eq!(none, vec![json!({"payload": {"n": {"item": 0}, "hi": {}, "$1": {"item": {"sum": 0, "count": 0}}}})]);
 
     let old = q.info(&p0());
     assert!(old.group_by_aliases.is_empty() && old.group_by_alias_to_aggregate_type.is_empty());

@@ -50,9 +50,8 @@ pub(crate) fn parse_action(sql: &str) -> Result<Vec<Stmt>, ParseError> {
                 stmts.push(Stmt::Set { target, expr });
             }
             Verb::Remove => {
-                if target.scope == Scope::Sys {
-                    return Err(ParseError::new("only user properties can be removed, not system properties", target_pos));
-                }
+                // Azure takes `REMOVE sys.Label`; it changes nothing (see `PropertiesMut::remove`)
+                let _ = target_pos;
                 stmts.push(Stmt::Remove(target));
             }
         }
@@ -66,10 +65,8 @@ pub(crate) fn parse_action(sql: &str) -> Result<Vec<Stmt>, ParseError> {
                 p.advance();
                 verb = None;
             }
-            Tok::Comma => {
-                p.advance();
-                after_comma = true;
-            }
+            // Azure takes one statement after the other (`SET a = 1; SET b = 2`), not a list with commas
+            Tok::Comma => return Err(ParseError::new("unexpected character ','", p.pos())),
             _ => {}
         }
     }

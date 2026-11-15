@@ -2,7 +2,7 @@
 
 use azemu_core::Response;
 
-use super::entities::{next_link, paging};
+use super::entities::{check_name, etag_matches, next_link, paging};
 use super::error::{ApiError, ApiResult, ErrKind};
 use super::render::{self, Entry, CT_ENTRY, CT_FEED};
 use super::settings::{self, Kind, Opts};
@@ -43,29 +43,47 @@ fn sub_entry(cx: &Cx, topic: &Topic, sub: &Subscription, full: bool, single: boo
 pub fn get(shared: &Shared, cx: &Cx, topic: &str, name: &str) -> ApiResult<Response> {
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
-    let t = ns.topic(topic).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, name)))?;
+    // a topic that does not exist: the service answers with its list of services, as it does for an unknown queue
+    let Some(t) = ns.topic(topic) else { return Ok(super::misc::root_feed(cx)) };
     let sub = t.subs.get(&key(name)).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, name)))?;
     Ok(render::respond(200, CT_ENTRY, Some(&etag_of(sub.core.settings.updated_ms)), sub_entry(cx, t, sub, true, true, true)))
 }
 
 pub fn put(shared: &Shared, cx: &Cx, topic: &str, name: &str) -> ApiResult<Response> {
-    let root = xml::parse(&cx.req.body).ok_or_else(ApiError::bad_request)?;
-    let desc = settings::description(&root).ok_or_else(ApiError::bad_request)?;
+    let not_recognized = || ApiError::new(ErrKind::NotRecognized);
+    let root = xml::parse(&cx.req.body).ok_or_else(not_recognized)?;
+    let desc = settings::description(&root).ok_or_else(not_recognized)?;
     if settings::kind_of(desc) != Some(Kind::Subscription) {
         return Err(ApiError::bad_request());
     }
+    check_name(cx, name, "Subscription")?;
     let update = cx.req.header("if-match").is_some();
     let missing = || ApiError::not_found_entity(entity_id(cx, topic, name));
 
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
-    let t = ns.topic_mut(topic).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, "")))?;
+    if ns.topic(topic).is_none() {
+        return Err(not_recognized());
+    }
+    let id = entity_id(cx, topic, name);
+    let parsed = {
+        let old = ns.topic(topic).and_then(|t| t.subs.get(&key(name))).map(|s| s.core.settings.clone());
+        settings::parse(
+            desc,
+            &Opts {
+                kind: Kind::Subscription,
+                api: &cx.api,
+                existing: if update { old.as_ref() } else { None },
+                now: cx.now,
+                namespace: Some(&*ns),
+                id: &id,
+                standard: settings::standard_tier(),
+            },
+        )
+    };
+    let t = ns.topic_mut(topic).ok_or_else(not_recognized)?;
     let k = key(name);
     let old = t.subs.get(&k).map(|s| s.core.settings.clone());
-    let parsed = settings::parse(
-        desc,
-        &Opts { kind: Kind::Subscription, api: &cx.api, existing: if update { old.as_ref() } else { None }, now: cx.now },
-    );
     let mut new = match (parsed, &old) {
         (Ok(s), _) => s,
         (Err(e), Some(o)) if update => return Err(e.with_etag(etag_of(o.updated_ms))),
@@ -74,6 +92,10 @@ pub fn put(shared: &Shared, cx: &Cx, topic: &str, name: &str) -> ApiResult<Respo
 
     if update {
         let old = old.ok_or_else(missing)?;
+        if !etag_matches(cx, old.updated_ms) {
+            // the service answers a subscription's stale ETag with a 500
+            return Err(ApiError::new(ErrKind::Retry));
+        }
         if let Some(p) = settings::immutable_change(Kind::Subscription, &old, &new) {
             let msg = format!("The value for the {p} property of an existing Subscription cannot be changed.");
             return Err(ApiError::bad(msg, false).with_etag(etag_of(old.updated_ms)));
@@ -116,7 +138,7 @@ pub fn delete(shared: &Shared, cx: &Cx, topic: &str, name: &str) -> ApiResult<Re
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
     let t = ns.topic_mut(topic).ok_or_else(|| ApiError::new(ErrKind::NoService))?;
-    let mut sub = t.subs.remove(&key(name)).ok_or_else(|| ApiError::new(ErrKind::NoService))?;
+    let mut sub = t.subs.remove(&key(name)).ok_or_else(|| ApiError::new(ErrKind::NotFoundMessaging(entity_id(cx, topic, name))))?;
     sub.core.wake_all();
     Ok(render::ok_empty(&etag_of(sub.core.settings.updated_ms)))
 }
@@ -125,7 +147,7 @@ pub fn list(shared: &Shared, cx: &Cx, topic: &str) -> ApiResult<Response> {
     let (skip, top) = paging(cx)?;
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
-    let t = ns.topic(topic).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, "")))?;
+    let Some(t) = ns.topic(topic) else { return Ok(super::misc::root_feed(cx)) };
     let entries: String = t.subs.values().skip(skip).take(top).map(|s| sub_entry(cx, t, s, true, false, true)).collect();
     let body = render::feed(cx, "Subscriptions", next_link(cx, skip, top, t.subs.len()), &entries);
     Ok(render::respond(200, CT_FEED, Some(&etag_of(cx.now)), body))

@@ -2,7 +2,7 @@
 
 import pytest
 from azure.cosmos import documents
-from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from cosmosutil import uid
 
@@ -82,17 +82,31 @@ def test_create_permission_returns_a_token(db, container):
     u = db.create_user(body={"id": "u1"})
     p = u.create_permission(_perm(container))
     assert p.id == "p1"
-    assert p.properties["permissionMode"] == "Read"
+    assert p.properties["permissionMode"].lower() == "read"
     assert p.properties["_token"]
 
 
+def test_permission_mode_comes_back_as_sent(db, container):
+    # Azure keeps the case it was sent (the SDK's constants are lower case: "read", "all"); any case is accepted
+    u = db.create_user(body={"id": "u1"})
+    p = u.create_permission(_perm(container, mode="Read"))
+    assert p.properties["permissionMode"] == "Read"
+    assert u.replace_permission("p1", _perm(container, mode="ALL")).properties["permissionMode"] == "ALL"
+    assert u.replace_permission("p1", _perm(container, mode=documents.PermissionMode.Read)).properties["permissionMode"] == "read"
+    with pytest.raises(CosmosHttpResponseError) as e:
+        u.replace_permission("p1", _perm(container, mode="write"))
+    assert e.value.status_code == 400
+    assert "The input Permission mode 'write' is invalid. Ensure to provide a valid permission mode." in str(e.value)
+
+
 @pytest.mark.not_on_vnext(reason="vnext lower-cases permissionMode")
-def test_permission_get_list_delete(db, container):
+def test_permission_get_list_delete(db, container, make_container):
+    # one permission per user and resource: a second one on the same container is a 409 on Azure
     u = db.create_user(body={"id": "u1"})
     u.create_permission(_perm(container, "p1"))
-    u.create_permission(_perm(container, "p2", documents.PermissionMode.All))
+    u.create_permission(_perm(make_container("/pk"), "p2", documents.PermissionMode.All))
     assert sorted(p["id"] for p in u.list_permissions()) == ["p1", "p2"]
-    assert u.get_permission("p2").properties["permissionMode"] == "All"
+    assert u.get_permission("p2").properties["permissionMode"].lower() == "all"
     u.delete_permission("p1")
     with pytest.raises(CosmosResourceNotFoundError):
         u.get_permission("p1")
@@ -110,7 +124,21 @@ def test_replace_permission_changes_mode(db, container):
     u = db.create_user(body={"id": "u1"})
     u.create_permission(_perm(container))
     got = u.replace_permission("p1", _perm(container, mode=documents.PermissionMode.All))
-    assert got.properties["permissionMode"] == "All"
+    assert got.properties["permissionMode"].lower() == "all"
+
+
+def test_two_permissions_of_one_user_on_one_resource_are_a_409(db, container, make_container):
+    # Azure (checked in November 2026): one permission per user and resource, whatever the id and the mode
+    u = db.create_user(body={"id": "u1"})
+    u.create_permission(_perm(container, "p1"))
+    with pytest.raises(CosmosResourceExistsError) as e:
+        u.create_permission(_perm(container, "p2", documents.PermissionMode.All))
+    assert e.value.status_code == 409
+    assert "Resource with specified id, name, or unique index already exists." in str(e.value)
+    assert [p["id"] for p in u.list_permissions()] == ["p1"]
+    # another user may have one on the same resource, and one user on another resource
+    db.create_user(body={"id": "u2"}).create_permission(_perm(container, "p1"))
+    u.create_permission(_perm(make_container("/pk"), "p2"))
 
 
 def test_upsert_permission(db, container):

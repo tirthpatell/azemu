@@ -116,6 +116,14 @@ fn route(shared: &Shared, cx: &Cx, segs: &[String]) -> ApiResult<Response> {
     if cx.req.header("authorization").map(str::trim).filter(|s| !s.is_empty()).is_none() {
         return Err(ApiError::new(ErrKind::Unauthorized("MissingToken: The authorization header was not found.".into())));
     }
+    if let Some(v) = cx.req.query.get("api-version").map(str::trim).filter(|v| !v.is_empty()) {
+        if !settings::API_VERSIONS.contains(&v) {
+            return Err(ApiError::bad_raw(format!(
+                "The api-version in the query string is not supported. Either remove it from the Uri or use one of '{}'.",
+                settings::API_VERSIONS.join(",")
+            )));
+        }
+    }
     let method = cx.req.method.as_str();
     let seg = |i: usize| segs[i].as_str();
     let is = |i: usize, w: &str| segs[i].eq_ignore_ascii_case(w);
@@ -140,8 +148,9 @@ fn route(shared: &Shared, cx: &Cx, segs: &[String]) -> ApiResult<Response> {
                     _ => Err(verb(cx)),
                 };
             }
-            if name.starts_with('$') {
-                return Err(ApiError::not_implemented(format!("{method} /{name}")));
+            if name.starts_with('$') && method == "GET" {
+                // the service answers a read of a name it does not know with its list of services
+                return Ok(misc::root_feed(cx));
             }
             match method {
                 "GET" => entities::get(shared, cx, name),
@@ -153,7 +162,7 @@ fn route(shared: &Shared, cx: &Cx, segs: &[String]) -> ApiResult<Response> {
         2 if is(0, "$Resources") => match (method, seg(1).to_ascii_lowercase().as_str()) {
             ("GET", "queues") => entities::list(shared, cx, Kind::Queue),
             ("GET", "topics") => entities::list(shared, cx, Kind::Topic),
-            ("GET", other) => Err(ApiError::not_implemented(format!("GET /$Resources/{other}"))),
+            ("GET", _) => Ok(misc::root_feed(cx)),
             _ => Err(verb(cx)),
         },
         2 if is(1, "subscriptions") => match method {

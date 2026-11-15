@@ -258,7 +258,7 @@ async fn a_send_that_would_be_refused_is_refused_when_it_is_made() {
     let s = sender(&mut c, "sq").await;
     match c.send_message_in_txn(s, &msg("no session"), &txn).await {
         Some(DeliveryState::Transactional { outcome: Some(o), .. }) => match *o {
-            DeliveryState::Rejected { error: Some(err) } => assert_eq!(err.condition, "com.microsoft:argument-error"),
+            DeliveryState::Rejected { error: Some(err) } => assert_eq!(err.condition, "amqp:not-allowed"),
             other => panic!("{other:?}"),
         },
         other => panic!("{other:?}"),
@@ -495,7 +495,8 @@ async fn abandon_defer_and_dead_letter_in_a_transaction_are_applied_at_commit() 
     assert_eq!((e.core("q", |c| c.main.len()), ready(&e, "q"), e.core("q", |c| c.counts().dead_letter)), (3, 0, 0), "nothing yet");
     c.discharge(coord, &txn, false).await.unwrap();
     assert_eq!((e.core("q", |c| c.main.len()), e.core("q", |c| c.counts().dead_letter)), (2, 1));
-    assert_eq!(e.core("q", |c| c.main.get(2).map(|m| (m.deferred, m.delivery_count))), Some((true, 0)));
+    // a deferred message counts as delivered once (Azure shows 1 at once)
+    assert_eq!(e.core("q", |c| c.main.get(2).map(|m| (m.deferred, m.delivery_count))), Some((true, 1)));
     // the dead-letter message carries the reason
     let dlr = receiver_rd(&mut c, "q/$DeadLetterQueue", 2).await;
     let m = c.recv(dlr).await.message();

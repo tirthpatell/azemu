@@ -6,16 +6,24 @@ tokens from the emulator instead of Entra ID, and application code written for r
 served at the usual `discovery/keys` paths.
 
 **How to reach it.** Managed identity, no code change: `IDENTITY_ENDPOINT=http://localhost:4577/_azemu/identity/msi/token` and `IDENTITY_HEADER=azemu`
-(`docs/services/identity.md`, "Using it from the Azure Identity libraries"). Entra style: the authority `https://login.localhost:4577/{tenant}`
-or `https://localhost:4577/_azemu/identity/login/{tenant}`. With `--standard-ports`: `http://azemu:10014/{tenant}/oauth2/v2.0/token`. A client that
-sends a bearer token over `https` needs the emulator's certificate authority (`docs/reaching-the-emulator.md`).
+(`docs/services/identity.md`, "Using it from the Azure Identity libraries"). Entra style, three forms of the authority (which SDK needs which is in the
+table below):
+
+1. the root of the gateway: `https://localhost:4577` (or `https://azemu:4577` between containers, or an IP address). The token URL is then
+   `https://localhost:4577/{tenant}/oauth2/v2.0/token`. This is the form that works for every SDK we ran;
+2. `https://login.localhost:4577/{tenant}` (the name has to resolve; it does on Linux, not everywhere);
+3. `https://localhost:4577/_azemu/identity/login/{tenant}` (a path in the authority, which some SDKs drop).
+
+With `--standard-ports`: `http://azemu:10014/{tenant}/oauth2/v2.0/token`. A client that sends a bearer token over `https` needs the emulator's certificate
+authority (`docs/reaching-the-emulator.md`).
 
 **Not built.** Nothing is validated: any secret, assertion, password or certificate is accepted, and no registry of tenants, applications or managed
 identities exists. The other services do not check the tokens either. Older managed identity endpoints (`MSI_ENDPOINT`, Azure Arc, Service Fabric, Cloud
 Shell), `form_post`, PKCE, consent and logout answer 501 or are ignored. Tokens are version 1.0 style and carry no `roles`.
 
 Crate `azemu-identity` (`crates/services/identity`). `name()` is `identity`. Mounts:
-`Host("login")`, `PathPrefix("/_azemu/identity")`, `PathPrefix("/metadata/identity")`. No account.
+`Host("login")`, `PathPrefix("/_azemu/identity")`, `PathPrefix("/metadata/identity")`, and the Entra paths at the root of a host that names no
+service (`Service::claims_root_path`). No account.
 The only state is the RS256 signing key (RSA-2048, pure Rust `rsa`, generated at start on a blocking
 thread, kept across `POST /_azemu/reset`). Refresh tokens, device codes and authorization codes are
 sealed into the opaque string itself, so nothing else is stored; the consequence is that codes are
@@ -37,8 +45,14 @@ not single use and still work after a restart.
 | `GET /_azemu/identity/token?resource=` (or `scope=`; optional `client_id`, `tenant`, `expires_in`) returns the token JSON, for curl and scripts | built |
 | anything else under the mounts (`/metadata/identity/info`, `/oauth2/v2.0/logout`, `userinfo`, ...) | 501 `NotImplemented` naming the operation |
 
-Every Entra path also exists under `/_azemu/identity/login/{tenant}/...`, so an authority is either
+Every Entra path also exists under `/_azemu/identity/login/{tenant}/...`, so an authority is
 `https://login.localhost:{port}/{tenant}` or `https://localhost:{port}/_azemu/identity/login/{tenant}`.
+The paths also answer at the root of the gateway when the host names no service (`localhost`, an IP address, a bare name such as `azemu`)
+and no other service's path prefix matches: `/{tenant}/oauth2/v2.0/token`, `/{tenant}/oauth2/token`, `/{tenant}/v2.0/.well-known/openid-configuration`,
+`/{tenant}/.well-known/openid-configuration`, `/{tenant}/discovery/...`, `/{tenant}/oauth2/{devicecode,authorize,deviceauth}` (and the `v2.0` forms),
+`/common/discovery/instance` and `/common/userrealm/{user}`. That is tried only where the gateway would otherwise answer "No service matched", so
+it takes nothing from another service and never applies to `/_azemu/...` paths. The issuer and the URLs inside the discovery documents use the host and
+port the client used.
 Any tenant id or name is accepted (names with characters outside `A-Za-z0-9._-` get Entra's error 90002).
 Unknown grant: `unsupported_grant_type` in Entra's error JSON (`error`, `error_description`, `error_codes`,
 `timestamp`, `trace_id`, `correlation_id`).
@@ -68,8 +82,8 @@ tokens with `preferred_username`, `nonce`. `roles` is absent.
 
 ## Using it from the Azure Identity libraries
 
-Python rows were run (azure-identity 1.27.0, msal 1.39.0). Rows for other languages are NOT tested: they are
-what the libraries' public documentation says and must be checked before relying on them.
+Python rows were run (azure-identity 1.27.0, msal 1.39.0). Rust and Go rows were run too (below). Rows for the other languages are NOT tested:
+they are what the libraries' public documentation says and must be checked before relying on them.
 
 ### Without a code change: managed identity
 
@@ -96,6 +110,15 @@ code or configuration change.
 | `InteractiveBrowserCredential` | not tested; the authorize endpoint signs in without a page, but the library's local redirect listener was not exercised |
 | Async twins (`azure.identity.aio`) | tested: managed identity (App Service and IMDS), `DefaultAzureCredential`, `ClientSecretCredential`, `WorkloadIdentityCredential` |
 
+### Rust and Go (run)
+
+| Library | What was run | Authority that works |
+|---|---|---|
+| Rust `azure_identity` 1.0.0 (`azure_core` 1.1.0), `tests/sdk-rust/tests/identity.rs` | `ClientSecretCredential` and `WorkloadIdentityCredential` (token file with any content), each with `ClientOptions.cloud = Custom { authority_host }` and the token then used on a Blob request; `ManagedIdentityCredential` (App Service style) | `https://localhost:{port}` (form 1) and `https://login.localhost:{port}` (form 2). **Not** form 3: the Rust credentials build `<authority host>/{tenant}/oauth2/v2.0/token` from the host alone and drop any path in the authority, so `/_azemu/identity/login` is lost; and they refuse an `http://` authority when the credential is made |
+| Go `azidentity` v1.15.0 (`msal-go` v1.10.1), `tests/sdk-go/identity` | `ClientSecretCredential`, `WorkloadIdentityCredential` and `EnvironmentCredential` (`AZURE_AUTHORITY_HOST`) with `DisableInstanceDiscovery: true`, the first two with a Blob call; also certificate, device code, on-behalf-of and managed identity | `https://localhost:{port}` (form 1) and `https://login.localhost:{port}` (form 2). **Not** form 3: msal-go keeps only the first path segment of the authority. Instance discovery has to be off (with it on, the credential asks `login.microsoftonline.com`) |
+
+Python takes forms 2 and 3 (tested, above); form 1 with Python was not run.
+
 ### Other languages (untested, from the libraries' documentation)
 
 | Language | Authority and instance discovery | CA | Managed identity |
@@ -103,13 +126,16 @@ code or configuration change.
 | .NET (Azure.Identity) | `AZURE_AUTHORITY_HOST` or `options.AuthorityHost`; `DisableInstanceDiscovery = true` | install `ca.pem` in the OS store, or `SSL_CERT_FILE` on Linux | `IDENTITY_ENDPOINT` / `IDENTITY_HEADER`; `AZURE_POD_IDENTITY_AUTHORITY_HOST` for IMDS |
 | Java (azure-identity) | `AZURE_AUTHORITY_HOST` or `.authorityHost(...)`; `.disableInstanceDiscovery()` on the builders | add the CA to the JVM trust store (`-Djavax.net.ssl.trustStore=...`) | `IDENTITY_ENDPOINT` / `IDENTITY_HEADER` |
 | JavaScript (@azure/identity) | `AZURE_AUTHORITY_HOST` or `authorityHost`; `disableInstanceDiscovery: true` | `NODE_EXTRA_CA_CERTS=ca.pem` | `IDENTITY_ENDPOINT` / `IDENTITY_HEADER`; `AZURE_POD_IDENTITY_AUTHORITY_HOST` for IMDS |
-| Go (azidentity) | `AZURE_AUTHORITY_HOST` or `ClientOptions.Cloud.ActiveDirectoryAuthorityHost`; `DisableInstanceDiscovery: true` | `SSL_CERT_FILE` | `IDENTITY_ENDPOINT` / `IDENTITY_HEADER`; `AZURE_POD_IDENTITY_AUTHORITY_HOST` for IMDS |
+
+For these, start with form 1 (`https://localhost:{port}`): it needs no path and no name that has to resolve.
 
 ## HTTPS and the CA
 
-Every listener answers HTTP and HTTPS on the same port. MSAL requires HTTPS for the authority, so the
-authority is `https://login.localhost:{port}` (the CA mints a certificate for any SNI name) or
-`https://localhost:{port}/_azemu/identity/login`. `login.localhost` resolved to the loopback address on the Linux machine the tests ran on (other systems untested: add a hosts entry or use the `localhost` form). Trust `~/.azemu/ca.pem`
+Every listener answers HTTP and HTTPS on the same port. MSAL and the Rust credentials require HTTPS for the authority, so the
+authority is `https://localhost:{port}` (the root form), `https://login.localhost:{port}` (the CA mints a certificate for any SNI name it may sign for) or
+`https://localhost:{port}/_azemu/identity/login`. Between containers, use the container's name (`https://azemu:4577`) and start the emulator with
+`AZEMU_TLS_NAME=azemu`, or the certificate is refused (the emulator logs that name once at WARN). The root form with a bare name was tried over plain
+`http` in the emulator's own tests, not with the Rust or Go credentials. `login.localhost` resolved to the loopback address on the Linux machine the tests ran on (other systems untested: add a hosts entry or use the `localhost` form). Trust `~/.azemu/ca.pem`
 (the `ca=` path on the startup line): Python `connection_verify=` per credential or `REQUESTS_CA_BUNDLE`.
 Without it the credential fails with `CERTIFICATE_VERIFY_FAILED` (tested). For the real host name
 `login.microsoftonline.com`, add a hosts-file entry to 127.0.0.1 and run the emulator on port 443; MSAL

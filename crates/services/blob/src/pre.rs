@@ -11,6 +11,7 @@
 use azemu_core::bytes::Bytes;
 use azemu_core::{Request, Response};
 
+use crate::errors::ApiError;
 use crate::ops::Op;
 use crate::state::{join, Blob, OutBody, Piece, SourceWait};
 use crate::util::{b64, crc64, crc64_b64, md5};
@@ -42,6 +43,9 @@ pub struct Pre {
     pub block_list: Option<Result<Node, String>>,
     /// The parsed body of a Query Blob Contents request.
     pub query: Option<crate::query::Prepared>,
+    /// An error found in the request before the state was looked at that Azure answers only after it has checked the
+    /// credentials (a broken structured message: a request without credentials is `401`, not `400`).
+    pub deferred: Option<ApiError>,
 }
 
 impl Pre {
@@ -196,10 +200,6 @@ pub async fn prepare_dfs(req: &Request, op: crate::dfs::ops::Op) -> Pre {
     let mut pre = Pre::default();
     if matches!(op, crate::dfs::ops::Op::Append) {
         pre.hash_body(&req.body).await;
-    }
-    if matches!(op, crate::dfs::ops::Op::Query) {
-        let body = req.body.clone();
-        pre.query = blocking(body.len(), None, move || Some(crate::query::prepare(&body))).await;
     }
     pre
 }

@@ -275,11 +275,21 @@ impl SbConn {
         let ns_name = self.ns.clone();
         let Some(core) = st.ns(&ns_name).core_mut(&addr) else { return refuse(SbError::entity_not_found(&addr_path(&addr), &ns_name)) };
         if core.settings.status == "Disabled" || core.settings.status == "ReceiveDisabled" {
-            return refuse(SbError::new(
-                errors::ENTITY_DISABLED,
-                400,
-                format!("The messaging entity '{}' is disabled for receiving.", core.path),
-            ));
+            return refuse(SbError::entity_disabled(&core.ns, &core.path));
+        }
+        let sub_queue = match &addr {
+            Address::Queue { sub, .. } | Address::Subscription { sub, .. } => *sub,
+            _ => SubQueue::Main,
+        };
+        // an entity that forwards its messages has nothing to receive: Azure refuses the receiver (of the dead-letter queue when that is what
+        // forwards)
+        let forwards = match sub_queue {
+            SubQueue::Main => core.settings.forward_to.is_some(),
+            SubQueue::DeadLetter => core.settings.forward_dead_lettered_to.is_some(),
+            SubQueue::TransferDeadLetter => false,
+        };
+        if forwards {
+            return refuse(SbError::forwarding_receiver(&core.ns, &core.path));
         }
         let owner = self.owner(req.link);
         let max = core.settings.max_message_size_bytes();
@@ -287,10 +297,6 @@ impl SbConn {
             core.settings.requires_session = true;
             next_revision();
         }
-        let sub_queue = match &addr {
-            Address::Queue { sub, .. } | Address::Subscription { sub, .. } => *sub,
-            _ => SubQueue::Main,
-        };
         match (&session_req, core.settings.requires_session && sub_queue == SubQueue::Main) {
             (None, true) => {
                 return refuse(SbError::not_allowed(
@@ -299,7 +305,7 @@ impl SbConn {
             }
             (Some(_), false) => {
                 return refuse(SbError::not_allowed(
-                    "It is not possible to create a session receiver for an entity that does not require sessions.",
+                    "A sessionful message receiver cannot be created on an entity that does not require sessions. Ensure RequiresSession is set to true when creating a Queue or Subscription to enable sessionful behavior.",
                 ));
             }
             _ => {}
@@ -628,8 +634,12 @@ impl ConnectionHandler for SbConn {
             Some(DeliveryState::Rejected { error }) => {
                 let info = error.as_ref().and_then(|e| e.info.clone()).unwrap_or_default();
                 let find = |k: &str| info.iter().find(|(key, _)| key.as_str() == Some(k)).and_then(|(_, v)| v.as_str().map(str::to_string));
-                let reason = find(PROP_DEAD_LETTER_REASON).or_else(|| error.as_ref().map(|e| e.condition.clone()));
-                let description = find(PROP_DEAD_LETTER_DESCRIPTION).or_else(|| error.as_ref().and_then(|e| e.description.clone()));
+                // The reason and the description are the ones in `info`: a dead letter that names none has none (Azure leaves the properties
+                // out). Only a rejection that is not the SDKs' dead-letter marker has nothing else to say its reason by.
+                let marker = error.as_ref().map(|e| e.condition == errors::DEAD_LETTER).unwrap_or(false);
+                let reason = find(PROP_DEAD_LETTER_REASON).or_else(|| error.as_ref().filter(|_| !marker).map(|e| e.condition.clone()));
+                let description =
+                    find(PROP_DEAD_LETTER_DESCRIPTION).or_else(|| error.as_ref().filter(|_| !marker).and_then(|e| e.description.clone()));
                 // every other entry is a property to modify (`propertiesToModify` of the SDKs)
                 let modify: Vec<(Value, Value)> = info
                     .iter()
@@ -780,6 +790,9 @@ impl SbConn {
         } else {
             vec![(Message::decode(&d.payload).map_err(|e| SbError::new(condition::DECODE_ERROR, 400, e.to_string()))?, d.payload.len())]
         };
+        for (m, _) in &messages {
+            check_time_to_live(m)?;
+        }
         if let Some(txn) = txn {
             // not stored yet: checked and kept until the transaction commits
             return self.txn_send(txn, target, messages);
@@ -846,7 +859,7 @@ impl SbConn {
                 }
                 let d = delivered?;
                 drop(st);
-                let msg = render(&d.msg, None);
+                let msg = render(&d.msg, Some(state_code(&d.msg)));
                 let (tag, settled) = match d.token {
                     Some(t) => (token_to_tag(&t), false),
                     None => (d.msg.seq.to_be_bytes().to_vec(), true),

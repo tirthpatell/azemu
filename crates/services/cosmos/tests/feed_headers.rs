@@ -22,7 +22,7 @@ fn check_common(r: &azemu_core::testing::TestResponse, what: &str) {
         assert!(r.header(name).is_some(), "{what} (status {}): header {name} is missing; headers: {:?}", r.status, r.headers);
     }
     let session = r.header("x-ms-session-token").unwrap();
-    assert!(session.starts_with("0:1#"), "{what}: session token {session}");
+    assert!(session.starts_with("0:-1#"), "{what}: session token {session}");
     r.header("x-ms-item-count").unwrap().parse::<usize>().unwrap_or_else(|_| panic!("{what}: item count is not a number"));
     r.header("x-ms-request-charge").unwrap().parse::<f64>().unwrap_or_else(|_| panic!("{what}: charge is not a number"));
 }
@@ -113,26 +113,61 @@ async fn read_feeds_and_queries_have_an_item_count_even_when_empty() {
         let r = h.req("GET", path, &[], "").await;
         assert_eq!(r.status, 200, "{path}: {}", r.text());
         assert!(r.header("x-ms-item-count").is_some(), "{path}: x-ms-item-count missing");
-        assert!(r.header("x-ms-request-charge").is_some() && r.header("x-ms-activity-id").is_some(), "{path}");
+        // the list of partition key ranges has no request charge on Azure
+        assert!(r.header("x-ms-request-charge").is_some() || path.ends_with("pkranges"), "{path}");
+        assert!(r.header("x-ms-activity-id").is_some(), "{path}");
     }
 }
 
+/// Azure (checked in November 2026): the list of partition key ranges has an item count, the session token and the `lsn`, but no
+/// `etag` and no request charge, and it ignores `If-None-Match`.
 #[tokio::test]
-async fn partition_key_ranges_304_has_the_headers() {
+async fn partition_key_ranges_have_the_headers_azure_sends_and_no_etag_and_no_charge() {
     let h = setup().await;
     let r = h.req("GET", "dbs/d/colls/c/pkranges", &[], "").await;
     assert_eq!(r.status, 200);
     check_common_pk(&r);
-    let etag = r.header("etag").expect("etag").to_string();
+    assert!(r.header("etag").is_none() && r.header("x-ms-request-charge").is_none(), "{:?}", r.headers);
+    let range = r.json()["PartitionKeyRanges"][0].clone();
+    for key in [
+        "id",
+        "minInclusive",
+        "maxExclusive",
+        "ridPrefix",
+        "throughputFraction",
+        "status",
+        "parents",
+        "_etag",
+        "_rid",
+        "_self",
+        "_ts",
+        "lsn",
+    ] {
+        assert!(range.get(key).is_some(), "{key}");
+    }
+    let etag = range["_etag"].as_str().unwrap().to_string();
     let r = h.req("GET", "dbs/d/colls/c/pkranges", &[("If-None-Match", &etag)], "").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("x-ms-item-count"), Some("1"));
+    // read as a change feed (the Python SDK does): an etag, no charge, and a 304 once the position is reached
+    let feed = [("A-IM", "Incremental Feed")];
+    let r = h.req("GET", "dbs/d/colls/c/pkranges", &feed, "").await;
+    assert_eq!(r.status, 200);
+    check_common_pk(&r);
+    assert!(r.header("x-ms-request-charge").is_none());
+    let etag = r.header("etag").expect("etag").to_string();
+    let r = h.req("GET", "dbs/d/colls/c/pkranges", &[feed[0], ("If-None-Match", &etag)], "").await;
     assert_eq!(r.status, 304);
     check_common_pk(&r);
     assert_eq!(r.header("x-ms-item-count"), Some("0"));
     assert_eq!(r.header("etag"), Some(etag.as_str()));
+    assert!(r.header("x-ms-request-charge").is_none());
+    assert_eq!(h.req("GET", "dbs/d/colls/c/pkranges", &[feed[0], ("If-None-Match", "\"0\"")], "").await.status, 200);
+    assert_eq!(h.req("GET", "dbs/d/colls/c/pkranges", &[feed[0], ("If-None-Match", "\"abc\"")], "").await.status, 400);
 }
 
 fn check_common_pk(r: &azemu_core::testing::TestResponse) {
-    for name in ["x-ms-activity-id", "x-ms-request-charge", "x-ms-item-count", "etag", "x-ms-session-token", "lsn"] {
+    for name in ["x-ms-activity-id", "x-ms-item-count", "x-ms-session-token", "lsn"] {
         assert!(r.header(name).is_some(), "pkranges (status {}): header {name} is missing", r.status);
     }
 }

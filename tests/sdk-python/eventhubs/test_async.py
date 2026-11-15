@@ -26,6 +26,7 @@ ALL = ["0", "1", "2", "3"]
 
 
 async def until(fn, timeout=8.0, what="condition"):
+    timeout *= ehutil.SCALE
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -58,11 +59,14 @@ async def test_async_partition_ids_on_consumer(emu, hub):
 
 
 async def test_async_partition_properties_empty_then_not(emu, hub, aproducer):
-    assert (await aproducer.get_partition_properties("0"))["is_empty"] is True
+    # (a shared hub on Azure is not empty: look at what two sends changed)
+    before = await aproducer.get_partition_properties("0")
     await async_send_n(aproducer, 2, partition_id="0")
     props = await aproducer.get_partition_properties("0")
     assert props["is_empty"] is False
-    assert props["last_enqueued_sequence_number"] - props["beginning_sequence_number"] == 1
+    assert props["last_enqueued_sequence_number"] - before["last_enqueued_sequence_number"] == 2
+    if before["is_empty"]:
+        assert props["last_enqueued_sequence_number"] - props["beginning_sequence_number"] == 1
 
 
 async def test_async_unknown_partition_properties_is_connect_error(emu, hub, aproducer):
@@ -111,7 +115,7 @@ async def test_async_empty_batch_sends_nothing(emu, hub, aproducer):
     await aproducer.send_batch(await aproducer.create_batch())
     await aproducer.send_batch([])
     for pid in ALL:
-        assert (await aproducer.get_partition_properties(pid))["is_empty"] is True
+        assert (await aproducer.get_partition_properties(pid))["last_enqueued_sequence_number"] == ehutil.baseline_of(hub, pid)
 
 
 async def test_async_bodies_and_properties_round_trip(emu, hub, aproducer):
@@ -219,8 +223,11 @@ async def test_async_sequence_number_positions(emu, hub, aproducer):
     assert bodies(got) == ["m-1", "m-2", "m-3", "m-4"]
 
 
-async def test_async_offset_and_datetime_positions(emu, hub, aproducer):
-    await async_send_n(aproducer, 4, partition_id="0")
+async def test_async_offset_and_datetime_positions(emu, solo_hub):
+    # (a hub of its own: "a day ago" reaches back to the first event of the hub)
+    hub = solo_hub
+    async with make_async_producer(emu, hub) as p:
+        await async_send_n(p, 4, partition_id="0")
     first = await async_read_from_start(emu, hub, 4, partition_id="0")
     assert bodies(await async_read_from_start(emu, hub, 2, partition_id="0", starting_position=first[1].offset)) == ["m-2", "m-3"]
     got = await async_read_from_start(emu, hub, 4, partition_id="0", starting_position=datetime.now(timezone.utc) - timedelta(days=1))
@@ -269,8 +276,8 @@ async def test_async_last_enqueued_event_properties(emu, hub, aproducer):
             seen["last"] = events[-1]
 
     async with make_async_consumer(emu, hub) as c:
-        task = asyncio.ensure_future(c.receive_batch(on_batch, partition_id="0", starting_position="-1", max_wait_time=1,
-                                                      track_last_enqueued_event_properties=True))
+        task = asyncio.ensure_future(c.receive_batch(on_batch, **ehutil.start_kwargs(hub, dict(
+            partition_id="0", starting_position="-1", max_wait_time=1, track_last_enqueued_event_properties=True))))
         await until(lambda: "props" in seen, 8, "a batch")
         await c.close()
         try:
@@ -392,8 +399,8 @@ async def test_async_buffered_mode_needs_callbacks(emu, hub):
 
 
 async def test_async_producer_with_a_named_key_credential(emu, hub):
-    async with EventHubProducerClient(host(emu), hub, AzureNamedKeyCredential(ehutil.KEY_NAME, ehutil.KEY), use_tls=False,
-                                      **ehutil.CLIENT_KW) as p:
+    async with EventHubProducerClient(host(emu), hub, AzureNamedKeyCredential(ehutil.KEY_NAME, ehutil.KEY),
+                                      **ehutil.dev_kw(emu), **ehutil.CLIENT_KW) as p:
         assert await p.get_partition_ids() == ALL
 
 

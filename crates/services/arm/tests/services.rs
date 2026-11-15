@@ -255,6 +255,19 @@ async fn event_grid_topic() {
     let k2 = a.post(&format!("{t}/regenerateKey"), json!({"keyName": "key1"})).await.json();
     assert_ne!(k2["key1"], keys["key1"]);
     assert_eq!(k2["key2"], keys["key2"]);
+    // the topic takes the keys listKeys gives and no other: a regenerated key replaces the old one at once
+    let publish = |key: String| {
+        let url = format!("{}/api/events", a.srv.url("eventgrid", "topic-one"));
+        let ev = json!([{"specversion": "1.0", "id": "1", "source": "/s", "type": "t"}]).to_string();
+        let a = &a;
+        async move {
+            a.dp_send("POST", &url, &[("aeg-sas-key", &key), ("Content-Type", "application/cloudevents-batch+json")], &ev).await.status
+        }
+    };
+    assert_eq!(publish(k2["key1"].as_str().unwrap().to_string()).await, 200);
+    assert_eq!(publish(k2["key2"].as_str().unwrap().to_string()).await, 200);
+    assert_eq!(publish(keys["key1"].as_str().unwrap().to_string()).await, 401, "the key that was regenerated no longer works");
+    assert_eq!(publish("anything".to_string()).await, 401);
     // an event subscription on the topic (the extension form) lives in the Event Grid service and goes with the topic
     let sub = format!("{t}/providers/Microsoft.EventGrid/eventSubscriptions/to-queue");
     let dest = json!({"endpointType": "StorageQueue", "properties": {"resourceId": rid("eg", "Microsoft.Storage", "storageAccounts/acct01"), "queueName": "q"}});

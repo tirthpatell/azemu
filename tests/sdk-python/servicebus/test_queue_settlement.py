@@ -169,6 +169,7 @@ def test_dlq_message_can_be_completed_and_is_then_gone(sb, queue):
 
 
 def test_dlq_message_can_be_abandoned_and_redelivered(sb, queue):
+    # an abandon in the dead-letter queue does not count as a delivery there (checked in November 2026)
     send_n(sb, queue, 1)
     with sb.get_queue_receiver(queue, max_wait_time=2) as r:
         (m,) = receive_n(r, 1, settle=None)
@@ -176,7 +177,7 @@ def test_dlq_message_can_be_abandoned_and_redelivered(sb, queue):
     with sb.get_queue_receiver(queue, sub_queue=DLQ, max_wait_time=3) as dlq:
         receive_n(dlq, 1, settle="abandon", max_wait=3)
         (again,) = receive_n(dlq, 1, settle="complete", max_wait=3)
-        assert again.delivery_count == 1
+        assert again.delivery_count == 0
 
 
 def test_dlq_can_be_peeked(sb, queue):

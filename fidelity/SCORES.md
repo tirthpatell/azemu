@@ -1,7 +1,7 @@
 # Fidelity scores
 
-- Date: 2026-11-13
-- Emulator binary: `azemu-release`
+- Date: 2026-11-15
+- Emulator binary: `azemu`
 - Services mounted (from `/_azemu/health`): blob, dfs, queue, table, keyvault, appconfig, cosmos, eventgrid, identity, servicebus, eventhubs, kafka, arm
 - Produced by `tools/replay/run_all.py`; reports are in `fidelity/reports/`. Rules for every class: `tools/replay/README.md`.
 
@@ -14,8 +14,8 @@ Raw = every entry that is not a pass counts against. Adjusted = unreplayable ent
 | blob | 1594/1685 | 1501/1685 | 95.77 | 97.06 | 153 | 0 | 336 | 86/19491 (0.44%) |
 | queue | 196/200 | 192/200 | 98.89 | 99.44 | 4 | 0 | 4 | 3/954 (0.31%) |
 | table | 423/428 | 413/428 | 98.34 | 98.71 | 10 | 0 | 34 | 20/13188 (0.15%) |
-| keyvault-secrets | 312/348 | 167/348 | 84.16 | 98.94 | 0 | 944 | 68 | 0/13607 (0.00%) |
-| keyvault-keys | 782/810 | 486/810 | 87.64 | 99.43 | 336 | 788 | 52 | 2/48487 (0.00%) |
+| keyvault-secrets | 312/348 | 167/348 | 84.16 | 98.94 | 0 | 944 | 68 | 0/14037 (0.00%) |
+| keyvault-keys | 782/810 | 486/810 | 87.64 | 99.43 | 336 | 788 | 52 | 2/48999 (0.00%) |
 | keyvault-certificates | 457/510 | 324/510 | 86.90 | 96.61 | 0 | 685 | 239 | 33/65760 (0.05%) |
 | appconfig | 272/304 | 269/304 | 93.30 | 99.38 | 431 | 0 | 41 | 4/37575 (0.01%) |
 | eventgrid | 59/59 | 59/59 | 100.00 | 100.00 | 0 | 0 | 0 | 4/63 (6.35%) |
@@ -27,16 +27,16 @@ Classified entries (all packages above): ahead-async: 2423, unreplayable:auth-de
 
 ## Settings the emulator was started with, per package
 
-- blob: `AZEMU_BLOB_VERSIONING=1` (the recordings come from storage accounts with blob versioning turned on (`x-ms-version-id` answers, versions in listings, deletes that keep a version); without it new accounts have versioning off, as on Azure)
-- queue: none
-- table: none
+- blob: `AZEMU_BLOB_VERSIONING=1` `AZEMU_LOOSE_AUTH=1` (the recordings come from storage accounts with blob versioning turned on (`x-ms-version-id` answers, versions in listings, deletes that keep a version); without it new accounts have versioning off, as on Azure; and the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
+- queue: `AZEMU_LOOSE_AUTH=1` (the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
+- table: `AZEMU_LOOSE_AUTH=1` (the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
 - keyvault-secrets: none
 - keyvault-keys: none
 - keyvault-certificates: none
 - appconfig: none
 - eventgrid: `AZEMU_EVENTGRID_AUTOCREATE=1` (the recorded publishes go to topics that were made outside the recordings (in the Azure portal); without auto-creation they answer 404)
-- servicebus: none
-- datalake: none
+- servicebus: `AZEMU_SERVICEBUS_TIER=standard` (the recordings come from a Standard namespace, which takes 256 KB as the one message size (the emulator takes what Premium takes too unless told))
+- datalake: `AZEMU_LOOSE_AUTH=1` (the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
 - arm: none
 
 ## Most frequent value differences, per package
@@ -68,10 +68,10 @@ Operation, status, then the header or the path of the value. `Azure` is the reco
 
 **keyvault-secrets**: none
 
-**keyvault-keys** (2 of 48487 values)
+**keyvault-keys** (2 of 48999 values)
 
-- 1 x `POST /keys/{name}/create  200  value /key/x`: Azure `jQhc_CtdcMOyZPZKGSzmIxggYTcyxMmPQB-Nuzayn-w`, emulator `AIzaBW7jsnQq5n_Hy4n9Np4y9fQlVu4e1M_FYmcDV0w`
-- 1 x `POST /keys/{name}/create  200  value /key/y`: Azure `HLDDFphpCphDvBxRoRWcClZYNxrLrANBZfTekTKjcto`, emulator `oieeYWGK3bMmtlnOmznMGMkXX33jrMuc8AWAtxvBd5o`
+- 1 x `POST /keys/{name}/create  200  value /key/x`: Azure `jQhc_CtdcMOyZPZKGSzmIxggYTcyxMmPQB-Nuzayn-w`, emulator `BXvZeUVjXdQ6M-xFVp6dIK-avBcGeyT7-YuhFM_I2ic`
+- 1 x `POST /keys/{name}/create  200  value /key/y`: Azure `HLDDFphpCphDvBxRoRWcClZYNxrLrANBZfTekTKjcto`, emulator `ORSsknqH7ZccQ_cAdnbeKN2QBT8eRmYsLuLhpbtJLv8`
 
 **keyvault-certificates** (33 of 65760 values)
 
@@ -87,18 +87,18 @@ Operation, status, then the header or the path of the value. `Azure` is the reco
 - 1 x `DELETE /kv/{name}  200  value /content_type`: Azure `application/vnd.microsoft.appconfig.ff+json;charset=utf-8`, emulator `test content type`
 - 1 x `DELETE /kv/{name}  200  value /key`: Azure `.appconfig.featureflag/key40c43ad9`, emulator `PYTHON_UNIT_test_key_a6af8952-54a6-11e9-b600-2816a84d0309`
 - 1 x `DELETE /kv/{name}  200  value /value`: Azure `hello world`, emulator `test value`
-- 1 x `GET /revisions?after&tags  200  value /etag`: Azure `vaRJCadaADxrVq_RYwHZN_CuL-MSABwSxQNlxCKeEFU`, emulator `S3YpyBWuG1yl7L9sQQ6h_s5l0YCDc_52qIJZM-YtbnE`
+- 1 x `GET /revisions?after&tags  200  value /etag`: Azure `vaRJCadaADxrVq_RYwHZN_CuL-MSABwSxQNlxCKeEFU`, emulator `6HSqDfkTCYl_hB6DYRfi5itXeV0N706Ow63u0y1DpgM`
 
 **eventgrid** (4 of 63 values)
 
-- 2 x `POST /api/events  401  error text /error/details[]/message`: Azure `The request authorization key is not authorized for LLAWTOPIC.EASTUS-…`, emulator `The request authorization key is not authorized for SANITIZED.EVENTGR…`
-- 2 x `POST /api/events  401  error text /error/message`: Azure `The request authorization key is not authorized for LLAWTOPIC.EASTUS-…`, emulator `The request authorization key is not authorized for SANITIZED.EVENTGR…`
+- 2 x `POST /api/events  401  error text /error/details[]/message`: Azure `The request authorization key is not authorized for LLAWTOPIC.EASTUS-…`, emulator `Request must contain one of the following authorization signature: ae…`
+- 2 x `POST /api/events  401  error text /error/message`: Azure `The request authorization key is not authorized for LLAWTOPIC.EASTUS-…`, emulator `Request must contain one of the following authorization signature: ae…`
 
 **servicebus** (38 of 10564 values)
 
-- 8 x `PUT /  401  error text /Error/Detail[]`: Azure `Generic: Provided resource identifier '/subscriptions/faa080af-c1d8-4…`, emulator `MissingToken: The authorization header was not found. TrackingId:d999…`
+- 8 x `PUT /  401  error text /Error/Detail[]`: Azure `Generic: Provided resource identifier '/subscriptions/faa080af-c1d8-4…`, emulator `MissingToken: The authorization header was not found. TrackingId:1aea…`
 - 5 x `PUT /{entity}  400  error text /Error/Detail[]`: Azure `SubCode=40000. The entity description of type 'QueueDescription' has …`, emulator `SubCode=40000. The entity description of type 'QueueDescription' has …`
-- 4 x `GET /$Resources/queues?$skip&$top  401  error text /Error/Detail[]`: Azure `InvalidSignature: The token has an invalid signature. TrackingId:a990…`, emulator `MissingToken: The authorization header was not found. TrackingId:cd5a…`
+- 4 x `GET /$Resources/queues?$skip&$top  401  error text /Error/Detail[]`: Azure `InvalidSignature: The token has an invalid signature. TrackingId:a990…`, emulator `MissingToken: The authorization header was not found. TrackingId:f657…`
 - 4 x `GET /{entity}/subscriptions/{subscription}?enrich  200  value /entry/content[]/SubscriptionDescription[]/AutoDeleteOnIdle[]`: Azure `P10675199DT2H48M5.4775807S`, emulator `PT10M`
 - 4 x `PUT /{entity}/subscriptions/{subscription}  200  value /entry/content[]/SubscriptionDescription[]/AutoDeleteOnIdle[]`: Azure `P10675199DT2H48M5.4775807S`, emulator `PT10M`
 - 2 x `PUT /{entity}/subscriptions  400  error text /Error/Detail[]`: Azure `The specified HTTP verb (PUT) is not valid. To know more visit https:…`, emulator `The specified HTTP verb (PUT) is not valid. To know more visit https:…`

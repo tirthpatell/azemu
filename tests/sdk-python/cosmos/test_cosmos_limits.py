@@ -60,6 +60,7 @@ def test_patch_with_ten_operations_works_and_eleven_is_a_400(container):
 
 
 def test_repeated_patches_cannot_build_a_document_deeper_than_the_limit(container):
+    # Azure answers 500 InternalServerError (not 400) when a patch makes the document too deep (checked in November 2026)
     container.create_item({"id": "a", "pk": "p", "x": {}})
     path = "/x"
     accepted = 0
@@ -67,7 +68,8 @@ def test_repeated_patches_cannot_build_a_document_deeper_than_the_limit(containe
         try:
             container.patch_item("a", "p", [{"op": "add", "path": path + "/a", "value": nested(100)}])
         except CosmosHttpResponseError as e:
-            assert e.status_code == 400
+            assert e.status_code == 500
+            assert "An unknown error occurred while processing this request." in str(e)
             break
         accepted += 1
         path += "/a" * 100

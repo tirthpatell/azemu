@@ -15,6 +15,8 @@ use crate::rules::Rule;
 use crate::store::*;
 
 pub const MAX_FORWARD_DEPTH: usize = 4;
+/// The reason of a message that was forwarded more than [`MAX_FORWARD_DEPTH`] times (Azure's text, with no description).
+pub const HOP_COUNT_EXCEEDED: &str = "Maximum transfer hop count is exceeded.";
 /// Most messages one batch (one AMQP transfer in the batch format, or one `schedule-message` request) may hold.
 /// Microsoft Learn's Service Bus quotas page limits a batch by size only (1 MB), so this number is ours: it is
 /// what Event Hubs allows, and it keeps a batch of empty messages (a few bytes each on the wire) from being
@@ -39,10 +41,14 @@ pub struct Subscription {
 
 pub struct Topic {
     pub name: String,
+    /// The namespace the topic is in (error texts name it).
+    pub ns: String,
     pub settings: Settings,
     pub subs: BTreeMap<String, Subscription>,
     /// Scheduled messages waiting to be fanned out (one entry per message sent to the topic).
     pub scheduled: Store,
+    /// Sequence numbers of scheduled messages that were cancelled: cancelling one again is not an error.
+    pub(crate) cancelled_sched: std::collections::HashSet<u64>,
     /// Message ids seen inside the duplicate detection window (topics with `RequiresDuplicateDetection`).
     pub dup: std::collections::HashMap<String, i64>,
     /// While a transaction commits: duplicate ids added or replaced (with their old expiry).
@@ -58,6 +64,8 @@ pub const MAX_SUBSCRIPTIONS_PER_TOPIC: usize = 2_000;
 
 #[derive(Default)]
 pub struct Namespace {
+    /// The name the namespace is known by in the state (lower case).
+    pub name: String,
     pub queues: BTreeMap<String, Queue>,
     pub topics: BTreeMap<String, Topic>,
 }
@@ -78,9 +86,11 @@ impl Topic {
     pub fn new(name: &str, settings: Settings) -> Topic {
         Topic {
             name: name.to_string(),
+            ns: String::new(),
             settings,
             subs: BTreeMap::new(),
             scheduled: Store::new(),
+            cancelled_sched: Default::default(),
             dup: Default::default(),
             dup_journal: None,
             dup_rev: next_revision(),
@@ -92,14 +102,19 @@ impl Topic {
         let mut forwards = Vec::new();
         let mut first_err = None;
         for sub in self.subs.values_mut() {
-            let copies = crate::rules::evaluate(&sub.rules, inc, sub.core.settings.dead_letter_on_filter_exception);
-            for message in copies {
+            let evaluation = crate::rules::evaluate(&sub.rules, inc);
+            if let Some(failure) = evaluation.failure {
+                // a filter or an action that cannot be evaluated: the message is not delivered to this subscription, and goes to its
+                // dead-letter queue when the subscription asks for that
+                if sub.core.settings.dead_letter_on_filter_exception {
+                    sub.core.dead_letter_incoming(inc.clone(), failure.reason, Some(&failure.description), now);
+                }
+                continue;
+            }
+            for message in evaluation.copies {
                 let mut copy = inc.clone();
                 copy.message = message;
                 if let Some(target) = sub.core.settings.forward_to.clone() {
-                    if copy.enq_seq.is_none() {
-                        copy.enq_seq = Some(sub.core.main.alloc_seq());
-                    }
                     forwards.push(Forward { target, incoming: copy });
                     continue;
                 }
@@ -118,13 +133,7 @@ impl Topic {
     /// Check a message can be sent: topic limits and every subscription that would take it.
     pub fn check_send(&self, size: usize) -> Result<(), SbError> {
         match self.settings.status.as_str() {
-            "Disabled" | "SendDisabled" => {
-                return Err(SbError::new(
-                    crate::errors::ENTITY_DISABLED,
-                    400,
-                    format!("The messaging entity '{}' is disabled for sending.", self.name),
-                ));
-            }
+            "Disabled" | "SendDisabled" => return Err(SbError::entity_disabled(&self.ns, &self.name)),
             _ => {}
         }
         if size as u64 > self.settings.max_message_size_bytes() {
@@ -273,7 +282,9 @@ impl Namespace {
             return Err(SbError::new(crate::errors::ENTITY_ALREADY_EXISTS, 409, format!("The messaging entity '{name}' already exists.")));
         }
         self.check_entity_quota()?;
-        self.queues.insert(key(name), Queue { name: name.to_string(), core: Core::new(name, settings) });
+        let mut core = Core::new(name, settings);
+        core.ns = self.name.clone();
+        self.queues.insert(key(name), Queue { name: name.to_string(), core });
         next_revision();
         Ok(())
     }
@@ -283,7 +294,9 @@ impl Namespace {
             return Err(SbError::new(crate::errors::ENTITY_ALREADY_EXISTS, 409, format!("The messaging entity '{name}' already exists.")));
         }
         self.check_entity_quota()?;
-        self.topics.insert(key(name), Topic::new(name, settings));
+        let mut topic = Topic::new(name, settings);
+        topic.ns = self.name.clone();
+        self.topics.insert(key(name), topic);
         next_revision();
         Ok(())
     }
@@ -305,7 +318,9 @@ impl Namespace {
             ));
         }
         let path = format!("{}/Subscriptions/{}", t.name, name);
-        t.subs.insert(key(name), Subscription { name: name.to_string(), core: Core::new(path, settings), rules });
+        let mut core = Core::new(path, settings);
+        core.ns = t.ns.clone();
+        t.subs.insert(key(name), Subscription { name: name.to_string(), core, rules });
         next_revision();
         Ok(())
     }
@@ -329,7 +344,11 @@ impl State {
 
     pub fn ns(&mut self, name: &str) -> &mut Namespace {
         let k = self.resolve(name);
-        self.namespaces.entry(k).or_default()
+        let ns = self.namespaces.entry(k.clone()).or_default();
+        if ns.name.is_empty() {
+            ns.name = k;
+        }
+        ns
     }
 
     /// Wake every receiver that waits on any entity (the state is being dropped).
@@ -365,14 +384,20 @@ impl State {
     /// topic's list of scheduled messages).
     pub fn reserve_seq(&mut self, ns_name: &str, target: &Address) -> Result<u64, SbError> {
         let mut target = target.clone();
-        for _ in 0..=MAX_FORWARD_DEPTH {
+        for hop in 0..=MAX_FORWARD_DEPTH {
             let ns = self.ns(ns_name);
             match &target {
                 Address::Queue { name, sub: SubQueue::Main } => {
+                    if ns.queue(name).is_none() && ns.topic(name).is_some() {
+                        target = Address::Topic { name: name.clone() };
+                        continue;
+                    }
+                    let next = ns.queue(name).and_then(|q| q.core.settings.forward_to.clone()).and_then(|f| forward_target(ns, &f));
                     let q = ns.queue_mut(name).ok_or_else(|| SbError::entity_not_found(name, ns_name))?;
-                    match q.core.settings.forward_to.clone() {
-                        Some(f) => target = parse_target(&f).ok_or_else(|| SbError::entity_not_found(&f, ns_name))?,
-                        None => return Ok(q.core.main.alloc_seq()),
+                    match next {
+                        // a chain that is too long ends in the dead-letter queue of the queue where it stops (see `deliver`)
+                        Some(t) if hop < MAX_FORWARD_DEPTH => target = t,
+                        _ => return Ok(q.core.main.alloc_seq()),
                     }
                 }
                 Address::Topic { name } => {
@@ -382,46 +407,59 @@ impl State {
                 other => return Err(SbError::not_allowed(format!("cannot send to {other:?}"))),
             }
         }
-        Err(SbError::new(
-            azemu_amqp::condition::RESOURCE_LIMIT_EXCEEDED,
-            400,
-            "Maximum auto-forward depth exceeded (the forwarding chain is too long or loops).",
-        ))
+        Err(SbError::not_allowed("forwarding chain"))
     }
 
     fn deliver(
         &mut self,
         ns_name: &str,
         target: &Address,
-        inc: Incoming,
+        mut inc: Incoming,
         now: i64,
         depth: usize,
         reserved: Option<u64>,
     ) -> Result<u64, SbError> {
         if depth > MAX_FORWARD_DEPTH {
-            return Err(SbError::new(
-                azemu_amqp::condition::RESOURCE_LIMIT_EXCEEDED,
-                400,
-                "Maximum auto-forward depth exceeded (the forwarding chain is too long or loops).",
-            ));
+            // only a loop through topics gets here (a queue that cannot forward any further dead-letters the message below)
+            tracing::debug!("forwarding chain too long: message dropped");
+            return Ok(0);
         }
+        // a forwarding target that is a topic
+        let as_topic;
+        let target = match target {
+            Address::Queue { name, sub: SubQueue::Main }
+                if {
+                    let ns = self.ns(ns_name);
+                    ns.queue(name).is_none() && ns.topic(name).is_some()
+                } =>
+            {
+                as_topic = Address::Topic { name: name.clone() };
+                &as_topic
+            }
+            other => other,
+        };
+        let scheduled_in_future = inc.scheduled_ms.is_some_and(|w| w > now);
         let ns = self.ns(ns_name);
         match target {
             Address::Queue { name, sub: SubQueue::Main } => {
+                // the target of a forward that was deleted since: the message stays here, as on Azure
+                let forward_to = ns.queue(name).and_then(|q| q.core.settings.forward_to.clone()).and_then(|f| forward_target(ns, &f));
                 let q = ns.queue_mut(name).ok_or_else(|| SbError::entity_not_found(name, ns_name))?;
-                if let Some(f) = q.core.settings.forward_to.clone() {
-                    let t = parse_target(&f).ok_or_else(|| SbError::entity_not_found(&f, ns_name))?;
+                if let Some(t) = forward_to {
                     if q.core.is_duplicate(&inc.message, now) {
-                        return Ok(0);
+                        return Ok(if scheduled_in_future { q.core.main.alloc_seq() } else { 0 });
                     }
-                    let mut inc = inc;
-                    if inc.enq_seq.is_none() {
-                        inc.enq_seq = Some(q.core.main.alloc_seq());
+                    if depth >= MAX_FORWARD_DEPTH {
+                        // the message has been forwarded as often as it may be: it is dead-lettered where it is
+                        q.core.dead_letter_incoming(inc, HOP_COUNT_EXCEEDED, None, now);
+                        return Ok(0);
                     }
                     return self.deliver(ns_name, &t, inc, now, depth + 1, reserved);
                 }
                 let seq = match q.core.enqueue_with_seq(inc, now, reserved)? {
                     Enqueued::Stored(s) => s,
+                    // Azure uses up a sequence number for a scheduled duplicate and answers it
+                    Enqueued::Duplicate if scheduled_in_future => q.core.main.alloc_seq(),
                     Enqueued::Duplicate => 0,
                 };
                 Ok(seq)
@@ -432,7 +470,7 @@ impl State {
                 if t.settings.requires_duplicate_detection {
                     if let Some(id) = message_id_string(&inc.message) {
                         if t.seen_before(id, now) {
-                            return Ok(0);
+                            return Ok(if scheduled_in_future { t.scheduled.alloc_seq() } else { 0 });
                         }
                     }
                 }
@@ -468,6 +506,10 @@ impl State {
                         deferred: false,
                     });
                     return Ok(seq);
+                }
+                // the copies in the subscriptions carry the topic's sequence number (`x-opt-enqueue-sequence-number`)
+                if inc.enq_seq.is_none() {
+                    inc.enq_seq = Some(t.scheduled.alloc_seq());
                 }
                 let forwards = t.fan_out(&inc, now)?;
                 for f in forwards {
@@ -514,8 +556,12 @@ impl State {
                     }
                 }
                 for m in due {
+                    let (seq, when) = (m.seq, m.scheduled_ms);
                     let mut inc = Incoming::new(Arc::unwrap_or_clone(m.message), m.size);
-                    inc.scheduled_ms = None;
+                    // the copies are active messages that still report the state `Scheduled`
+                    inc.scheduled_ms = when;
+                    inc.was_scheduled = true;
+                    inc.enq_seq = Some(seq);
                     match t.fan_out(&inc, now) {
                         Ok(f) => pending.push((ns_name.clone(), f)),
                         Err(e) => tracing::debug!("scheduled fan-out failed: {}", e.description),
@@ -534,6 +580,16 @@ impl State {
         for (ns, f) in pending {
             self.forward_all(&ns, f, now);
         }
+    }
+}
+
+/// The entity a forward goes to, when it exists: a queue or a topic. A target that was deleted gives `None` (the messages stay where they
+/// are).
+fn forward_target(ns: &Namespace, path: &str) -> Option<Address> {
+    let t = parse_target(path)?;
+    match &t {
+        Address::Queue { name, .. } if ns.queue(name).is_some() || ns.topic(name).is_some() => Some(t),
+        _ => None,
     }
 }
 
@@ -582,6 +638,11 @@ impl Shared {
             "AZEMU_SERVICEBUS_CONFIG",
             "none",
             "Path of a JSON file with queues, topics, subscriptions and rules to create at start and after every reset.",
+        );
+        settings::describe(
+            "AZEMU_SERVICEBUS_TIER",
+            "any",
+            "`standard` makes the administration API refuse what only a Standard namespace refuses: a `MaxMessageSizeInKilobytes` other than 256 and a `MaxSizeInMegabytes` over 5120. By default the values of every tier (Premium takes larger ones) are accepted.",
         );
         settings::describe(
             "AZEMU_SERVICEBUS_TXN_TIMEOUT_SECONDS",

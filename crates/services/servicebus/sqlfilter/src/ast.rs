@@ -55,6 +55,36 @@ pub(crate) enum Expr {
     Exists(PropRef),
 }
 
+impl Expr {
+    /// Every parameter (`@name`, without the `@`) and every property the expression reads, in order of appearance.
+    pub(crate) fn collect(&self, params: &mut Vec<String>, props: &mut Vec<PropRef>) {
+        match self {
+            Expr::Lit(_) | Expr::NewId => {}
+            Expr::Param(n) => params.push(n.clone()),
+            Expr::Prop(p) | Expr::Exists(p) => props.push(p.clone()),
+            Expr::PropertyFn(e) | Expr::Neg(e) | Expr::Plus(e) | Expr::Not(e) => e.collect(params, props),
+            Expr::Binary(_, l, r) => {
+                l.collect(params, props);
+                r.collect(params, props);
+            }
+            Expr::In { expr, list, .. } => {
+                expr.collect(params, props);
+                for e in list {
+                    e.collect(params, props);
+                }
+            }
+            Expr::Like { expr, pattern, escape, .. } => {
+                expr.collect(params, props);
+                pattern.collect(params, props);
+                if let Some(e) = escape {
+                    e.collect(params, props);
+                }
+            }
+            Expr::IsNull { expr, .. } => expr.collect(params, props),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Stmt {
     Set { target: PropRef, expr: Expr },

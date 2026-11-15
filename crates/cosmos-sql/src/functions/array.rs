@@ -193,8 +193,16 @@ fn set_union(_: &Ctx, a: &[Val]) -> Val {
 fn set_intersect(_: &Ctx, a: &[Val]) -> Val {
     match two_arrays(a) {
         Some((x, y)) => {
-            let first: HashSet<String> = x.iter().map(canon_key).collect();
-            Val::arr(dedup(y.iter().filter(|v| first.contains(&canon_key(v))).cloned()))
+            let (kx, ky): (Vec<String>, Vec<String>) = (x.iter().map(canon_key).collect(), y.iter().map(canon_key).collect());
+            let (sx, sy): (HashSet<&String>, HashSet<&String>) = (kx.iter().collect(), ky.iter().collect());
+            // The order a real account answers (probed with a dozen pairs): the second array's when it is smaller and all of it is in the
+            // first one (`SETINTERSECT([1,2,"A","B"], ["A",1])` is `["A",1]`), else the first array's.
+            let second_leads = sy.len() < sx.len() && sy.iter().all(|k| sx.contains(k));
+            if second_leads {
+                Val::arr(dedup(y.iter().filter(|v| sx.contains(&canon_key(v))).cloned()))
+            } else {
+                Val::arr(dedup(x.iter().filter(|v| sy.contains(&canon_key(v))).cloned()))
+            }
         }
         None => Val::Undefined,
     }

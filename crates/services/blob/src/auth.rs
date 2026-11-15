@@ -1,6 +1,6 @@
-//! Who may do what. Shared Key and SAS signatures are verified for `devstoreaccount1`
-//! (see `azemu_core::storage::sig` for the policy: placeholders, other accounts and
-//! unknown newer layouts are not checked; `AZEMU_LOOSE_AUTH=1` turns it off). A SAS is
+//! Who may do what. The form of a signature is checked for every account and the signature itself for
+//! `devstoreaccount1` (see `azemu_core::storage::sig` for the policy: other accounts and
+//! unknown newer layouts are not compared; `AZEMU_LOOSE_AUTH=1` turns it off). A SAS is
 //! also honoured for what it says, for every account: expiry, start, protocol, IP
 //! range, services, resource types, permissions and stored access policy. A request
 //! with no credentials is anonymous and only allowed on containers and blobs with
@@ -8,7 +8,10 @@
 
 use azemu_core::resp::Resp;
 use azemu_core::storage::auth::{classify, Auth, SasParams};
-use azemu_core::storage::sig::{verify_sas, verify_shared_key, SasTarget, StorageService};
+use azemu_core::storage::credentials::{
+    bad_authorization, sip_matches, without_credentials, BadAuthorization, Flavor, NoCredentials, CHALLENGE,
+};
+use azemu_core::storage::sig::{verify_sas, verify_shared_key, Rejection, SasTarget, StorageService};
 use azemu_core::storage::StorageAccounts;
 use azemu_core::time::{self, parse_iso8601};
 use azemu_core::Request;
@@ -51,8 +54,8 @@ pub fn authorize(req: &Request, op: Op, t: &Target<'_>) -> Result<Authz, ApiErro
         Auth::Bearer => Ok(Authz::default()),
         Auth::SharedKey { .. } => {
             if let Some(accounts) = t.accounts {
-                if let Some(detail) = verify_shared_key(req, StorageService::Blob, accounts).rejection() {
-                    return Err(auth_failed(detail.to_string()));
+                if let Some(why) = verify_shared_key(req, StorageService::Blob, accounts).rejection() {
+                    return Err(rejected(why));
                 }
             }
             Ok(Authz::default())
@@ -66,35 +69,38 @@ pub fn authorize(req: &Request, op: Op, t: &Target<'_>) -> Result<Authz, ApiErro
                         _ => None,
                     };
                 let target = SasTarget::Blob { container: t.container_name.unwrap_or(""), blob: dir_path.as_deref().or(t.blob_name) };
-                if let Some(detail) = verify_sas(req, StorageService::Blob, accounts, &target).rejection() {
-                    return Err(auth_failed(detail.to_string()));
+                if let Some(why) = verify_sas(req, StorageService::Blob, accounts, &target).rejection() {
+                    return Err(rejected(why));
                 }
             }
             check_sas(req, op, &need, &p, t)?;
             Ok(Authz { sas: Some(p) })
         }
         Auth::Anonymous => {
-            check_anonymous(&need, t)?;
+            check_anonymous(req, &need, t)?;
             Ok(Authz { sas: None })
         }
     }
 }
 
-pub fn no_auth_info() -> ApiError {
-    ApiError::new("NoAuthenticationInformation").header(
-        "WWW-Authenticate",
-        "Bearer authorization_uri=https://login.microsoftonline.com/common/oauth2/authorize resource_id=https://storage.azure.com",
-    )
+/// What Azure answers a request with no credential, or with one it cannot use at all: 401 `NoAuthenticationInformation`
+/// with the challenge; for an `x-ms-version` from before Entra ID could sign in (older than 2019-12-12) 404
+/// `ResourceNotFound`, so that an anonymous caller learns nothing about what exists.
+pub fn no_auth_info(req: &Request) -> ApiError {
+    match without_credentials(req, Flavor::Blob) {
+        NoCredentials::Challenge => ApiError::new("NoAuthenticationInformation").header("WWW-Authenticate", CHALLENGE),
+        NoCredentials::NotFound => err("ResourceNotFound"),
+    }
 }
 
-/// What Azure answers a request with no credential. Where the request is of a kind that is never allowed without one
-/// (everything but reading blobs, and listing and reading containers) it is 401 `NoAuthenticationInformation`, whatever
-/// the container is. For the readings, an account that disallows public access answers 409 `PublicAccessNotPermitted`; a
-/// container that does not exist is 404 `ResourceNotFound` (an anonymous request is not told more); a container that is not
-/// public, or not public enough for this operation, is 401 `NoAuthenticationInformation`, whether the blob exists or not.
-fn check_anonymous(need: &Need, t: &Target<'_>) -> Result<(), ApiError> {
+/// What Azure answers a request with no credential (checked in November 2026 against a general-purpose v2 account that
+/// allows public access). Where the request is of a kind that is never allowed without one (everything but reading blobs,
+/// and listing and reading containers) it is `no_auth_info`, whatever the container is. For the readings, an account that
+/// disallows public access answers 409 `PublicAccessNotPermitted`; a container that is not public, or not public enough
+/// for this operation, or that does not exist, is `no_auth_info`: an anonymous request is not told whether it exists.
+fn check_anonymous(req: &Request, need: &Need, t: &Target<'_>) -> Result<(), ApiError> {
     if matches!(need.anon, Anon::No) {
-        return Err(no_auth_info());
+        return Err(no_auth_info(req));
     }
     if !t.public_access_allowed {
         return Err(public_access_not_permitted());
@@ -108,10 +114,7 @@ fn check_anonymous(need: &Need, t: &Target<'_>) -> Result<(), ApiError> {
     if ok {
         return Ok(());
     }
-    if !matches!(need.level, Level::Service | Level::Any) && t.container.is_none() {
-        return Err(err("ResourceNotFound"));
-    }
-    Err(no_auth_info())
+    Err(no_auth_info(req))
 }
 
 /// 409: the account does not allow public access, so an anonymous request cannot be served.
@@ -119,23 +122,23 @@ pub fn public_access_not_permitted() -> ApiError {
     ApiError::new("PublicAccessNotPermitted")
 }
 
-/// An `Authorization` header that is there and that no scheme azemu knows can be read from (or a `Bearer` with no token):
-/// Azure answers 400 `InvalidAuthenticationInfo` ("Authentication information is not given in the correct format. Check
-/// the value of Authorization header."). An empty header counts as none.
+/// An `Authorization` header that is there and that no scheme azemu knows can be read from. One word only (or a `Bearer`
+/// with no token): 400 `InvalidAuthenticationInfo` ("Authentication information is not given in the correct format.
+/// Check the value of Authorization header."). A scheme Azure does not know (`Foo bar`): 403 `AuthenticationFailed`.
+/// An empty header counts as none.
 pub fn malformed_authorization(req: &Request) -> Option<ApiError> {
-    let value = req.header("authorization")?.trim();
-    if value.is_empty() {
-        return None;
+    Some(match bad_authorization(req)? {
+        BadAuthorization::Format => ApiError::new("InvalidAuthenticationInfo"),
+        BadAuthorization::UnknownScheme(_) => ApiError::new("AuthenticationFailed"),
+    })
+}
+
+/// How a refused credential is answered.
+pub fn rejected(why: Rejection<'_>) -> ApiError {
+    match why {
+        Rejection::AuthenticationFailed(detail) => auth_failed(detail.to_string()),
+        Rejection::InvalidAuthenticationInfo => ApiError::new("InvalidAuthenticationInfo"),
     }
-    let (scheme, rest) = value.split_once(' ').unwrap_or((value, ""));
-    let known =
-        scheme.eq_ignore_ascii_case("bearer") || scheme.eq_ignore_ascii_case("sharedkey") || scheme.eq_ignore_ascii_case("sharedkeylite");
-    let empty_token = scheme.eq_ignore_ascii_case("bearer") && rest.trim().is_empty();
-    // a SAS in the query is a credential of its own: the header is then not what decides
-    if (!known && !req.query.has("sig")) || empty_token {
-        return Some(ApiError::new("InvalidAuthenticationInfo"));
-    }
-    None
 }
 
 pub fn auth_failed(detail: String) -> ApiError {
@@ -174,25 +177,29 @@ pub fn check_sas_window(req: &Request, p: &SasParams, container: Option<&Contain
         }
     }
 
+    // A start that is not given is the time of the request. Azure refuses an expiry that is not after the start before it
+    // asks whether the SAS is valid now, and says so in other words for an account SAS ("has to") and a service SAS ("must").
+    let frame = |s: Option<Time>, e: Option<Time>| {
+        auth_failed(format!(
+            "Signature not valid in the specified time frame: Start [{}] - Expiry [{}] - Current [{}]",
+            s.map(time::rfc1123).unwrap_or_default(),
+            e.map(time::rfc1123).unwrap_or_default(),
+            time::rfc1123(now)
+        ))
+    };
     if let Some(e) = expiry {
-        if e <= now {
+        let from = start.unwrap_or(now);
+        if e <= from {
+            let word = if p.ss.is_some() || p.srt.is_some() { "has to" } else { "must" };
             return Err(auth_failed(format!(
-                "Signature not valid in the specified time frame: Start [{}] - Expiry [{}] - Current [{}]",
-                start.map(time::rfc1123).unwrap_or_default(),
+                "Signed expiry time [{}] {word} be after signed start time [{}]",
                 time::rfc1123(e),
-                time::rfc1123(now)
+                time::rfc1123(from)
             )));
         }
     }
-    if let Some(s) = start {
-        if s > now {
-            return Err(auth_failed(format!(
-                "Signature not valid in the specified time frame: Start [{}] - Expiry [{}] - Current [{}]",
-                time::rfc1123(s),
-                expiry.map(time::rfc1123).unwrap_or_default(),
-                time::rfc1123(now)
-            )));
-        }
+    if start.is_some_and(|s| s > now) || expiry.is_some_and(|e| e <= now) {
+        return Err(frame(start, expiry));
     }
 
     if let Some(spr) = &p.spr {
@@ -200,9 +207,11 @@ pub fn check_sas_window(req: &Request, p: &SasParams, container: Option<&Contain
             return Err(err("AuthorizationProtocolMismatch"));
         }
     }
-    if let Some(sip) = &p.sip {
-        if !ip_allowed(sip, &client_ip(req)) {
-            return Err(err("AuthorizationSourceIPMismatch"));
+    if let Some(sip) = p.sip.as_deref().filter(|s| !s.is_empty()) {
+        match sip_matches(req, sip) {
+            Ok(true) => {}
+            Ok(false) => return Err(err("AuthorizationFailure")),
+            Err(detail) => return Err(auth_failed(detail.to_string())),
         }
     }
     Ok(perms)
@@ -258,23 +267,6 @@ fn check_sas(req: &Request, op: Op, need: &Need, p: &SasParams, t: &Target<'_>) 
     Err(err("AuthorizationPermissionMismatch"))
 }
 
-/// Client IP as far as we know it: `X-Forwarded-For` when present, else loopback.
-fn client_ip(req: &Request) -> String {
-    req.header("x-forwarded-for").and_then(|v| v.split(',').next()).map(|s| s.trim().to_string()).unwrap_or_else(|| "127.0.0.1".to_string())
-}
-
-fn ip_allowed(range: &str, ip: &str) -> bool {
-    let parse = |s: &str| s.trim().parse::<std::net::Ipv4Addr>().ok().map(u32::from);
-    let Some(ip) = parse(ip) else { return false };
-    match range.split_once('-') {
-        Some((a, b)) => match (parse(a), parse(b)) {
-            (Some(a), Some(b)) => a <= ip && ip <= b,
-            _ => false,
-        },
-        None => parse(range) == Some(ip),
-    }
-}
-
 /// Response-header overrides carried by a SAS (`rscc`, `rscd`, ...).
 pub fn apply_sas_overrides(mut r: Resp, authz: &Authz) -> Resp {
     if let Some(p) = &authz.sas {
@@ -293,17 +285,4 @@ pub fn apply_sas_overrides(mut r: Resp, authz: &Authz) -> Resp {
         }
     }
     r
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ip_ranges() {
-        assert!(ip_allowed("127.0.0.1", "127.0.0.1"));
-        assert!(ip_allowed("127.0.0.0-127.255.255.255", "127.0.0.1"));
-        assert!(!ip_allowed("203.0.113.7", "127.0.0.1"));
-        assert!(!ip_allowed("10.0.0.1-10.0.0.9", "127.0.0.1"));
-    }
 }

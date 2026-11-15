@@ -1,6 +1,8 @@
 //! Continuation tokens and paging.
 //!
-//! A token is a JSON object like the real ones (`token` string and the partition range). It
+//! A token is a JSON object like the real ones (`token` string and the partition range). The string starts the way
+//! Azure's do (`-RID:~<container rid>#RT:1#TRC:n#ISV:2#IEO:65599#QCF:8`), so it names the container it came from: the token
+//! of a container that was deleted and made again is refused (400), as is anything that is not a token. It
 //! carries up to three things, all optional on the way back in:
 //!
 //! * `#SKIP:n`: rows of the result already delivered;
@@ -11,7 +13,7 @@
 //!
 //! Tokens stay valid when the cache entry is gone (expired, evicted, the service restarted,
 //! another process): the query is run again and `n` rows are skipped. That is also how Azure
-//! behaves: a continuation token is not tied to server memory.
+//! behaves: a continuation token is not tied to server memory. Tokens of version 0.1.0 (`+RID:~azemu#SKIP:n`) are still read.
 //!
 //! What a later page shows when the data changed in between: a page that comes out of the cache
 //! shows the rows as they were when the first page was made (the query is not re-evaluated);
@@ -25,12 +27,16 @@ use azemu_cosmos_sql::Item;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
 
+use crate::errors::{CosmosError, R};
 use crate::pk::{DocKey, PkComp};
 
 const MARK: &str = "#SKIP:";
+/// The resource id in tokens that name no container (version 0.1.0 wrote it in every token; the feeds of databases use it).
+const LEGACY_RID: &str = "azemu";
 const CACHE_MARK: &str = "#Q:";
 
-/// A response never holds more than this many bytes of rows (Azure: 4 MB per response).
+/// A page of a read feed or a query ends once it holds this many bytes of rows (Azure: 4 MB per response). Azure cuts the
+/// page after the row that crosses the line, so a page of 1.5 MB documents holds three (4.5 MB); checked in November 2026.
 pub const MAX_PAGE_BYTES: usize = 4 * 1024 * 1024;
 /// Largest number of cached results.
 const CACHE_ENTRIES: usize = 256;
@@ -47,8 +53,9 @@ pub struct Token {
     pub after: Option<DocKey>,
 }
 
-pub fn encode(t: &Token) -> String {
-    let mut text = format!("+RID:~azemu{MARK}{}", t.skip);
+pub fn encode(t: &Token, container_rid: &str) -> String {
+    let rid = if container_rid.is_empty() { LEGACY_RID } else { container_rid };
+    let mut text = format!("-RID:~{rid}#RT:1#TRC:{skip}#ISV:2#IEO:65599#QCF:8{MARK}{skip}", skip = t.skip);
     if let Some(id) = t.cache_id {
         text.push_str(&format!("{CACHE_MARK}{id}"));
     }
@@ -59,33 +66,45 @@ pub fn encode(t: &Token) -> String {
     v.to_string()
 }
 
-/// Reads a token; anything that is absent or unreadable is "from the start".
-pub fn decode(token: Option<&str>) -> Token {
+/// What Azure says to a continuation token that it cannot read.
+pub fn malformed() -> CosmosError {
+    CosmosError::bad_request("The continuation token specified in the request is malformed. Re-run the query without it and iterate.")
+}
+
+/// Reads a token. An absent or empty one is "from the start"; one that is not a token of this emulator for this container
+/// (`container_rid`) is a 400, as on Azure (checked in November 2026: text, `{}`, and the token of a deleted container).
+pub fn decode(token: Option<&str>, container_rid: &str) -> R<Token> {
     let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) else {
-        return Token::default();
+        return Ok(Token::default());
     };
-    let Ok(v) = serde_json::from_str::<Value>(t) else { return Token::default() };
+    let Ok(v) = serde_json::from_str::<Value>(t) else { return Err(malformed()) };
+    let Some(s) = v.get("token").and_then(Value::as_str) else { return Err(malformed()) };
+    let Some(at) = s.find("RID:~") else { return Err(malformed()) };
+    let rid: String = s[at + 5..].chars().take_while(|c| *c != '#').collect();
+    let own = if container_rid.is_empty() { LEGACY_RID } else { container_rid };
+    if rid != own && rid != LEGACY_RID {
+        return Err(malformed());
+    }
     let mut out = Token::default();
-    if let Some(s) = v.get("token").and_then(Value::as_str) {
-        if let Some(i) = s.find(MARK) {
-            let rest = &s[i + MARK.len()..];
-            let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-            out.skip = digits.parse().unwrap_or(0);
-            if let Some(j) = rest.find(CACHE_MARK) {
-                let d: String = rest[j + CACHE_MARK.len()..].chars().take_while(char::is_ascii_digit).collect();
-                out.cache_id = d.parse().ok();
-            }
+    if let Some(i) = s.find(MARK) {
+        let rest = &s[i + MARK.len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        out.skip = digits.parse().map_err(|_| malformed())?;
+        if let Some(j) = rest.find(CACHE_MARK) {
+            let d: String = rest[j + CACHE_MARK.len()..].chars().take_while(char::is_ascii_digit).collect();
+            out.cache_id = d.parse().ok();
         }
     }
     if let Some(a) = v.get("after") {
         let pk: Option<Vec<PkComp>> =
             a.get("pk").and_then(Value::as_array).and_then(|items| items.iter().map(|x| PkComp::from_json(x).ok()).collect());
         let id = a.get("id").and_then(Value::as_str);
-        if let (Some(pk), Some(id)) = (pk, id) {
-            out.after = Some(DocKey { pk, id: id.to_string() });
+        match (pk, id) {
+            (Some(pk), Some(id)) => out.after = Some(DocKey { pk, id: id.to_string() }),
+            _ => return Err(malformed()),
         }
     }
-    out
+    Ok(out)
 }
 
 /// Rough size in bytes of a value as JSON, without allocating. Iterative.
@@ -131,16 +150,16 @@ impl Row for Item {
     }
 }
 
-/// How many rows of `rows[skip..]` fit in one page of at most `size` rows and
-/// [`MAX_PAGE_BYTES`] (always at least one row when any remain).
+/// How many rows of `rows[skip..]` go into one page of at most `size` rows: the page ends after the row that takes it to
+/// [`MAX_PAGE_BYTES`] (at least one row when any remain).
 pub fn page_len<R: Row>(rows: &[R], skip: usize, size: Option<usize>) -> usize {
     let rest = rows.get(skip..).unwrap_or(&[]);
     let max = size.unwrap_or(usize::MAX).min(rest.len());
     let mut bytes = 0usize;
     for (i, r) in rest[..max].iter().enumerate() {
         bytes += approx_size(r.json());
-        if bytes > MAX_PAGE_BYTES && i > 0 {
-            return i;
+        if bytes >= MAX_PAGE_BYTES {
+            return i + 1;
         }
     }
     max
@@ -148,14 +167,14 @@ pub fn page_len<R: Row>(rows: &[R], skip: usize, size: Option<usize>) -> usize {
 
 /// Take one page out of `rows` by the token's skip count (used where the whole list is cheap to
 /// produce: metadata feeds). Returns the next token when rows remain.
-pub fn page(rows: Vec<Value>, token: Option<&str>, size: Option<usize>) -> (Vec<Value>, Option<String>) {
-    let skip = decode(token).skip;
+pub fn page(rows: Vec<Value>, token: Option<&str>, size: Option<usize>, rid: &str) -> R<(Vec<Value>, Option<String>)> {
+    let skip = decode(token, rid)?.skip;
     let n = page_len(&rows, skip, size);
     let end = skip.saturating_add(n);
     let more = end < rows.len();
     let page: Vec<Value> = rows.into_iter().skip(skip).take(n).collect();
-    let next = more.then(|| encode(&Token { skip: end, ..Token::default() }));
-    (page, next)
+    let next = more.then(|| encode(&Token { skip: end, ..Token::default() }, rid));
+    Ok((page, next))
 }
 
 pub struct RunningGuard<'a>(&'a std::sync::atomic::AtomicUsize);
@@ -302,35 +321,43 @@ mod tests {
             cache_id: Some(7),
             after: Some(DocKey { pk: vec![PkComp::Str("a".into()), PkComp::Num(2.0), PkComp::Undefined], id: "x".into() }),
         };
-        assert_eq!(decode(Some(&encode(&t))), t);
-        for junk in ["", "  ", "abc", "{}", "{\"token\":5}", "{\"token\":\"+RID:~azemu#SKIP:zz\"}"] {
-            assert_eq!(decode(Some(junk)), Token::default(), "{junk}");
+        assert_eq!(decode(Some(&encode(&t, "AbCd")), "AbCd").unwrap(), t);
+        for junk in ["abc", "{}", "{\"token\":5}", "{\"token\":\"+RID:~azemu#SKIP:zz\"}", "{\"token\":\"-RID:~other#SKIP:1\"}", "[1]"] {
+            assert!(decode(Some(junk), "AbCd").is_err(), "{junk}");
         }
-        assert_eq!(decode(None), Token::default());
-        // tokens written before the cache existed still work
+        // nothing is "from the start"
+        for none in [None, Some(""), Some("  ")] {
+            assert_eq!(decode(none, "AbCd").unwrap(), Token::default());
+        }
+        // a token of another container is refused
+        assert!(decode(Some(&encode(&t, "AbCd")), "XyZ=").is_err());
+        // tokens written by version 0.1.0 still work, whatever the container
         let old = json!({"token": "+RID:~azemu#SKIP:12", "range": {"min": "", "max": "FF"}}).to_string();
-        assert_eq!(decode(Some(&old)).skip, 12);
+        assert_eq!(decode(Some(&old), "AbCd").unwrap().skip, 12);
     }
 
     #[test]
     fn page_slices_and_reports_more() {
         let rows: Vec<Value> = (0..10).map(|i| json!(i)).collect();
-        let (p, next) = page(rows.clone(), None, Some(4));
+        let (p, next) = page(rows.clone(), None, Some(4), "R").unwrap();
         assert_eq!(p, vec![json!(0), json!(1), json!(2), json!(3)]);
-        let (p, next) = page(rows.clone(), next.as_deref(), Some(4));
+        let (p, next) = page(rows.clone(), next.as_deref(), Some(4), "R").unwrap();
         assert_eq!(p, vec![json!(4), json!(5), json!(6), json!(7)]);
-        let (p, next) = page(rows, next.as_deref(), Some(4));
+        let (p, next) = page(rows, next.as_deref(), Some(4), "R").unwrap();
         assert_eq!(p, vec![json!(8), json!(9)]);
         assert!(next.is_none());
     }
 
     #[test]
-    fn a_page_stops_at_four_megabytes_but_always_has_a_row() {
+    fn a_page_ends_after_the_row_that_reaches_four_megabytes() {
         let big = Value::String("x".repeat(3 * 1024 * 1024));
         let rows = vec![big.clone(), big.clone(), big];
-        assert_eq!(page_len(&rows, 0, None), 1);
+        assert_eq!(page_len(&rows, 0, None), 2, "3 MB and then 6 MB: the second row crosses the line");
         assert_eq!(page_len(&rows, 2, None), 1);
         assert_eq!(page_len(&rows, 3, None), 0);
+        let small = Value::String("x".repeat(1500 * 1024));
+        let rows = vec![small; 5];
+        assert_eq!(page_len(&rows, 0, None), 3, "1.5 MB rows: 3 of them make 4.5 MB (what Azure answered)");
     }
 
     #[test]

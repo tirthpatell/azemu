@@ -259,12 +259,14 @@ public class EhNoAutoTests : EhBase, IClassFixture<EhNoAutoFixture>
     }
 
     [Fact]
-    public async Task MissingConsumerGroup_FailsWithResourceNotFound()
+    public async Task ConsumerGroupThatWasNeverCreated_IsAccepted()
     {
+        // a real Standard namespace takes a group nobody made (November 2026): the receiver gets the events
         await CreateHub(2);
+        await using var p = Producer();
+        await p.SendAsync(new[] { new EventData("hello") }, new SendEventOptions { PartitionId = "0" });
         await using var c = Consumer("nope-group");
-        var ex = await Assert.ThrowsAsync<EventHubsException>(async () => await Read(c, "0", EventPosition.Earliest, 1, 5));
-        Assert.Equal(EventHubsException.FailureReason.ResourceNotFound, ex.Reason);
+        Assert.Equal("hello", Text((await Read(c, "0", EventPosition.Earliest, 1)).Single()));
     }
 
     [Fact]

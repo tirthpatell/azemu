@@ -313,16 +313,54 @@ async fn validation_errors_are_400_with_the_recorded_texts() {
     let r = a.topic("t", "<DuplicateDetectionHistoryTimeWindow>P25D</DuplicateDetectionHistoryTimeWindow>").await;
     assert_eq!(r.status, 400);
     assert!(r.text().contains("SubCode=40000. The value supplied must be between 00:00:20 and 7.00:00:00.&#xD;\nParameter name: DuplicateDetectionHistoryTimeWindow&#xD;\nActual value was 25.00:00:00. TrackingId:"), "{}", r.text());
-    assert_eq!(a.queue("q4", "<DuplicateDetectionHistoryTimeWindow>PT19S</DuplicateDetectionHistoryTimeWindow>").await.status, 400);
-    // 256 KB is the ceiling on Standard
-    let r = a.queue("q5", "<MaxMessageSizeInKilobytes>1024</MaxMessageSizeInKilobytes>").await;
+    // Azure takes a window under 20 seconds although Microsoft Learn says 20 seconds is the least (checked in November 2026); zero it refuses
+    assert_eq!(a.queue("q4", "<DuplicateDetectionHistoryTimeWindow>PT19S</DuplicateDetectionHistoryTimeWindow>").await.status, 201);
+    let r = a.queue("q4b", "<DuplicateDetectionHistoryTimeWindow>PT0S</DuplicateDetectionHistoryTimeWindow>").await;
     assert_eq!(r.status, 400);
-    assert!(
-        r.text().contains("SubCode=40000. Bad Request. To know more visit https://aka.ms/sbResourceMgrExceptions. . TrackingId:"),
-        "{}",
-        r.text()
-    );
-    assert_eq!(a.queue("q6", "<MaxMessageSizeInKilobytes>128</MaxMessageSizeInKilobytes>").await.status, 201);
+    assert!(r.text().contains("Argument DuplicateDetectionHistoryTimeWindow must be a positive timeout value."), "{}", r.text());
+    // 256 KB on Standard, 1,024 KB to 100 MB on Premium: the emulator takes both and nothing in between
+    assert_eq!(a.queue("q5", "<MaxMessageSizeInKilobytes>1024</MaxMessageSizeInKilobytes>").await.status, 201);
+    assert_eq!(a.queue("q5b", "<MaxMessageSizeInKilobytes>256</MaxMessageSizeInKilobytes>").await.status, 201);
+    for kb in ["1", "128", "255", "257", "102401"] {
+        let r = a.queue("q6", &format!("<MaxMessageSizeInKilobytes>{kb}</MaxMessageSizeInKilobytes>")).await;
+        assert_eq!(r.status, 400, "{kb}");
+        assert!(r.text().contains("The specified value MaxMessageSizeInKilobytes is invalid."), "{}", r.text());
+    }
+    // sizes are whole gigabytes (0 is the default size)
+    for mb in ["1", "100", "1025", "5121", "81921", "-1"] {
+        let r = a.queue("q7", &format!("<MaxSizeInMegabytes>{mb}</MaxSizeInMegabytes>")).await;
+        assert_eq!(r.status, 400, "{mb}");
+        assert!(r.text().contains(&format!("The specified value {mb} is invalid. The property MaxSizeInMegabytes, must be one of the following values: 1024;2048;3072;4096;5120;")), "{}", r.text());
+    }
+    for mb in ["0", "1024", "5120", "81920"] {
+        assert_eq!(a.queue(&format!("sz{mb}"), &format!("<MaxSizeInMegabytes>{mb}</MaxSizeInMegabytes>")).await.status, 201, "{mb}");
+    }
+    // zero and negative durations, a delivery count under one, a metadata text that is too long
+    for (inner, text) in [
+        ("<LockDuration>PT0S</LockDuration>", "Argument LockDuration must be a positive timeout value. The provided value was 00:00:00."),
+        ("<LockDuration>-PT5S</LockDuration>", "Argument LockDuration must be a positive timeout value. The provided value was -00:00:05."),
+        (
+            "<DefaultMessageTimeToLive>PT0S</DefaultMessageTimeToLive>",
+            "The value supplied must be between 00:00:01 and 10675199.02:48:05.4775807.",
+        ),
+        ("<MaxDeliveryCount>0</MaxDeliveryCount>", "The value supplied must be between 1 and 2147483647."),
+        ("<AutoDeleteOnIdle>PT4M59S</AutoDeleteOnIdle>", "The value supplied must be between 00:05:00 and 10675199.02:48:05.4775807."),
+    ] {
+        let r = a.queue("qz", inner).await;
+        assert_eq!(r.status, 400, "{inner}");
+        assert!(r.text().contains(text), "{}", r.text());
+    }
+    assert_eq!(a.queue("qz", "<MaxDeliveryCount>2147483648</MaxDeliveryCount>").await.status, 500);
+    assert_eq!(a.queue("qz", &format!("<UserMetadata>{}</UserMetadata>", "x".repeat(1025))).await.status, 400);
+    // names
+    for name in ["a%20b", "a%23b", "a*b", "a:b"] {
+        let r = a.create(&format!("/{name}?api-version=2021-05"), &entry("QueueDescription", "")).await;
+        assert_eq!(r.status, 400, "{name}");
+        assert!(r.text().contains("contains character(s) that is not allowed by Service Bus."), "{}", r.text());
+    }
+    let r = a.create("/%24x?api-version=2021-05", &entry("QueueDescription", "")).await;
+    assert_eq!(r.status, 400);
+    assert!(r.text().contains("The specified name (&quot;$x&quot;) is not valid."), "{}", r.text());
     // the rest
     for (inner, why) in [
         ("<MaxDeliveryCount>0</MaxDeliveryCount>", "max delivery count"),
@@ -330,7 +368,7 @@ async fn validation_errors_are_400_with_the_recorded_texts() {
         ("<AutoDeleteOnIdle>PT1M</AutoDeleteOnIdle>", "auto delete"),
         ("<RequiresSession>maybe</RequiresSession>", "bool"),
         ("<LockDuration>1 minute</LockDuration>", "duration"),
-        ("<MaxSizeInMegabytes>0</MaxSizeInMegabytes>", "size"),
+        ("<MaxSizeInMegabytes>100</MaxSizeInMegabytes>", "size"),
     ] {
         assert_eq!(a.queue("qx", inner).await.status, 400, "{why}");
     }
@@ -512,10 +550,12 @@ async fn an_empty_name_is_refused_as_recorded() {
 #[tokio::test]
 async fn bad_bodies_are_400() {
     let a = admin().await;
+    // Azure answers 404 "not recognized as a namespace policy put request" for a body that is no description (checked in November 2026)
     for body in ["", "not xml", "<a><b></a>", "<entry/>", "<entry><content><Bogus/></content></entry>", "<!DOCTYPE x><entry/>"] {
         let r = a.create("/q", body).await;
-        assert_eq!(r.status, 400, "{body}");
-        assert!(r.text().starts_with("<Error><Code>400</Code>"));
+        assert_eq!(r.status, 404, "{body}");
+        assert!(r.text().starts_with("<Error><Code>404</Code>"));
+        assert!(r.text().contains("The incoming request is not recognized as a namespace policy put request."), "{}", r.text());
     }
 }
 
@@ -526,7 +566,6 @@ async fn unbuilt_operations_are_501_and_name_themselves() {
     for (m, p, what) in [
         ("GET", "/q/messages", "GET /q/messages"),
         ("POST", "/q/messages", "POST /q/messages"),
-        ("GET", "/$Resources/eventhubs", "GET /$Resources/eventhubs"),
         ("GET", "/$Resources/Queues/extra/more", "/$Resources/Queues/extra/more"),
     ] {
         let r = a.req(m, p, "", &[]).await;

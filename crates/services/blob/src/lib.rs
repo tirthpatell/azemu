@@ -122,11 +122,9 @@ impl Shared {
             }
             if let Some(q) = query {
                 // the query runs here, after the lock is released
-                let dfs = q.dfs;
                 if let Err(why) = query::finish(&mut resp, q, &self.query_gate, req.ctx.cancel_token()).await {
                     let e = query::refused(why);
-                    resp = if dfs { crate::dfs::error_response(e, &req.ctx) } else { e.into_response(&req.ctx) };
-                    resp = azemu_core::storage::finish(resp, req, if dfs { dfs::SERVER } else { router::SERVER });
+                    resp = azemu_core::storage::finish(e.into_response(&req.ctx), req, router::SERVER);
                 }
             }
             return resp;
@@ -305,6 +303,7 @@ impl Service for BlobService {
         // `x-ms-structured-body`: an upload is taken apart before anything else sees the body,
         // a download is wrapped on the way out (see `structured.rs`).
         let mut wrapped = false;
+        let mut deferred = None;
         let req = match op {
             ops::Op::PutBlob | ops::Op::PutBlock | ops::Op::PutPage | ops::Op::AppendBlock => match structured::unwrap_upload(&req) {
                 Ok(Some(plain)) => {
@@ -312,7 +311,11 @@ impl Service for BlobService {
                     plain
                 }
                 Ok(None) => req,
-                Err(e) => return azemu_core::storage::finish(e.into_response(&req.ctx), &req, router::SERVER),
+                // answered once the credentials are checked
+                Err(e) => {
+                    deferred = Some(e);
+                    req
+                }
             },
             _ => req,
         };
@@ -325,7 +328,8 @@ impl Service for BlobService {
             false
         };
         let started = Instant::now();
-        let pre = pre::prepare(&req, op).await;
+        let mut pre = pre::prepare(&req, op).await;
+        pre.deferred = deferred;
         let mut resp = self.shared.serve(&req, pre, |st, pre| router::run(st, &req, Some(&self.shared.accounts), pre)).await;
         if wrapped {
             structured::echo(&mut resp);
@@ -409,6 +413,7 @@ mod lock_tests {
         let (p, q) = path.split_once('?').unwrap_or((path, ""));
         let mut h = HeaderMap::new();
         h.insert("authorization", HeaderValue::from_static("SharedKey acct:c2ln"));
+        h.insert("x-ms-date", HeaderValue::from_str(&azemu_core::time::rfc1123(azemu_core::time::OffsetDateTime::now_utc())).unwrap());
         for (k, v) in headers {
             h.insert(azemu_core::http::HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
         }

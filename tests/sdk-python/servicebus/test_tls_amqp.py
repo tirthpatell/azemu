@@ -14,6 +14,11 @@ import sbutil
 from sbutil import body_of, drain_bodies, receive_n, send_n
 
 
+# AMQP inside TLS on the emulator's own port with the emulator's CA: real Service Bus is always TLS on 5671 and the
+# default client already does that, so these tests have nothing to say against Azure.
+pytestmark = pytest.mark.emulator_only
+
+
 def tls_client(emu, namespace="default", **kw):
     host = sbutil.host(emu, namespace)
     kwargs = {

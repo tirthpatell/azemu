@@ -43,9 +43,10 @@
 //!   `item` key means undefined. The placeholder is accepted by the parser as `true` (the Python SDK
 //!   also replaces it by `true` itself).
 //! * Aggregates: `SELECT VALUE [{"item": COUNT(1)}] FROM c` gives `[{"item": 3}]`; for `AVG` the
-//!   item is `{"sum": .., "count": ..}`; an aggregate over no values gives `[{}]`.
+//!   item is `{"sum": .., "count": ..}`; over no values SUM is `0` and COUNT `0`, AVG `{"sum": 0, "count": 0}`, MIN and MAX
+//!   `{"item2": {"count": 0}}` (they are `{"item": v, "item2": {"min": v, "count": n}}` otherwise).
 //! * GROUP BY: `SELECT [{"item": g}] AS groupByItems, {"alias": {"item": COUNT(1)}} AS payload ...`
-//! * OFFSET/LIMIT is replaced by `TOP offset+limit` (the SDK applies offset and limit).
+//! * OFFSET/LIMIT is replaced by `OFFSET 0 LIMIT offset+limit` (the SDK applies offset and limit).
 //! * Queries that need no rewriting have an empty `rewritten_query` (the SDK then re-sends the
 //!   original text).
 //!
@@ -68,7 +69,7 @@ mod value;
 
 pub use analysis::{DistinctType, PlanOptions, QueryInfo, SortOrder, ORDER_BY_FILTER_PLACEHOLDER};
 pub use ast::AggregateKind;
-pub use error::{ErrorKind, SqlError};
+pub use error::{Detail, ErrorKind, Shape, SqlError};
 
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -172,17 +173,6 @@ pub struct EvalOptions {
     /// Fixed clock for the date/time functions (`GETCURRENTDATETIME`, `NOW`, `AGO`, ...).
     /// `None` reads the system clock (the `...STATIC` functions read it once per execution).
     pub now: Option<SystemTime>,
-    /// Drop items whose ORDER BY value is undefined, as Cosmos does with its default index.
-    /// With `false` such items sort first (ascending) or last (descending). Default `true`.
-    ///
-    /// Why: Azure serves ORDER BY from the index, and under the default indexing policy (the
-    /// wildcard path `/*`) an item without the property has no entry in the index of that path.
-    /// Microsoft Learn, "Indexing policies": "If an explicitly indexed path doesn't exist in an
-    /// item, a value is added to the index to indicate that the path is undefined" (so such
-    /// items are returned when the path is indexed explicitly, and for composite indexes, which
-    /// every ORDER BY on several fields needs). The service sets this per query from the
-    /// container's indexing policy (`azemu-cosmos`, `doc_query.rs`).
-    pub order_by_excludes_undefined: bool,
     /// Seed of the `RAND()` generator. `None` derives it from the clock.
     pub rand_seed: Option<u64>,
     /// Upper bound for the rows a query produces while it runs (every row of FROM and of each JOIN counts,
@@ -198,14 +188,7 @@ pub struct EvalOptions {
 
 impl Default for EvalOptions {
     fn default() -> Self {
-        EvalOptions {
-            now: None,
-            order_by_excludes_undefined: true,
-            rand_seed: None,
-            max_rows: 5_000_000,
-            max_bytes: 64 * 1024 * 1024,
-            udf: None,
-        }
+        EvalOptions { now: None, rand_seed: None, max_rows: 5_000_000, max_bytes: 64 * 1024 * 1024, udf: None }
     }
 }
 
@@ -216,11 +199,65 @@ pub struct Query {
     source: String,
 }
 
+/// Texts longer than this run their recursive work (parse, check, evaluate) on a thread with a big stack: a query may nest
+/// hundreds of levels (Azure takes 300 parentheses and a chain of 3000 terms), which needs more than the 2 MiB of a worker thread
+/// in a debug build. Short queries, which is nearly all of them, run where they are.
+/// Deepest array or object nesting a result may have.
+const MAX_OUTPUT_DEPTH: usize = 256;
+const DEEP_QUERY_BYTES: usize = 400;
+const BIG_STACK: usize = 256 * 1024 * 1024;
+
+fn big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    let mut f = Some(f);
+    let out = std::thread::scope(|s| {
+        let slot = &mut f;
+        match std::thread::Builder::new().stack_size(BIG_STACK).spawn_scoped(s, move || (slot.take().expect("run once"))()) {
+            Ok(h) => Some(h.join()),
+            Err(_) => None,
+        }
+    });
+    match out {
+        Some(Ok(v)) => v,
+        Some(Err(panic)) => std::panic::resume_unwind(panic),
+        // no thread to be had: run here
+        None => (f.take().expect("not run"))(),
+    }
+}
+
+/// Whether the text can nest deeply enough to need the big stack: long, or brackets more than a dozen levels deep.
+fn is_deep(sql: &str) -> bool {
+    if sql.len() > DEEP_QUERY_BYTES {
+        return true;
+    }
+    let (mut depth, mut max) = (0usize, 0usize);
+    for b in sql.bytes() {
+        match b {
+            b'(' | b'[' | b'{' => {
+                depth += 1;
+                max = max.max(depth);
+            }
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    max > 12
+}
+
+fn deep<T: Send>(sql: &str, f: impl FnOnce() -> T + Send) -> T {
+    if is_deep(sql) {
+        big_stack(f)
+    } else {
+        f()
+    }
+}
+
 /// Parses a query. Errors carry Cosmos-style codes and character positions.
 pub fn parse(sql: &str) -> Result<Query, SqlError> {
-    let ast = parser::parse_text(sql)?;
-    validate::validate(&ast)?;
-    Ok(Query { ast, source: sql.to_string() })
+    deep(sql, || {
+        let ast = parser::parse_text(sql)?;
+        validate::validate(&ast, sql)?;
+        Ok(Query { ast, source: sql.to_string() })
+    })
 }
 
 impl Query {
@@ -254,15 +291,33 @@ impl Query {
     }
 
     fn run_docs(&self, docs: &eval::query::DocSet, params: &Params, opts: &EvalOptions) -> Result<Vec<Item>, SqlError> {
+        deep(&self.source, || self.run_docs_here(docs, params, opts))
+    }
+
+    fn run_docs_here(&self, docs: &eval::query::DocSet, params: &Params, opts: &EvalOptions) -> Result<Vec<Item>, SqlError> {
         let ctx = eval::Ctx::new(params, opts);
         let rows = eval::query::run(&ctx, &self.ast, eval::query::Scope::Container(docs), None)?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|v| match v {
-                value::Val::Root(d) => Some(Item::Shared(d)),
-                other => other.to_json().map(Item::Owned),
-            })
-            .collect())
+        let mut out = Vec::with_capacity(rows.len());
+        for v in rows {
+            // JSON cannot hold NaN or Infinity: Azure fails the request instead of writing `null`
+            if v.has_non_finite() {
+                return Err(SqlError::coded(
+                    4001,
+                    "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN).",
+                    Some(4001),
+                ));
+            }
+            if v.depth_exceeds(MAX_OUTPUT_DEPTH) {
+                return Err(SqlError::gateway(format!(
+                    "The maximum nesting level exceeded the maximum limit of {MAX_OUTPUT_DEPTH} in your query's output. Ensure that the nesting level doesn't exceed our supported value of {MAX_OUTPUT_DEPTH}."
+                )));
+            }
+            match v {
+                value::Val::Root(d) => out.push(Item::Shared(d)),
+                other => out.extend(other.to_json().map(Item::Owned)),
+            }
+        }
+        Ok(out)
     }
 
     /// Runs the query in the form a partition returns it to the SDK after a query plan
@@ -281,19 +336,53 @@ impl Query {
 
     /// Facts of the query plan. `params` resolves `TOP @n` and `OFFSET @a LIMIT @b`.
     pub fn info(&self, params: &Params) -> QueryInfo {
-        analysis::info(&self.ast, &self.source, params, PlanOptions::default())
+        deep(&self.source, || analysis::info(&self.ast, &self.source, params, PlanOptions::default()))
     }
 
     /// Like [`Query::info`], for an SDK that reads the partitions' answers in the forms `opts` names.
     pub fn info_for(&self, params: &Params, opts: PlanOptions) -> QueryInfo {
-        analysis::info(&self.ast, &self.source, params, opts)
+        deep(&self.source, || analysis::info(&self.ast, &self.source, params, opts))
+    }
+
+    /// Checks the counts of TOP, OFFSET and LIMIT against the parameters (a parameter that is not a whole number from 0 up is an
+    /// error on the text of the parameter). Azure does this when it compiles the query, before any document is read.
+    pub fn check_counts(&self, params: &Params) -> Result<(), SqlError> {
+        let ctx = eval::Ctx::new(params, &EvalOptions::default());
+        let env = eval::Env::empty();
+        if let Some(t) = &self.ast.select.top {
+            eval::query::count_value(&ctx, t, &env, ("SC2060", "The count value provided for a TOP clause must be an integer."))?;
+        }
+        if let Some(ol) = &self.ast.offset_limit {
+            eval::query::count_value(&ctx, &ol.offset, &env, ("SC2062", "The OFFSET count value exceeds the maximum allowed value."))?;
+            eval::query::count_value(&ctx, &ol.limit, &env, ("SC2061", "The LIMIT count value exceeds the maximum allowed value."))?;
+        }
+        Ok(())
     }
 
     /// The names of the user-defined functions the query calls (`udf.name(..)`), each once, in order of appearance.
     pub fn udf_names(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        analysis::udf_names(&self.ast, &mut out);
-        out
+        deep(&self.source, || {
+            let mut out: Vec<String> = Vec::new();
+            analysis::udf_names(&self.ast, &mut out);
+            out
+        })
+    }
+
+    /// The query features a client has to declare to be served this query across partitions, by the names of
+    /// `x-ms-cosmos-supported-query-features` (`"OrderBy"`, `"GroupBy"`, `"NonValueAggregate"`, ...).
+    pub fn required_features(&self) -> Vec<&'static str> {
+        deep(&self.source, || analysis::required_features(&self.ast))
+    }
+
+    /// `SELECT VALUE` of an expression that holds an aggregate and is more than the aggregate (`COUNT(1) + 1`): such a
+    /// query is refused across partitions.
+    pub fn has_composed_aggregate(&self) -> bool {
+        deep(&self.source, || analysis::has_composed_aggregate(&self.ast))
+    }
+
+    /// A select list without VALUE that has an aggregate in one of its items.
+    pub fn has_select_list_aggregate(&self) -> bool {
+        deep(&self.source, || analysis::has_select_list_aggregate(&self.ast))
     }
 
     /// True if the SDK needs a query plan for this query: it has ORDER BY, an aggregate, GROUP BY,

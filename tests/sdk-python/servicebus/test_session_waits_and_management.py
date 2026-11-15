@@ -120,6 +120,7 @@ def test_two_receivers_of_one_entity_peek_in_threads_on_one_client(make_client, 
     assert not errors, errors
 
 
+@pytest.mark.azure_differs("Azure answered 93 of 300 messages in one peek call; the reason for 93 is not known, so the emulator keeps the documented 250")
 def test_peek_returns_at_most_250_messages(make_client, queue):
     # Service Bus quotas: "Maximum number of messages returned in PeekMessagesAsync call: 250"
     client = make_client()

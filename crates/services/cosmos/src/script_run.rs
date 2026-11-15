@@ -52,7 +52,7 @@ impl DocOp {
         let t = trigger_operation.to_ascii_lowercase();
         match self {
             DocOp::Create { upsert: false } => t == "all" || t == "create",
-            DocOp::Create { upsert: true } => t == "all" || t == "create" || t == "replace" || t == "update",
+            DocOp::Create { upsert: true } => t == "all" || t == "create" || t == "replace" || t == "update" || t == "upsert",
             DocOp::Replace => t == "all" || t == "replace" || t == "update",
             DocOp::Delete => t == "all" || t == "delete",
         }
@@ -156,8 +156,11 @@ fn resolve(c: &Container, names: &[String], want_pre: bool, op: DocOp) -> R<Vec<
     let kind = if want_pre { "pre" } else { "post" };
     let mut out = Vec::new();
     for n in names {
-        let r = find(&c.triggers, n)
-            .ok_or_else(|| CosmosError::bad_request(format!("The {kind}-trigger '{n}' does not exist in the container.")))?;
+        let r = find(&c.triggers, n).ok_or_else(|| {
+            CosmosError::bad_request(format!(
+                "The input trigger '{n}' for the document is not present in the collection. Ensure to pass a valid trigger."
+            ))
+        })?;
         let t = r.props.get("triggerType").and_then(Value::as_str).unwrap_or("");
         if !t.eq_ignore_ascii_case(kind) {
             return Err(CosmosError::bad_request(format!("The trigger '{n}' is a {t} trigger and cannot be used as a {kind}-trigger.")));
@@ -270,16 +273,10 @@ fn request_headers(base: &Request) -> Value {
     Value::Object(m)
 }
 
-/// Percent-encodes script log text the way Azure sends it in `x-ms-documentdb-script-log-results` (at most 1 KB).
+/// Percent-encodes script log text the way Azure sends it in `x-ms-documentdb-script-log-results`. The calls of
+/// `console.log` are joined with nothing between them (checked in November 2026; a log of 2,100 characters came back whole).
 fn encode_log(lines: &[String]) -> String {
-    let mut text = lines.join("\n");
-    if text.len() > 1024 {
-        let mut end = 1024;
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        text.truncate(end);
-    }
+    let text = lines.concat();
     let mut out = String::new();
     for b in text.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -356,7 +353,8 @@ fn run_sproc(
                 .map_err(|_| CosmosError::new(500, "InternalServerError", "The script response is not JSON."))?;
             Out::json(200, v)
         }
-        None => Out::empty(200),
+        // a script that sets no body answers an empty JSON string (Azure: `""`)
+        None => Out::json(200, Value::String(String::new())),
     };
     out = out.charge(host.charge + 1.0).lsn(host.scratch.lsn);
     if log {

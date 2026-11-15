@@ -193,3 +193,52 @@ async fn answers_with_status_501_are_counted_by_service_and_operation() {
     let v = srv.send("GET", &format!("{}/_azemu/unsupported", srv.gateway_url()), &[], "").await.json();
     assert_eq!(v, serde_json::json!({"notImplemented": [], "storedOnly": []}));
 }
+
+#[tokio::test]
+async fn the_index_lists_the_admin_endpoints_and_the_prefixes_of_the_mounted_services() {
+    let svc = Arc::new(Probe::new("idp", vec![Mount::Host("login"), Mount::PathPrefix("/_azemu/idp"), Mount::PathPrefix("/metadata/idp")]));
+    let other = Arc::new(Probe::new("alpha", vec![Mount::AccountHost("alpha")]));
+    let srv = TestServer::start(vec![svc as Arc<dyn Service>, other as Arc<dyn Service>]).await;
+    let port = srv.port();
+    for url in [
+        format!("http://localhost:{port}/_azemu/"),
+        format!("http://localhost:{port}/_azemu"),
+        format!("http://localhost:{port}//_azemu//"),
+        // on a host that names a service, as health does
+        format!("http://x.alpha.localhost:{port}/_azemu/"),
+    ] {
+        let r = srv.send("GET", &url, &[], "").await;
+        assert_eq!(r.status, 200, "{url}: {}", r.text());
+        assert!(r.header("content-type").unwrap().starts_with("application/json"));
+        let list = r.json()["endpoints"].as_array().unwrap().clone();
+        let path = |p: &str| list.iter().find(|e| e["path"] == p).unwrap_or_else(|| panic!("{p} missing in {list:?}"));
+        for p in ["/_azemu/", "/_azemu/health", "/_azemu/config", "/_azemu/ca.pem", "/_azemu/reset", "/_azemu/save", "/_azemu/unsupported"]
+        {
+            let e = path(p);
+            assert!(e["description"].as_str().is_some_and(|d| !d.is_empty()), "{p}");
+            assert!(e["methods"].as_array().is_some_and(|m| !m.is_empty()), "{p}");
+        }
+        assert_eq!(path("/_azemu/reset")["methods"], serde_json::json!(["POST"]));
+        // only the /_azemu/ prefixes of services, not their other mounts
+        assert_eq!(path("/_azemu/idp/...")["service"], "idp");
+        assert!(list.iter().all(|e| e["path"] != "/metadata/idp/..."), "{list:?}");
+        assert_eq!(list.len(), 8);
+    }
+    let r = srv.send("HEAD", &format!("http://localhost:{port}/_azemu/"), &[], "").await;
+    assert_eq!(r.status, 200);
+    let r = srv.send("POST", &format!("http://localhost:{port}/_azemu/"), &[], "").await;
+    assert_eq!(r.status, 405);
+    assert_eq!(r.header("allow"), Some("GET, HEAD"));
+}
+
+#[tokio::test]
+async fn an_unknown_admin_path_is_an_error_that_points_at_the_index() {
+    let srv = TestServer::start(vec![Arc::new(Probe::new("alpha", vec![Mount::AccountHost("alpha")])) as Arc<dyn Service>]).await;
+    let port = srv.port();
+    for p in ["/_azemu/nope", "/_azemu/health/more", "/_azemu/oauth2/token"] {
+        let r = srv.send("GET", &format!("http://localhost:{port}{p}"), &[], "").await;
+        assert_eq!(r.status, 404, "{p}");
+        assert_eq!(r.json()["error"]["code"], "NotFound", "{p}");
+        assert!(r.json()["error"]["message"].as_str().unwrap().contains("GET /_azemu/"), "{p}");
+    }
+}

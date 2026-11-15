@@ -29,15 +29,15 @@ pub fn filter_param(req: &Request, param: &str, label: bool, shown: &str) -> Res
     if f.len() > MAX_FILTER_VALUES {
         return Err(errors::invalid_argument(
             shown,
-            &format!("{shown}: at most {MAX_FILTER_VALUES} comma-separated values are allowed."),
-            None,
+            &format!("{shown}(0): Too many values. Maximum supported is {MAX_FILTER_VALUES}"),
+            Some(0),
         ));
     }
     Ok(f)
 }
 
 pub fn tags_param(req: &Request) -> Result<Vec<(String, String)>, Response> {
-    parse_tags(req.query.get_all("tags")).map_err(|d| errors::invalid_argument("tags", &d, None))
+    parse_tags(req.query.get_all("tags")).map_err(|_| errors::invalid_body("tags"))
 }
 
 fn after_param(req: &Request) -> Option<String> {
@@ -228,6 +228,12 @@ pub fn revisions(store: &Store, req: &Request) -> Response {
         let mut page = Page::new(KVSET_CT, items);
         page.etag = Some(page_etag(settings.iter().map(|s| s.etag.as_str())));
         page.status = 206;
+        let reached = a + kept.len();
+        if reached < seen {
+            if let Some(last) = kept.last() {
+                page.next = Some(link_target(req, "/revisions", &encode_cursor(&last.seq.to_string())));
+            }
+        }
         let total = if total_known { seen.to_string() } else { "*".to_string() };
         extra.push(("Content-Range", format!("items {a}-{}/{total}", a + kept.len() - 1)));
         page.extra_headers = extra;

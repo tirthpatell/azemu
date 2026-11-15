@@ -296,11 +296,15 @@ def test_recover_brings_back_all_versions(certs):
     assert {p.version for p in certs.list_properties_of_certificate_versions(name)} == versions
 
 
-def test_recover_certificate_that_was_never_deleted_is_not_found(certs):
+def test_recover_certificate_that_was_never_deleted_is_refused(certs):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Certificate exists already: <name>".
     name = unique("cert")
     create_cert(certs, name, ec_policy())
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(HttpResponseError) as exc:
         certs.begin_recover_deleted_certificate(name)
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert f"Certificate exists already: {name}" in exc.value.message
 
 
 def test_recover_missing_certificate_is_not_found(certs):
@@ -350,10 +354,14 @@ def test_name_can_be_reused_after_purge(certs):
 
 
 def test_purge_active_certificate_does_not_delete_it(certs):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Certificate must be deleted prior to being purged."
     name = unique("cert")
     create_cert(certs, name, ec_policy())
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(HttpResponseError) as exc:
         certs.purge_deleted_certificate(name)
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert "Certificate must be deleted prior to being purged." in exc.value.message
     assert certs.get_certificate(name).name == name
 
 

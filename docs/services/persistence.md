@@ -170,7 +170,7 @@ receivers, epochs, Kafka group members and generations: after a restart a Kafka 
 old member id gets `UNKNOWN_MEMBER_ID`. A Kafka producer that reconnects keeps its producer id: a retry of its last batch is answered with the original offset
 (tested), the next batch goes on, a gap is out-of-order. `InitProducerId` never gives an id twice.
 
-**Event Grid.** Stored: topics, domains and their topics, namespaces and their topics, event sources (storage accounts and so on), subscriptions with
+**Event Grid.** Stored: topics (with their access keys, in the clear), domains and their topics, namespaces and their topics, event sources (storage accounts and so on), subscriptions with
 filters, destinations, retry policy and validation state; for pull subscriptions every event with its delivery count, **locks** (the token and the
 end of the lock stay good after a restart: a client of the HTTP API is not tied to a connection), release delays, dead letters; the delivery log and
 counters; push deliveries that were not finished, with the attempts made and when the first was made. Times are saved on the wall clock and come back as

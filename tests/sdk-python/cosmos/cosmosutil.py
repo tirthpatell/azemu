@@ -4,6 +4,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import urllib.parse
 import uuid
 from email.utils import formatdate
@@ -11,8 +12,14 @@ from email.utils import formatdate
 import requests
 from azure.cosmos import CosmosClient
 
+# With AZEMU_AZURE=1 the tests run against a real account (serverless, API for NoSQL): its address and key
+# come from AZ_COSMOS_ENDPOINT and AZ_COSMOS_KEY.
+AZURE = os.environ.get("AZEMU_AZURE") == "1"
+AZURE_ENDPOINT = os.environ.get("AZ_COSMOS_ENDPOINT", "") if AZURE else ""
+
 # The well-known Cosmos DB emulator key. The emulator accepts any key.
 KEY = (
+    os.environ["AZ_COSMOS_KEY"] if AZURE else
     "C2y6yDjf5/R+ob0N8A7Cgv30VRDJIWEHLM+4QDU5DE2nQ9nDuVTqobD4b8mGGyPMbIZnqyMsEcaGQy67XIw/Jw=="
 )
 
@@ -42,6 +49,9 @@ def client_kwargs(ca_file, **overrides):
         connection_timeout=5,
         read_timeout=30,
     )
+    if AZURE:
+        # a real service throttles now and then and is further away: wait the 429s out
+        kw.update(retry_total=9, retry_throttle_total=9, retry_backoff_max=30, connection_timeout=30, read_timeout=120)
     kw.update(overrides)
     # azure-cosmos ignores a CA path in connection_verify unless an ssl_config
     # object is passed too (cosmos_client.py: `if ssl: ssl.SSLCaCerts = verify`).

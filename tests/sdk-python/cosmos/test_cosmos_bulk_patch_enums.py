@@ -110,7 +110,9 @@ def _run(raw, db, coll, sql):
     return r.json()["Documents"]
 
 
-def test_min_max_plan_is_composite_for_a_client_that_reads_it_and_bare_for_the_others(raw, rcoll):
+def test_min_max_plan_is_composite_for_every_client_that_asks_for_a_plan(raw, rcoll):
+    # checked against a real account (November 2026): `item` is the bare value, `item2` the composite the JavaScript and Java
+    # SDKs read; the Python SDK reads `item`. A client that sends no feature list is refused.
     db, coll = rcoll
     path = f"dbs/{db}/colls/{coll}/docs"
     for i, n in enumerate([5, 3, 9]):
@@ -118,15 +120,18 @@ def test_min_max_plan_is_composite_for_a_client_that_reads_it_and_bare_for_the_o
     sql = "SELECT VALUE MIN(c.n) FROM c"
     js = _plan(raw, db, coll, sql, JS_PLAN)
     assert js["aggregates"] == ["Min"] and js["hasSelectValue"] is True
-    assert '"min": MIN(c.n)' in js["rewrittenQuery"] and '"count": COUNT(c.n)' in js["rewrittenQuery"]
-    assert _run(raw, db, coll, js["rewrittenQuery"]) == [[{"item": {"min": 3, "count": 3}}]]
+    assert '"item2": {"min": MIN(c.n), "count": COUNT(c.n)}' in js["rewrittenQuery"]
+    assert _run(raw, db, coll, js["rewrittenQuery"]) == [[{"item": 3, "item2": {"min": 3, "count": 3}}]]
     # a partition range with no matching value: count 0 and no min, which the JavaScript aggregator skips
     none = _plan(raw, db, coll, "SELECT VALUE MAX(c.n) FROM c WHERE c.n > 100", JS_PLAN)
-    assert _run(raw, db, coll, none["rewrittenQuery"]) == [[{"item": {"count": 0}}]]
-    # the Python SDK (query version 1.0) and a client that sends nothing get the bare value
+    assert _run(raw, db, coll, none["rewrittenQuery"]) == [[{"item2": {"count": 0}}]]
+    # the Python SDK's list gets the same plan
     py = _plan(raw, db, coll, sql, PY_PLAN)
-    assert _run(raw, db, coll, py["rewrittenQuery"]) == [[{"item": 3}]]
-    assert _plan(raw, db, coll, sql, {"content-type": "application/query+json", "x-ms-cosmos-is-query-plan-request": "True"})["rewrittenQuery"] == py["rewrittenQuery"]
+    assert py["rewrittenQuery"] == js["rewrittenQuery"]
+    # no feature list at all: a 400 that names the feature
+    r = raw.post(path, body={"query": sql}, headers={"content-type": "application/query+json", "x-ms-cosmos-is-query-plan-request": "True"})
+    assert r.status_code == 400
+    assert "Query contained Aggregate, which the calling client does not support." in r.json()["message"]
     # COUNT, SUM and AVG are the same for both
     for agg, want in [("COUNT(1)", [[{"item": 3}]]), ("SUM(c.n)", [[{"item": 17}]]), ("AVG(c.n)", [[{"item": {"sum": 17, "count": 3}}]])]:
         sql = f"SELECT VALUE {agg} FROM c"

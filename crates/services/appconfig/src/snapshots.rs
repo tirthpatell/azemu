@@ -180,10 +180,11 @@ fn bad(detail: &str, param: &str) -> Response {
 
 fn parse_filters(v: Option<&Value>) -> Result<Vec<SnapFilter>, Response> {
     let Some(Value::Array(list)) = v else {
-        return Err(bad("filters: At least one filter is required.", "filters"));
+        // no filters, and more than three: the service names the parameter and says nothing more (tried in November 2026)
+        return Err(errors::invalid_body("filters"));
     };
     if list.is_empty() || list.len() > 3 {
-        return Err(bad("filters: Between 1 and 3 filters are required.", "filters"));
+        return Err(errors::invalid_body("filters"));
     }
     let mut out = Vec::new();
     for f in list {
@@ -291,10 +292,10 @@ pub fn put(store: &mut Store, req: &Request) -> Response {
     };
     let body: Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
-        Err(e) => return errors::invalid_body(&format!("The body is not valid JSON: {e}")),
+        Err(_) => return errors::invalid_body("filters"),
     };
     let Value::Object(m) = body else {
-        return errors::invalid_body("The body must be a JSON object.");
+        return errors::invalid_body("filters");
     };
     let filters = match parse_filters(m.get("filters")) {
         Ok(f) => f,
@@ -319,18 +320,18 @@ pub fn put(store: &mut Store, req: &Request) -> Response {
             for (k, v) in t {
                 match v {
                     Value::String(s) => tags.push((k.clone(), s.clone())),
-                    _ => return errors::invalid_body("Tag values must be strings."),
+                    _ => return errors::invalid_body("tags"),
                 }
             }
         }
-        Some(_) => return errors::invalid_body("'tags' must be an object."),
+        Some(_) => return errors::invalid_body("tags"),
     }
     let description = match m.get("description") {
         Some(Value::String(d)) => Some(d.clone()),
         _ => None,
     };
     if store.snapshots.contains_key(&name) {
-        return errors::snapshot_exists(&name);
+        return errors::snapshot_exists();
     }
     if store.snapshots.len() >= store.limits.snapshots {
         return quota_exceeded("Snapshot Count");
@@ -383,7 +384,7 @@ pub fn patch(store: &mut Store, req: &Request) -> Response {
     };
     let body: Value = match serde_json::from_slice(&req.body) {
         Ok(v) => v,
-        Err(e) => return errors::invalid_body(&format!("The body is not valid JSON: {e}")),
+        Err(_) => return errors::invalid_body("filters"),
     };
     let archive = match body.get("status").and_then(Value::as_str) {
         Some("archived") => true,

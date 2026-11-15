@@ -1,11 +1,9 @@
 """ORDER BY and documents that lack the sort property.
 
-Azure serves ORDER BY from the index. Microsoft Learn, "Indexing policies": "If an explicitly indexed
-path doesn't exist in an item, a value is added to the index to indicate that the path is undefined"
-(the same for composite indexes). So:
-  * default policy (`/*`), one field: documents without the field are left out;
-  * the field indexed explicitly (`/n/?`), or several fields (composite index): they are returned,
-    undefined sorting before null, booleans, numbers and strings (ascending), last when descending.
+Azure serves ORDER BY from the index and returns the documents without the field whatever the indexing policy
+(checked against a real account in November 2026, the default policy, an explicit `/n/?` path and a composite
+index alike): undefined sorts before null, booleans, numbers and strings, so they come first when ascending and
+last when descending. A path that the policy leaves out of the index cannot be sorted by (400).
 """
 
 import pytest
@@ -44,15 +42,26 @@ def q(c, sql, **kw):
     return idlist(c.query_items(sql, **kw))
 
 
-def test_default_policy_leaves_out_documents_without_the_field(make_container):
+def test_default_policy_returns_documents_without_the_field_first_ascending_and_last_descending(make_container):
     c = load(make_container)
-    assert q(c, "SELECT * FROM c ORDER BY c.n") == ASC[1:]
-    assert q(c, "SELECT * FROM c ORDER BY c.n DESC") == ASC[1:][::-1]
+    assert q(c, "SELECT * FROM c ORDER BY c.n") == ASC
+    assert q(c, "SELECT * FROM c ORDER BY c.n DESC") == ASC[::-1]
 
 
 def test_default_policy_single_partition(make_container):
     c = load(make_container)
-    assert q(c, "SELECT * FROM c ORDER BY c.n", partition_key="p") == ["null", "one", "str"]
+    assert q(c, "SELECT * FROM c ORDER BY c.n", partition_key="p") == ["undef", "null", "one", "str"]
+
+
+def test_a_path_left_out_of_the_index_cannot_be_sorted_by(make_container):
+    from azure.cosmos.exceptions import CosmosHttpResponseError
+
+    c = load(make_container, EXPLICIT)
+    for sql in ("SELECT * FROM c ORDER BY c.other", "SELECT * FROM c ORDER BY c"):
+        with pytest.raises(CosmosHttpResponseError) as e:
+            q(c, sql)
+        assert e.value.status_code == 400
+        assert "The index path corresponding to the specified order-by item is excluded." in e.value.message
 
 
 def test_explicitly_indexed_path_returns_them_first_ascending(make_container):

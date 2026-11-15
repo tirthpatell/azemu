@@ -2,21 +2,26 @@
 //! SAS, service SAS and user delegation SAS. Table uses the Shared Key check
 //! ([`verify_shared_key_table`], its own string to sign); its SAS check is in the table crate.
 //!
-//! Policy (the same as the Table service has):
+//! Policy (the same for the three services):
 //!
-//! - A signature is verified only for accounts whose key a client can know:
+//! - What needs no key is checked for every account name, as Azure does (the rules are in
+//!   `credentials.rs`): a Shared Key header whose signature is not base64 is 400
+//!   `InvalidAuthenticationInfo`; a SAS `sig` that is empty, not base64 or not 32 bytes, and an `sv`
+//!   Azure would not take, are 403 `AuthenticationFailed` with Azure's detail text; the date of a
+//!   Shared Key request may not be more than 15 minutes old.
+//! - The signature itself (the MAC) is compared only for accounts whose key a client can know:
 //!   [`DEV_ACCOUNT`] (key from [`StorageAccounts`]). For any other account name the key is
-//!   invented by azemu, so any signature is accepted.
-//! - A signature that is plainly a placeholder (not base64 of 32 bytes, such as
-//!   `replay` or `Sanitized`) is not checked. Only a well-formed signature that does
-//!   not match is rejected.
+//!   invented by azemu, so a well-formed signature is accepted.
 //! - A SAS signed with a version newer than [`NEWEST_KNOWN_VERSION`] is checked with the
 //!   newest known layout and refused when that does not match (the message says the version is
 //!   newer than the layouts azemu knows, and names `AZEMU_LOOSE_AUTH`). A SAS whose layout is
 //!   not certain (user delegation SAS before 2020-02-10, signed request headers and query
 //!   parameters, `sv` that is not a date) is checked and accepted (with a debug log) when
 //!   that does not match.
-//! - `AZEMU_LOOSE_AUTH=1` (read once) turns the checks off.
+//! - `AZEMU_LOOSE_AUTH=1` (read once) turns all of this off: no signature is looked at, whatever its
+//!   form, and the date is not checked. It is for recorded traffic (placeholder signatures such as
+//!   `replay` and `Sanitized`, old dates) and for tools whose signatures azemu cannot reproduce. A
+//!   warning at start says so.
 //!
 //! Expiry, permission, resource type and stored policy checks are not here: services
 //! keep doing those for every account.
@@ -34,6 +39,7 @@ use std::sync::OnceLock;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
+use super::credentials::{date_problem, decode_header_signature, sas_signature, sas_version_ok};
 use super::{StorageAccounts, DEV_ACCOUNT};
 use crate::Request;
 
@@ -62,15 +68,13 @@ impl StorageService {
     }
 }
 
-/// Why a signature was not checked.
+/// Why a signature was not compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Skip {
     /// `AZEMU_LOOSE_AUTH=1`.
     Loose,
     /// The account's key is invented by azemu.
     UnknownAccount,
-    /// The signature is not base64 of 32 bytes.
-    Placeholder,
     /// Well formed and different, but made with a version or layout we cannot be sure of.
     Unverifiable,
 }
@@ -80,46 +84,53 @@ pub enum Skip {
 pub enum Check {
     /// The signature matches.
     Valid,
-    /// Not checked; the request goes on.
+    /// Not compared; the request goes on.
     Skipped(Skip),
-    /// Well formed and wrong. The text is the `AuthenticationErrorDetail` Azure sends.
+    /// 403 `AuthenticationFailed`. The text is the `AuthenticationErrorDetail` Azure sends.
     Invalid(String),
+    /// 400 `InvalidAuthenticationInfo`: the `Authorization` header of a Shared Key request cannot be read.
+    BadFormat,
+}
+
+/// How a failed check is answered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejection<'a> {
+    /// 403 `AuthenticationFailed` with this `AuthenticationErrorDetail`.
+    AuthenticationFailed(&'a str),
+    /// 400 `InvalidAuthenticationInfo`.
+    InvalidAuthenticationInfo,
 }
 
 impl Check {
-    /// The error detail when the request must be rejected.
-    pub fn rejection(&self) -> Option<&str> {
+    /// How to answer when the request must be rejected.
+    pub fn rejection(&self) -> Option<Rejection<'_>> {
         match self {
-            Check::Invalid(d) => Some(d),
+            Check::Invalid(d) => Some(Rejection::AuthenticationFailed(d)),
+            Check::BadFormat => Some(Rejection::InvalidAuthenticationInfo),
             _ => None,
         }
     }
 }
 
 /// True when `AZEMU_LOOSE_AUTH` is on (see `crate::settings` for the spellings). Read once, at the first call; the
-/// emulator makes that call when it starts.
+/// emulator makes that call when it starts and warns once.
 pub fn loose_auth() -> bool {
     static LOOSE: OnceLock<bool> = OnceLock::new();
-    *LOOSE.get_or_init(|| crate::settings::flag("AZEMU_LOOSE_AUTH", false))
+    *LOOSE.get_or_init(|| {
+        let on = crate::settings::flag("AZEMU_LOOSE_AUTH", false);
+        if on {
+            tracing::warn!(
+                "AZEMU_LOOSE_AUTH is on: storage signatures are not looked at (a placeholder such as `replay` or `Sanitized` passes, so does a wrong one) \
+                 and the date of a Shared Key request is not checked; Azure refuses all of these"
+            );
+        }
+        on
+    })
 }
 
-/// Whether a client can know the key of this account, so its signatures are checked.
+/// Whether a client can know the key of this account, so its signatures are compared.
 pub fn checkable_account(account: &str) -> bool {
     account.eq_ignore_ascii_case(DEV_ACCOUNT)
-}
-
-/// The bytes of a signature, or `None` for a placeholder that is not checked.
-///
-/// A placeholder is a short string such as `replay` or `Sanitized` (under 20
-/// characters): replay tools and recordings carry those. Anything longer is meant
-/// to be a real signature, so a value that is not base64 of exactly 32 bytes (one
-/// character added or cut) decodes to bytes that match nothing and is rejected,
-/// as Azure does.
-pub fn signature_bytes(sig: &str) -> Option<Vec<u8>> {
-    if sig.len() < 20 {
-        return None;
-    }
-    Some(B64.decode(sig).ok().filter(|b| b.len() == 32).unwrap_or_default())
 }
 
 fn account_keys(accounts: &StorageAccounts, account: &str) -> Vec<Vec<u8>> {
@@ -130,6 +141,24 @@ fn matches_any(keys: &[Vec<u8>], strings: &[String], sig: &[u8]) -> bool {
     keys.iter().any(|k| strings.iter().any(|s| hmac_sha256(k, s.as_bytes()).as_slice() == sig))
 }
 
+/// What a Shared Key request says about itself, before any key is looked at: the account and the signature bytes, and
+/// whether it is Shared Key Lite. `Err` is the answer when the header cannot be read or the date is refused.
+fn shared_key_claim(req: &Request) -> Result<(String, Vec<u8>, bool), Check> {
+    let Some((account, sig, lite)) = parse_authorization(req) else {
+        return Err(Check::BadFormat);
+    };
+    // Azure reads any signature that is base64, of any size (it answers a wrong size with the MAC detail), and refuses
+    // one that is not base64 or is missing, or a header with no account name.
+    let bytes = if account.is_empty() { None } else { decode_header_signature(&sig).filter(|b| !b.is_empty()) };
+    let Some(bytes) = bytes else {
+        return Err(Check::BadFormat);
+    };
+    if let Some(detail) = date_problem(req) {
+        return Err(Check::Invalid(detail));
+    }
+    Ok((account, bytes, lite))
+}
+
 /// Check the signature of a `SharedKey` / `SharedKeyLite` request. Only requests with
 /// such an `Authorization` header are looked at; anything else is `Skipped`.
 pub fn verify_shared_key(req: &Request, service: StorageService, accounts: &StorageAccounts) -> Check {
@@ -137,19 +166,22 @@ pub fn verify_shared_key(req: &Request, service: StorageService, accounts: &Stor
     if loose_auth() {
         return Check::Skipped(Skip::Loose);
     }
+    let (hdr_account, sig_bytes, lite) = match shared_key_claim(req) {
+        Ok(c) => c,
+        Err(refused) => return refused,
+    };
     if !checkable_account(&req.account) {
         return Check::Skipped(Skip::UnknownAccount);
     }
-    let Some((hdr_account, sig, lite)) = parse_authorization(req) else {
-        return Check::Skipped(Skip::Placeholder);
-    };
-    let Some(sig_bytes) = signature_bytes(&sig) else {
-        return Check::Skipped(Skip::Placeholder);
-    };
+    // A request with no `x-ms-version` is signed the way requests were before 2009-09-19 (what Shared Key Lite still
+    // is: the resource carries `?comp=` and the string has no headers of the request but `x-ms-*`). Tried: Azure
+    // refuses a signature made the SDK way for such a request.
+    let lite = lite || req.header("x-ms-version").is_none();
     let strings = shared_key_strings_to_sign(req, &hdr_account, lite);
     if matches_any(&account_keys(accounts, &req.account), &strings, &sig_bytes) {
         return Check::Valid;
     }
+    let sig = parse_authorization(req).map(|(_, s, _)| s).unwrap_or_default();
     let shown = strings.first().cloned().unwrap_or_default();
     Check::Invalid(format!(
         "The MAC signature found in the HTTP request '{sig}' is not the same as any computed signature. Server used following string to sign: '{shown}'."
@@ -158,24 +190,23 @@ pub fn verify_shared_key(req: &Request, service: StorageService, accounts: &Stor
 
 /// Check the signature of a `SharedKey` / `SharedKeyLite` request to the Table service, whose string
 /// to sign differs from Blob's and Queue's (see [`table_shared_key_strings_to_sign`]). Same policy as
-/// [`verify_shared_key`]: only `devstoreaccount1`, placeholders and `AZEMU_LOOSE_AUTH=1` are not checked.
+/// [`verify_shared_key`]: the MAC is compared only for `devstoreaccount1`; `AZEMU_LOOSE_AUTH=1` checks nothing.
 pub fn verify_shared_key_table(req: &Request, accounts: &StorageAccounts) -> Check {
     if loose_auth() {
         return Check::Skipped(Skip::Loose);
     }
+    let (hdr_account, sig_bytes, lite) = match shared_key_claim(req) {
+        Ok(c) => c,
+        Err(refused) => return refused,
+    };
     if !checkable_account(&req.account) {
         return Check::Skipped(Skip::UnknownAccount);
     }
-    let Some((hdr_account, sig, lite)) = parse_authorization(req) else {
-        return Check::Skipped(Skip::Placeholder);
-    };
-    let Some(sig_bytes) = signature_bytes(&sig) else {
-        return Check::Skipped(Skip::Placeholder);
-    };
     let strings = table_shared_key_strings_to_sign(req, &hdr_account, lite);
     if matches_any(&account_keys(accounts, &req.account), &strings, &sig_bytes) {
         return Check::Valid;
     }
+    let sig = parse_authorization(req).map(|(_, s, _)| s).unwrap_or_default();
     Check::Invalid(format!("The MAC signature found in the HTTP request '{sig}' is not the same as any computed signature."))
 }
 
@@ -205,19 +236,34 @@ fn resource_paths(f: &SasFields, target: &SasTarget<'_>) -> Vec<String> {
     }
 }
 
+/// The detail Azure gives for an `sv` it does not take.
+fn sv_detail(service: StorageService) -> &'static str {
+    match service {
+        StorageService::Blob => "SAS field 'sv' is not well formed.",
+        StorageService::Queue => "sv is either not in the correct format or is not equal or later than version 2012-02-12",
+    }
+}
+
 /// Check the signature of a SAS request (`sig` in the query). `target` names what the
 /// request addresses (needed for a service SAS and a user delegation SAS).
 pub fn verify_sas(req: &Request, service: StorageService, accounts: &StorageAccounts, target: &SasTarget<'_>) -> Check {
     if loose_auth() {
         return Check::Skipped(Skip::Loose);
     }
+    let f = SasFields::from_query(&req.query);
+    if f.sv.is_empty() {
+        return Check::Invalid("sv is mandatory. Cannot be empty".to_string());
+    }
+    if !sas_version_ok(&f.sv) {
+        return Check::Invalid(sv_detail(service).to_string());
+    }
+    let sig_bytes = match sas_signature(&f.sig) {
+        Ok(b) => b,
+        Err(detail) => return Check::Invalid(detail.to_string()),
+    };
     if !checkable_account(&req.account) {
         return Check::Skipped(Skip::UnknownAccount);
     }
-    let f = SasFields::from_query(&req.query);
-    let Some(sig_bytes) = signature_bytes(&f.sig) else {
-        return Check::Skipped(Skip::Placeholder);
-    };
     let account = req.account.as_str();
     let ver = f.layout_version().to_string();
     let too_new = is_version(&f.sv) && f.sv.as_str() > NEWEST_KNOWN_VERSION;

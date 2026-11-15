@@ -2,7 +2,7 @@
 
 Starts the emulator in one container and a Python client in a second container on the same Docker network, and reaches Blob, Queue, Table, Key Vault, Cosmos DB, Service
 Bus and Event Hubs by the name `azemu` on the standard ports. No name under `.localhost` has to resolve and nothing is published to the host. It also checks the image
-(the health check, the user it runs as, the warning about `.localhost` names, `docker stop` ending the emulator at once) and that nothing is left behind.
+(the health check, the user it runs as, no WARN line in the start log, also with a volume on `/home/azemu/.azemu` and one on `/data`, the warning about `.localhost` names, `docker stop` ending the emulator at once) and that nothing is left behind.
 
 ## What you need
 

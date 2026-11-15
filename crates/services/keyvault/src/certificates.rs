@@ -62,19 +62,25 @@ pub struct CertExtra {
     /// A certificate whose request never produced a certificate has no version; this is the
     /// version id its bundle (in the deleted state, and in lists with `includePending`) shows.
     pub stub_version: String,
-    /// The request of such a certificate was cancelled: its bundle is disabled.
+    /// Kept for state files written before the bundle was always disabled.
     pub stub_cancelled: bool,
+    /// `nbf` and `exp` of the bundle of a certificate without a version (those of the request's own certificate).
+    #[serde(default)]
+    pub stub_nbf: i64,
+    #[serde(default)]
+    pub stub_exp: i64,
 }
 
-/// The bundle a certificate without a version shows (policy only, no `cer`).
+/// The bundle a certificate without a version shows (policy only, no `cer`). It is disabled, with the `nbf` and `exp` of
+/// the certificate that is to come, until the request is finished (tried against Azure in November 2026).
 pub(crate) fn stub_version(item: &Item<CertVersion, CertExtra>) -> CertVersion {
     let created = item.extra.policy.as_ref().and_then(|p| p.pointer("/attributes/created")).and_then(|c| c.as_i64()).unwrap_or(0);
-    let cancelled = item.extra.stub_cancelled || item.extra.operation.as_ref().map(|o| o.cancellation_requested).unwrap_or(false);
+    let dated = |t: i64| (t != 0).then_some(t);
     CertVersion {
         version: if item.extra.stub_version.is_empty() { "0".repeat(32) } else { item.extra.stub_version.clone() },
         der: vec![],
         x5t: String::new(),
-        attrs: Attrs { enabled: !cancelled, nbf: None, exp: None, created, updated: created },
+        attrs: Attrs { enabled: false, nbf: dated(item.extra.stub_nbf), exp: dated(item.extra.stub_exp), created, updated: created },
         tags: Tags::new(),
         preserve_order: item.extra.operation.as_ref().and_then(|o| o.preserve_order),
     }
@@ -431,6 +437,12 @@ impl KeyVaultService {
         }
         let display = vault.certs.active(name).map(|i| i.name.clone()).unwrap_or_else(|| name.to_string());
         if pending {
+            if vault.certs.active(name).and_then(|i| i.extra.operation.as_ref()).map(|o| o.status == "inProgress").unwrap_or(false) {
+                return conflict(
+                    "A new key vault certificate can not be created or imported while a pending key vault certificate's status is inProgress.",
+                );
+            }
+            let (stub_nbf, stub_exp) = x509::parse_cert(&built.cert_der).map(|p| (p.not_before, p.not_after)).unwrap_or((0, 0));
             let stub = version.clone();
             let op = Operation {
                 issuer: issuer.clone(),
@@ -448,6 +460,8 @@ impl KeyVaultService {
                     i.extra.policy = Some(policy);
                     i.extra.stub_version = stub;
                     i.extra.stub_cancelled = false;
+                    i.extra.stub_nbf = stub_nbf;
+                    i.extra.stub_exp = stub_exp;
                 }
                 None => {
                     vault.certs.items.insert(
@@ -456,7 +470,14 @@ impl KeyVaultService {
                             name: display.clone(),
                             versions: vec![],
                             deleted: None,
-                            extra: CertExtra { policy: Some(policy), operation: Some(op), stub_version: stub, stub_cancelled: false },
+                            extra: CertExtra {
+                                policy: Some(policy),
+                                operation: Some(op),
+                                stub_version: stub,
+                                stub_cancelled: false,
+                                stub_nbf,
+                                stub_exp,
+                            },
                         },
                     );
                 }
@@ -696,7 +717,7 @@ impl KeyVaultService {
         let stub;
         let v = match item.pick(version) {
             Some(v) => v,
-            None if item.latest().is_none() && item.extra.operation.is_some() => {
+            None if item.latest().is_none() => {
                 stub = stub_version(item);
                 if latest || version == Some(stub.version.as_str()) {
                     &stub
@@ -858,7 +879,11 @@ impl KeyVaultService {
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now_secs(req));
         if !vault.certs.is_deleted(name) {
-            return deleted_not_found(Kind::Certificate, name);
+            return if vault.certs.active(name).is_some() {
+                not_deleted_for_purge(Kind::Certificate)
+            } else {
+                deleted_not_found(Kind::Certificate, name)
+            };
         }
         vault.certs.items.remove(&norm(name));
         if vault.keys.is_deleted(name) {
@@ -875,7 +900,11 @@ impl KeyVaultService {
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now_secs(req));
         let Some(item) = vault.certs.items.get_mut(&norm(name)).filter(|i| i.deleted.is_some()) else {
-            return deleted_not_found(Kind::Certificate, name);
+            return if vault.certs.active(name).is_some() {
+                exists_already(Kind::Certificate, name)
+            } else {
+                deleted_not_found(Kind::Certificate, name)
+            };
         };
         item.deleted = None;
         let item = vault.certs.items.get(&norm(name));
@@ -947,11 +976,7 @@ impl KeyVaultService {
                 Some(item) => {
                     let mut rows: Vec<(String, Value)> =
                         item.versions.iter().map(|v| (v.version.clone(), item_json(&c, &item.name, v, true, None))).collect();
-                    if rows.is_empty() && item.extra.operation.is_some() {
-                        // a pending certificate has the one version `GET` shows
-                        let v = stub_version(item);
-                        rows.push((v.version.clone(), item_json(&c, &item.name, &v, true, None)));
-                    }
+                    // a pending certificate has no version in the list, although `GET` shows one
                     rows.sort_by(|a, b| a.0.cmp(&b.0));
                     rows
                 }

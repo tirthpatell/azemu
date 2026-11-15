@@ -1,6 +1,10 @@
 //! Identity: `ManagedIdentityCredential` (App Service style, `IDENTITY_ENDPOINT` + `IDENTITY_HEADER`),
 //! `ClientSecretCredential` against the emulator's login endpoint, and the token used for Blob and Key Vault.
 //!
+//! The two credentials that take an authority host are also tried with the authority at the root of the gateway
+//! (`https://localhost:{port}`): the Rust crate builds `<authority>/{tenant}/oauth2/v2.0/token` from the host alone, drops
+//! any path in it and refuses `http://`, so the emulator answers the Entra paths at the root of a host that names no service.
+//!
 //! The Rust `azure_identity` crate has no `DefaultAzureCredential` (it was replaced by
 //! `DeveloperToolsCredential`, which only runs the `az` / `azd` command line tools), so managed
 //! identity is the "no code change" path.
@@ -8,7 +12,10 @@
 use azemu_sdk_rust_tests::{client_secret_cred, emu, jwt_claims, uniq};
 use azure_core::credentials::{Secret, TokenCredential};
 use azure_core::http::{RequestContent, Url};
-use azure_identity::{ManagedIdentityCredential, ManagedIdentityCredentialOptions, UserAssignedId};
+use azure_identity::{
+    ClientAssertionCredentialOptions, ClientSecretCredential, ClientSecretCredentialOptions, ManagedIdentityCredential,
+    ManagedIdentityCredentialOptions, UserAssignedId, WorkloadIdentityCredential, WorkloadIdentityCredentialOptions,
+};
 use azure_security_keyvault_secrets::models::SetSecretParameters;
 use azure_security_keyvault_secrets::{SecretClient, SecretClientOptions};
 use azure_storage_blob::BlobServiceClient;
@@ -109,6 +116,95 @@ async fn managed_identity_token_authorizes_a_key_vault_call_with_resource_challe
     let client = SecretClient::new(&vault, cred, Some(opts)).unwrap();
     let e = client.get_secret("anything", None).await.unwrap_err();
     assert_eq!(e.http_status(), Some(azure_core::http::StatusCode::NotFound));
+}
+
+/// A cloud whose authority host is the gateway itself, with no path: `https://localhost:{port}`.
+fn root_authority() -> Arc<azure_core::cloud::CloudConfiguration> {
+    use azure_core::cloud::{CloudConfiguration, CustomConfiguration};
+    let mut cloud = CustomConfiguration::default();
+    cloud.authority_host = format!("https://localhost:{}", emu().port);
+    Arc::new(CloudConfiguration::Custom(cloud))
+}
+
+fn root_client_options() -> azure_core::http::ClientOptions {
+    let mut o = azure_core::http::ClientOptions::default();
+    o.cloud = Some(root_authority());
+    o
+}
+
+use std::sync::Arc;
+
+async fn one_blob_call(cred: Arc<dyn TokenCredential>) {
+    let url = Url::parse(&emu().https("blob", &uniq("rootid"))).unwrap();
+    let svc = BlobServiceClient::new(url, Some(cred), None).unwrap();
+    let c = svc.blob_container_client("idc");
+    c.create(None).await.unwrap();
+    let b = c.blob_client("hello");
+    b.upload(RequestContent::from(b"via the root authority".to_vec()), None).await.unwrap();
+    assert_eq!(b.download(None).await.unwrap().body.collect().await.unwrap().as_ref(), b"via the root authority");
+}
+
+#[tokio::test]
+async fn client_secret_credential_with_the_authority_at_the_root_of_the_gateway() {
+    emu();
+    let client = "root-secret-client";
+    let cred = ClientSecretCredential::new(
+        TENANT,
+        client.to_string(),
+        Secret::new("any-secret".to_string()),
+        Some(ClientSecretCredentialOptions { client_options: root_client_options() }),
+    )
+    .unwrap();
+    let t = cred.get_token(&["https://storage.azure.com/.default"], None).await.unwrap();
+    let claims = jwt_claims(t.token.secret());
+    assert_eq!(claims["appid"], client);
+    assert_eq!(claims["tid"], TENANT);
+    one_blob_call(cred).await;
+}
+
+#[tokio::test]
+async fn workload_identity_credential_with_the_authority_at_the_root_of_the_gateway() {
+    emu();
+    // the emulator does not read the assertion: any text in the token file will do
+    let dir = std::env::temp_dir().join(format!("azemu-rust-wi-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("token");
+    std::fs::write(&file, "not-a-real-kubernetes-token").unwrap();
+    let client = "root-workload-client";
+    let opts = WorkloadIdentityCredentialOptions {
+        credential_options: ClientAssertionCredentialOptions { client_options: root_client_options() },
+        client_id: Some(client.to_string()),
+        tenant_id: Some(TENANT.to_string()),
+        token_file_path: Some(file),
+    };
+    let cred = WorkloadIdentityCredential::new(Some(opts)).unwrap();
+    let t = cred.get_token(&["https://storage.azure.com/.default"], None).await.unwrap();
+    let claims = jwt_claims(t.token.secret());
+    assert_eq!(claims["appid"], client);
+    assert_eq!(claims["tid"], TENANT);
+    assert_eq!(claims["aud"], "https://storage.azure.com");
+    one_blob_call(cred).await;
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_http_authority_is_refused_by_the_rust_credentials() {
+    // Not the emulator's doing: the crate wants https for the authority host.
+    emu();
+    use azure_core::cloud::{CloudConfiguration, CustomConfiguration};
+    let mut cloud = CustomConfiguration::default();
+    cloud.authority_host = format!("http://localhost:{}", emu().port);
+    let mut o = azure_core::http::ClientOptions::default();
+    o.cloud = Some(Arc::new(CloudConfiguration::Custom(cloud)));
+    let e = ClientSecretCredential::new(
+        "t",
+        "c".to_string(),
+        Secret::new("s".to_string()),
+        Some(ClientSecretCredentialOptions { client_options: o }),
+    )
+    .err()
+    .expect("an http authority is refused when the credential is made");
+    assert!(e.to_string().contains("HTTPS"), "{e}");
 }
 
 #[allow(dead_code)]

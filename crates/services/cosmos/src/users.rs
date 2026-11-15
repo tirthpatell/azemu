@@ -68,6 +68,23 @@ fn perm_scope<'a>(db: &'a mut Database, user_key: &str, ubytes: &'a [u8], uname:
     }
 }
 
+/// A user has at most one permission on a resource (409 otherwise, whatever the mode; checked against Azure in November 2026).
+/// `own` is the permission being replaced, if any.
+pub fn check_one_per_resource(s: &Scope, cx: &Cx, own: Option<&str>, upsert: bool) -> R<()> {
+    let body = cx.body_object()?;
+    let Some(resource) = body.get("resource").and_then(|v| v.as_str()) else { return Ok(()) };
+    let id = body.get("id").and_then(|v| v.as_str());
+    let taken = s.map.iter().any(|(k, p)| {
+        let same = p.props.get("resource").and_then(|v| v.as_str()) == Some(resource);
+        // an upsert of the same id, or a replace of this permission, is not a second permission
+        same && Some(k.as_str()) != own && !(upsert && Some(k.as_str()) == id)
+    });
+    if taken {
+        return Err(CosmosError::resource_conflict());
+    }
+    Ok(())
+}
+
 /// Run `f` on the permission scope of `user_key`.
 pub fn with_permissions<T>(db: &mut Database, user_key: &str, f: impl FnOnce(&mut Scope) -> R<T>) -> R<T> {
     let uname = users_scope(db).name_of(user_key).ok_or_else(CosmosError::not_found_default)?;

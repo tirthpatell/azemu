@@ -7,6 +7,8 @@ with AZEMU_SERVICEBUS_AUTOCREATE=1; see ../autocreate_gate.py). State is reset b
 every test by the autouse fixture in ../conftest.py.
 """
 
+import os
+
 import pytest
 import pytest_asyncio
 
@@ -29,6 +31,36 @@ def pytest_configure(config):
 
 def pytest_collection_modifyitems(config, items):
     autocreate_gate.gate(items, "AZEMU_SERVICEBUS_AUTOCREATE")
+
+
+# -- real Azure (AZEMU_AZURE=1) -----------------------------------------------------------------------
+def sweep_namespace(emu) -> int:
+    """Delete every queue and topic (with its subscriptions and rules) of the real namespace. The namespace
+    belongs to this suite alone, so the tests leave it empty. Returns how many entities were deleted.
+    Raw requests, not the administration client: after a topic was updated with the Python SDK, Azure lists it in a
+    form the SDK can not parse."""
+    n = 0
+    for kind in ("queues", "topics"):
+        for _ in range(20):
+            names = sbutil.azure_entity_names(kind)
+            if not names:
+                break
+            for name in names:
+                status, body = sbutil.azure_http("DELETE", sbutil.quote(name, safe="/"))
+                if status not in (200, 404):
+                    raise RuntimeError(f"deleting {kind[:-1]} answered {status}: {body[:200]}")
+                n += 1
+    return n
+
+
+@pytest.fixture(autouse=True)
+def _azure_clean_namespace(request):
+    """Against Azure nothing resets between tests: every test ends by deleting what is in the namespace, so the
+    next one starts on an empty namespace, as it does on a freshly reset emulator."""
+    azure_emu = request.getfixturevalue("emu") if os.environ.get("AZEMU_AZURE") == "1" else None
+    yield
+    if azure_emu is not None:
+        sweep_namespace(azure_emu)
 
 
 # -- connection ---------------------------------------------------------------

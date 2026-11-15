@@ -8,8 +8,10 @@ The front page is [`../README.md`](../README.md): read that first. This director
 |---|---|
 | [`install.md`](install.md) | the image, the binary, building from source, supported platforms |
 | [`reaching-the-emulator.md`](reaching-the-emulator.md) | host names, standard ports, containers, CI, https and the certificate authority |
+| [`azurite.md`](azurite.md) | moving a project from Azurite: what stays the same, the option table, what differs, the Rust SDK with only token credentials, Compose and testcontainers |
 | [`rust.md`](rust.md) | for a Rust team: the binary, which crates and versions per service, a client for each, services with no crate, tests with `cargo test`, CI |
 | [`sdk-notes.md`](sdk-notes.md) | what each SDK needs set to talk to the emulator, and what the SDKs do that surprises people |
+| [`seed.md`](seed.md) | a JSON file of containers, queues, tables, Cosmos databases and containers, secrets and settings that exist from the start and after every reset (`--seed`) |
 | [`SETTINGS.md`](SETTINGS.md) | every `AZEMU_*` setting with its default (generated from the code) |
 | [`../SECURITY.md`](../SECURITY.md) | who is trusted, what it defends against, what is on disk, how to report a problem |
 | [`../examples/README.md`](../examples/README.md) | a Compose project, CI arrangements, and a small Rust project with tests |

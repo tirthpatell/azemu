@@ -2,15 +2,22 @@
 //! returns `SELECT *` records as written), and a compact writer.
 //!
 //! Error messages follow the one recorded from the service for `{name: owner}`:
-//! `Unexpected token 'n' at [byte: 1]. Expecting token '"'. ` (the byte is counted from the start of the record).
+//! `Unexpected token 'n' at [byte: 1]. Expecting token '"'. `. The byte is counted from the start of the blob (Azure answer for
+//! a bad line after a good one: `Unexpected token 'bad' at [byte: 9]`, the line starting at byte 8).
 
 use super::value::Value;
 
 /// Documents nested deeper than this are refused (the parser calls itself once per level).
 pub const MAX_DEPTH: usize = 100;
 
+#[cfg(test)]
 pub fn parse(b: &[u8]) -> Result<Value, String> {
-    let mut p = P { b, i: 0 };
+    parse_at(b, 0)
+}
+
+/// `base` is the offset of the document in the blob, added to the byte numbers of the messages.
+pub fn parse_at(b: &[u8], base: usize) -> Result<Value, String> {
+    let mut p = P { b, i: 0, base };
     p.ws();
     let v = p.value(0)?;
     p.ws();
@@ -23,6 +30,7 @@ pub fn parse(b: &[u8]) -> Result<Value, String> {
 struct P<'a> {
     b: &'a [u8],
     i: usize,
+    base: usize,
 }
 
 impl P<'_> {
@@ -34,12 +42,21 @@ impl P<'_> {
 
     fn unexpected(&self, expecting: Option<&str>) -> String {
         match self.b.get(self.i) {
-            None => format!("Unexpected end of input at [byte: {}]. ", self.i),
+            None => format!("Unexpected end of input at [byte: {}]. ", self.base + self.i),
             Some(_) => {
-                let ch = String::from_utf8_lossy(&self.b[self.i..(self.i + 4).min(self.b.len())]).chars().next().unwrap_or('?');
+                let at = self.b[self.i..].iter().take(4).copied().collect::<Vec<u8>>();
+                let first = String::from_utf8_lossy(&at).chars().next().unwrap_or('?');
+                // a bare word is one token (`bad`), except where it could be the start of `null`, `true` or `false`,
+                // which the real service reports as the one character (recorded for `{name: owner}`)
+                let word: String = if first.is_ascii_alphabetic() && !matches!(first, 'n' | 't' | 'f') {
+                    self.b[self.i..].iter().take_while(|c| c.is_ascii_alphanumeric() || **c == b'_').map(|c| *c as char).collect()
+                } else {
+                    first.to_string()
+                };
+                let base = self.base + self.i;
                 match expecting {
-                    Some(e) => format!("Unexpected token '{ch}' at [byte: {}]. Expecting token {e}. ", self.i),
-                    None => format!("Unexpected token '{ch}' at [byte: {}]. ", self.i),
+                    Some(e) => format!("Unexpected token '{word}' at [byte: {base}]. Expecting token {e}. "),
+                    None => format!("Unexpected token '{word}' at [byte: {base}]. "),
                 }
             }
         }
@@ -248,13 +265,13 @@ pub fn write(v: &Value, out: &mut Vec<u8>) {
         Value::Int(i) => out.extend_from_slice(i.to_string().as_bytes()),
         Value::Float(f) => {
             if f.is_finite() {
-                let s = format!("{f}");
-                out.extend_from_slice(s.as_bytes());
+                out.extend_from_slice(super::value::float_text(*f).as_bytes());
             } else {
                 out.extend_from_slice(b"null");
             }
         }
         Value::Str(s) => write_str(s, out),
+        Value::Raw(s) => out.extend_from_slice(s.as_bytes()),
         Value::Ts(t) => write_str(&super::datetime::format(t), out),
         Value::Array(a) => {
             out.push(b'[');
@@ -330,6 +347,8 @@ mod tests {
     fn the_recorded_error_message() {
         // from the recording of the Python SDK's fatal error test: `{name: owner}` is not JSON
         assert_eq!(parse(b"{name: owner}").unwrap_err(), "Unexpected token 'n' at [byte: 1]. Expecting token '\"'. ");
+        // the byte is counted from the start of the blob; a bare word is one token (Azure answer)
+        assert_eq!(parse_at(b"{bad", 8).unwrap_err(), "Unexpected token 'bad' at [byte: 9]. Expecting token '\"'. ");
         assert!(parse(b"{\"a\" 1}").unwrap_err().contains("Expecting token ':'"));
         assert!(parse(b"{\"a\":1").unwrap_err().starts_with("Unexpected end of input"));
         assert!(parse(b"[1 2]").is_err());

@@ -46,22 +46,32 @@ pub(crate) fn tokenize(src: &[char]) -> Result<Vec<Token>, SqlError> {
             i += 1;
             continue;
         }
+        // `-- text` runs to the end of the line (Azure accepts it anywhere a space is allowed)
+        if c == '-' && i + 1 < n && src[i + 1] == '-' {
+            while i < n && src[i] != '\n' && src[i] != '\r' {
+                i += 1;
+            }
+            continue;
+        }
         let start = i;
+        // a dot right after a name or a closing bracket is a member access; after a space it starts a number (`VALUE .5`)
+        let after_operand = out.last().is_some_and(|t: &Token| t.end == i && matches!(t.tok, Tok::Word(_) | Tok::Sym(")") | Tok::Sym("]")));
         if c == '\'' || c == '"' {
             let (s, next) = lex_string(src, i)?;
             out.push(Token { tok: Tok::Str(s), start, end: next });
             i = next;
-        } else if c.is_ascii_digit() {
+        } else if c.is_ascii_digit() || (c == '.' && !after_operand && i + 1 < n && src[i + 1].is_ascii_digit()) {
             let (tok, next) = lex_number(src, i)?;
             out.push(Token { tok, start, end: next });
             i = next;
         } else if c == '@' {
             let mut j = i + 1;
+            // a parameter name starts like an identifier: `@1x` and a lone `@` are invalid tokens
+            if j >= n || !is_word_start(src[j]) {
+                return Err(SqlError::at("SC1010", "Syntax error, invalid token '@'.".to_string(), i, i + 1));
+            }
             while j < n && is_word_char(src[j]) {
                 j += 1;
-            }
-            if j == i + 1 {
-                return Err(SqlError::syntax_near("@", i, i + 1));
             }
             let name: String = src[i + 1..j].iter().collect();
             out.push(Token { tok: Tok::Param(name), start, end: j });
@@ -91,7 +101,7 @@ pub(crate) fn tokenize(src: &[char]) -> Result<Vec<Token>, SqlError> {
                     out.push(Token { tok: Tok::Sym(s), start, end });
                     i = end;
                 }
-                None => return Err(SqlError::syntax_near(&c.to_string(), i, i + 1)),
+                None => return Err(SqlError::at("SC1010", format!("Syntax error, invalid token '{c}'."), i, i + 1)),
             }
         }
     }
@@ -122,7 +132,13 @@ fn lex_number(src: &[char], start: usize) -> Result<(Tok, usize), SqlError> {
         let digits: String = src[i + 2..j].iter().collect();
         let tok = match i64::from_str_radix(&digits, 16) {
             Ok(v) => Tok::Int(v),
-            Err(_) => Tok::Float(u128::from_str_radix(&digits, 16).map(|v| v as f64).unwrap_or(f64::INFINITY)),
+            Err(_) => match u128::from_str_radix(&digits, 16) {
+                Ok(v) => Tok::Float(v as f64),
+                Err(_) => {
+                    let text: String = src[start..j].iter().collect();
+                    return Err(SqlError::at("SC1011", format!("Syntax error, invalid numeric value token '{text}'."), start, j));
+                }
+            },
         };
         return Ok((tok, j));
     }
@@ -130,10 +146,20 @@ fn lex_number(src: &[char], start: usize) -> Result<(Tok, usize), SqlError> {
         i += 1;
     }
     let mut is_float = false;
-    if i + 1 < n && src[i] == '.' && src[i + 1].is_ascii_digit() {
-        is_float = true;
-        i += 1;
-        while i < n && src[i].is_ascii_digit() {
+    if i < n && src[i] == '.' {
+        if i + 1 < n && src[i + 1].is_ascii_digit() {
+            is_float = true;
+            i += 1;
+            while i < n && src[i].is_ascii_digit() {
+                i += 1;
+            }
+        } else if i > start
+            && (i + 1 >= n
+                || src[i + 1].is_whitespace()
+                || matches!(src[i + 1], ')' | ',' | ']' | '}')
+                || (matches!(src[i + 1], 'e' | 'E') && src.get(i + 2).is_some_and(|c| c.is_ascii_digit() || matches!(c, '+' | '-'))))
+        {
+            // `5.` is the number 5
             i += 1;
         }
     }
@@ -148,17 +174,22 @@ fn lex_number(src: &[char], start: usize) -> Result<(Tok, usize), SqlError> {
             }
             is_float = true;
             i = j;
+        } else {
+            // an exponent mark without digits
+            let text: String = src[start..j].iter().collect();
+            return Err(SqlError::at("SC1011", format!("Syntax error, invalid numeric value token '{text}'."), start, j));
         }
     }
     let text: String = src[start..i].iter().collect();
+    let text = text.trim_end_matches('.');
     if !is_float {
         if let Ok(v) = text.parse::<i64>() {
             return Ok((Tok::Int(v), i));
         }
     }
     match text.parse::<f64>() {
-        Ok(v) => Ok((Tok::Float(v), i)),
-        Err(_) => Err(SqlError::syntax_near(&text, start, i)),
+        Ok(v) if v.is_finite() => Ok((Tok::Float(v), i)),
+        _ => Err(SqlError::at("SC1011", format!("Syntax error, invalid numeric value token '{text}'."), start, i)),
     }
 }
 
@@ -210,11 +241,17 @@ fn lex_string(src: &[char], start: usize) -> Result<(String, usize), SqlError> {
                     out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                 }
             }
-            _ => return Err(bad_escape(src, i - 1, i + 1)),
+            // any other escaped character stands for itself (`'a\\qb'` is `aqb`)
+            other => out.push(other),
         }
         i += 1;
     }
-    Err(SqlError::syntax_near(&src[start..n].iter().collect::<String>(), start, n))
+    Err(SqlError::at(
+        "SC1012",
+        format!("Syntax error, invalid string literal token '{}'.", src[start..n].iter().collect::<String>()),
+        start,
+        n,
+    ))
 }
 
 fn bad_escape(src: &[char], s: usize, e: usize) -> SqlError {

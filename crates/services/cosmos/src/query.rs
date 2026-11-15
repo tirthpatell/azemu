@@ -58,9 +58,32 @@ pub struct Prepared {
     pub params: Params,
 }
 
+/// The names of the parameters of a request: each starts with `@` and a letter or underscore, and none repeats.
+fn check_parameter_names(params: &Value) -> R<()> {
+    let Some(list) = params.as_array() else { return Ok(()) };
+    let mut seen: Vec<&str> = Vec::new();
+    for p in list {
+        let Some(name) = p.get("name").and_then(Value::as_str) else { continue };
+        let valid = name.strip_prefix('@').and_then(|rest| rest.chars().next()).is_some_and(|c| c.is_alphabetic() || c == '_');
+        if !valid {
+            return Err(CosmosError::bad_request(format!(
+                "Invalid query. Specified parameter name '{name}' is invalid. Parameter names should be in the format of symbol '@' followed by a valid identifier. E.g. @param1"
+            )));
+        }
+        if seen.contains(&name) {
+            return Err(CosmosError::bad_request(format!("Invalid query. Specified duplicate parameter name '{name}'.")));
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
 pub fn prepare(body: &QueryBody) -> R<Prepared> {
+    check_parameter_names(&body.params_json)?;
     let query = parse(&body.text).map_err(|e| CosmosError::from_sql(&e))?;
     let params = Params::from_cosmos(&body.params_json);
+    // Azure checks TOP, OFFSET and LIMIT when it compiles the query
+    query.check_counts(&params).map_err(|e| CosmosError::from_sql(&e))?;
     Ok(Prepared { query, params })
 }
 
@@ -100,7 +123,7 @@ pub fn feed(cx: &Cx, rid: &str, key: &str, items: Vec<Value>) -> R<Out> {
     } else {
         items
     };
-    let (page, next) = paging::page(items, cx.header("x-ms-continuation"), cx.max_item_count());
+    let (page, next) = paging::page(items, cx.header("x-ms-continuation"), cx.max_item_count(), rid)?;
     let n = page.len();
     let mut out = Out::json(200, feed_body(rid, key, page)).header("x-ms-item-count", n);
     if let Some(t) = next {

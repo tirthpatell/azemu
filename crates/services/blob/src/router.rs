@@ -1,7 +1,7 @@
 //! Request routing: split the path, identify the operation, authorize, dispatch.
 
 use azemu_core::http::Method;
-use azemu_core::storage::{self, StorageAccounts};
+use azemu_core::storage::{self, credentials, StorageAccounts};
 use azemu_core::{Request, Response};
 use percent_encoding::percent_decode_str;
 
@@ -21,15 +21,18 @@ pub const SERVER: &str = "Windows-Azure-Blob/1.0 Microsoft-HTTPAPI/2.0";
 /// and `None` for a sub-request of a batch (the outer request carried the signature).
 pub fn run(st: &mut State, req: &Request, accounts: Option<&StorageAccounts>, prep: &Pre) -> Response {
     let result = run_inner(st, req, accounts, prep);
-    let mut resp = match result {
+    let resp = match result {
         Ok(r) => r,
         Err(e) => e.into_response(&req.ctx),
     };
-    if req.header("origin").is_some() && req.method != Method::OPTIONS {
+    // the common headers first: `Access-Control-Expose-Headers` names the ones the answer has
+    let mut resp = storage::finish(resp, req, SERVER);
+    // (a part of a batch is not a request of its own: the outer request gets the CORS headers)
+    if req.method != Method::OPTIONS && accounts.is_some() {
         let rules = service_props::cors_rules(&st.account(&req.account.to_ascii_lowercase()).props);
         storage::cors::apply(&mut resp, req, &rules);
     }
-    storage::finish(resp, req, SERVER)
+    resp
 }
 
 /// The operation a request asks for (before any authorization).
@@ -65,22 +68,44 @@ fn parse_target(req: &Request) -> (Option<String>, Option<String>, u8) {
     (Some(decode(c)), None, 1)
 }
 
+/// The operations a client may not do in `$logs`.
+fn changes_logs(op: Op) -> bool {
+    matches!(
+        op,
+        Op::DeleteContainer
+            | Op::SetContainerMetadata
+            | Op::SetContainerAcl
+            | Op::LeaseContainer
+            | Op::PutBlob
+            | Op::PutBlobFromUrl
+            | Op::CopyBlob
+            | Op::PutBlock
+            | Op::PutBlockFromUrl
+            | Op::PutBlockList
+            | Op::AppendBlock
+            | Op::AppendBlockFromUrl
+            | Op::PutPage
+            | Op::PutPageFromUrl
+            | Op::SnapshotBlob
+    )
+}
+
+/// 400 `InvalidHeaderValue` for an `x-ms-version` Azure refuses (see `azemu_core::storage::credentials`).
 pub(crate) fn check_version(req: &Request) -> Result<(), ApiError> {
-    if let Some(v) = req.header("x-ms-version") {
-        let ok = v.len() == 10
-            && v.chars().enumerate().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() })
-            && v[..4].parse::<u32>().map(|y| (2008..2030).contains(&y)).unwrap_or(false);
-        if !ok {
-            return Err(ApiError::invalid_header("x-ms-version", v));
-        }
+    match credentials::refused_version(req) {
+        Some(v) => Err(ApiError::invalid_header("x-ms-version", v)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn run_inner(st: &mut State, req: &Request, accounts: Option<&StorageAccounts>, prep: &Pre) -> ApiResult {
     let (container, blob, depth) = parse_target(req);
     let op = identify(req, depth);
     check_version(req)?;
+    // Azure looks at this header before it looks at the credential (an anonymous Put Blob without it is 400, not 401)
+    if op == Op::PutBlob {
+        blob::parse_kind(req)?;
+    }
     let acct_name = req.account.to_ascii_lowercase();
 
     let authz = {
@@ -101,6 +126,17 @@ fn run_inner(st: &mut State, req: &Request, accounts: Option<&StorageAccounts>, 
         };
         auth::authorize(req, op, &t)?
     };
+    if let Some(e) = &prep.deferred {
+        return Err(e.clone());
+    }
+    // Azure (checked in November 2026): once Storage Analytics logging has been switched on, a client cannot change the `$logs`
+    // container (delete it, set its metadata or ACL, lease it) or write a blob into it; reading it and deleting a log blob work
+    if let (Some(cn), true) = (container.as_deref(), accounts.is_some()) {
+        let a = st.account(&acct_name);
+        if cn == crate::analytics::LOGS && a.logs_pinned && a.containers.contains_key(cn) && changes_logs(op) {
+            return Err(err("InsufficientAccountPermissions"));
+        }
+    }
 
     // A hierarchical container (Data Lake) first takes in what earlier blob-endpoint writes
     // left without attributes or parent directories.
@@ -116,11 +152,10 @@ fn run_inner(st: &mut State, req: &Request, accounts: Option<&StorageAccounts>, 
     // In a hierarchical container a blob name follows the Data Lake rules (`names.rs`): no `.` or `..` segments, at most 61
     // segments, and no blob below a file or in place of a directory.
     if let (Some(cn), Some(bn)) = (container.as_deref(), blob.as_deref()) {
-        let writes = matches!(op, Op::PutBlob | Op::PutBlockList | Op::CopyBlob | Op::PutBlobFromUrl);
-        if writes || matches!(op, Op::PutBlock | Op::PutBlockFromUrl) {
+        if matches!(op, Op::PutBlob | Op::PutBlockList | Op::CopyBlob | Op::PutBlobFromUrl | Op::PutBlock | Op::PutBlockFromUrl) {
             if let Some(c) = st.account(&acct_name).containers.get(cn).filter(|c| c.hns) {
                 crate::names::check(bn, true)?;
-                crate::names::check_parents(c, bn, writes)?;
+                crate::names::check_parents(c, bn, op)?;
             }
         }
     }
@@ -212,7 +247,7 @@ fn dispatch(cx: &mut Cx, op: Op, container: Option<&str>, blob: Option<&str>) ->
         Op::SetImmutabilityPolicy => props::set_immutability(cx, c, b),
         Op::DeleteImmutabilityPolicy => props::delete_immutability(cx, c, b),
         Op::SetLegalHold => props::set_legal_hold(cx, c, b),
-        Op::QueryBlob => crate::query::query_blob(cx, c, b, false),
+        Op::QueryBlob => crate::query::query_blob(cx, c, b),
         // not built
         Op::RenameContainer | Op::CreateSession | Op::IncrementalCopy | Op::SetExpiry => Err(ApiError::not_implemented(op.name())),
         Op::Unknown => Err(unknown(cx)),

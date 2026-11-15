@@ -1,0 +1,7560 @@
+{
+ "cases": [
+  {
+   "container": "c",
+   "name": "ob_default_n",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "ob_default_n_desc",
+   "rows": [
+    {
+     "id": "4"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n DESC"
+  },
+  {
+   "container": "c",
+   "name": "ob_default_s",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.s"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The order by query does not have a corresponding composite index that it can be served from."
+   },
+   "name": "ob_two_fields_no_composite",
+   "sql": "SELECT c.id FROM c ORDER BY c.n, c.t"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "ob_expression",
+   "sql": "SELECT c.id FROM c ORDER BY c.n + 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "ob_function",
+   "sql": "SELECT c.id FROM c ORDER BY LOWER(c.t)"
+  },
+  {
+   "container": "c",
+   "name": "ob_top",
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT TOP 3 c.id FROM c ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "name": "ob_offset",
+   "rows": [
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 2 LIMIT 3"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Order-by over correlated collections is not supported."
+   },
+   "name": "ob_join_alias",
+   "sql": "SELECT c.id, a FROM c JOIN a IN c.arr ORDER BY a"
+  },
+  {
+   "container": "c",
+   "name": "ob_join_prop",
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "a": 1,
+     "id": "5"
+    },
+    {
+     "a": 3,
+     "id": "5"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT c.id, a.a FROM c JOIN a IN c.arr ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Order-by over correlated collections is not supported."
+   },
+   "name": "ob_join_by_join_prop",
+   "sql": "SELECT c.id FROM c JOIN a IN c.arr ORDER BY a.a"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2205",
+    "pos": [
+     0,
+     41
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "A TOP cannot be used in the same query or subquery as an OFFSET."
+   },
+   "name": "top_offset",
+   "sql": "SELECT TOP 2 c.id FROM c OFFSET 1 LIMIT 2"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1002",
+    "pos": [
+     40,
+     40
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, unexpected end-of-file."
+   },
+   "name": "offset_nolimit",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 1"
+  },
+  {
+   "container": "c",
+   "name": "top_param",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": 2
+    }
+   ],
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "name": "top_zero",
+   "rows": [],
+   "sql": "SELECT TOP 0 c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     11,
+     12
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '-'."
+   },
+   "name": "top_negative",
+   "sql": "SELECT TOP -1 c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     39,
+     40
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '-'."
+   },
+   "name": "offset_negative",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET -1 LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "top_float",
+   "sql": "SELECT TOP 1.5 c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     11,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near ''1''."
+   },
+   "name": "top_string",
+   "sql": "SELECT TOP '1' c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "gb_basic",
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "gb_undefined_key",
+   "sql": "SELECT c.n, COUNT(1) AS k FROM c GROUP BY c.n"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "gb_undef_key_f",
+   "sql": "SELECT c.f, COUNT(1) AS k FROM c GROUP BY c.f"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Query contains 1 or more unsupported features. Upgrade your SDK to a version that does support the requested features:"
+   },
+   "name": "gb_value",
+   "sql": "SELECT VALUE COUNT(1) FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "gb_order",
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk ORDER BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "gb_order_agg",
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk ORDER BY COUNT(1)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     54
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'HAVING'."
+   },
+   "name": "gb_having",
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk HAVING COUNT(1) > 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2102",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Property reference 'c.id' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause."
+   },
+   "name": "agg_nonagg_mix",
+   "sql": "SELECT c.id, COUNT(1) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_max_arr",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT VALUE MAX(c.arr) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_min_obj",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT VALUE MIN(c.o) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2101",
+    "pos": [
+     13,
+     28
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Cannot perform an aggregate function on an expression containing an aggregate or a subquery."
+   },
+   "name": "agg_count_nested",
+   "sql": "SELECT VALUE COUNT(COUNT(1)) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_empty_sum",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE SUM(c.n) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "agg_empty_count",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "agg_empty_avg",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT VALUE AVG(c.n) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2104",
+    "pos": [
+     25,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Aggregates are not allowed in the WHERE clause."
+   },
+   "name": "agg_in_where",
+   "sql": "SELECT c.id FROM c WHERE COUNT(1) > 1"
+  },
+  {
+   "container": "c",
+   "name": "agg_subq",
+   "rows": [
+    {
+     "id": "1",
+     "k": 3
+    },
+    {
+     "id": "2",
+     "k": 2
+    },
+    {
+     "id": "3",
+     "k": 0
+    },
+    {
+     "id": "4",
+     "k": 2
+    },
+    {
+     "id": "5",
+     "k": 2
+    },
+    {
+     "id": "6",
+     "k": 3
+    },
+    {
+     "id": "7",
+     "k": 3
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE COUNT(1) FROM a IN c.arr) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_subq_sum",
+   "rows": [
+    {
+     "id": "1",
+     "k": 6
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3",
+     "k": 0
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7",
+     "k": 6
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE SUM(a) FROM a IN c.arr) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_subq_sum_mixed",
+   "rows": [
+    {
+     "id": "1",
+     "k": 6
+    },
+    {
+     "id": "2",
+     "k": 0
+    },
+    {
+     "id": "3",
+     "k": 0
+    },
+    {
+     "id": "4",
+     "k": 0
+    },
+    {
+     "id": "5",
+     "k": 0
+    },
+    {
+     "id": "6",
+     "k": 1
+    },
+    {
+     "id": "7",
+     "k": 6
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE SUM(a) FROM a IN c.arr WHERE IS_NUMBER(a)) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_value",
+   "rows": [
+    "a",
+    "b",
+    "c"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.pk FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_obj",
+   "rows": [
+    {
+     "pk": "a",
+     "s": "Hello World"
+    },
+    {
+     "pk": "a",
+     "s": "hello"
+    },
+    {
+     "pk": "b",
+     "s": ""
+    },
+    {
+     "pk": "b",
+     "s": "ab,cd,ef"
+    },
+    {
+     "pk": "c",
+     "s": "a b c"
+    },
+    {
+     "pk": "c",
+     "s": "naïve ☃"
+    },
+    {
+     "pk": "c",
+     "s": "x%y_z"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.pk, c.s FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_top",
+   "rows": [
+    "a",
+    "b"
+   ],
+   "sql": "SELECT DISTINCT TOP 2 VALUE c.pk FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_undef",
+   "rows": [
+    0.1,
+    1.5,
+    2.5
+   ],
+   "sql": "SELECT DISTINCT VALUE c.f FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_arr",
+   "rows": [
+    [
+     "a",
+     "b"
+    ],
+    [
+     1,
+     2,
+     3
+    ],
+    [
+     3,
+     1,
+     2
+    ],
+    [
+     [
+      1,
+      2
+     ],
+     [
+      3
+     ]
+    ],
+    [],
+    [
+     null,
+     true,
+     1
+    ],
+    [
+     {
+      "a": 1,
+      "b": 2
+     },
+     {
+      "a": 3
+     }
+    ]
+   ],
+   "sql": "SELECT DISTINCT VALUE c.arr FROM c"
+  },
+  {
+   "container": "c",
+   "name": "distinct_ordered",
+   "rows": [
+    "a",
+    "b",
+    "c"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.pk FROM c ORDER BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "distinct_num_str",
+   "rows": [
+    "5",
+    -3,
+    1,
+    2,
+    5,
+    9007199254740993
+   ],
+   "sql": "SELECT DISTINCT VALUE c.n FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     38
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "subq_multi_row",
+   "sql": "SELECT c.id, (SELECT a FROM a IN c.arr) AS s FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     44
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "subq_multi_row_single",
+   "partition_key": "c",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr) AS s FROM c WHERE c.id = '5'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     44
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "subq_value_multi",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     58
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "subq_zero_rows",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr WHERE a > 100) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2207",
+    "pos": [
+     49,
+     53
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The invalid escape character '!!' was specified in a LIKE predicate."
+   },
+   "name": "like_escape_long",
+   "sql": "SELECT c.id FROM c WHERE c.s LIKE 'x%y_z' ESCAPE '!!'"
+  },
+  {
+   "container": "c",
+   "name": "ternary",
+   "rows": [
+    {
+     "id": "1",
+     "k": "small"
+    },
+    {
+     "id": "2",
+     "k": "big"
+    },
+    {
+     "id": "3",
+     "k": "small"
+    },
+    {
+     "id": "4",
+     "k": "small"
+    },
+    {
+     "id": "5",
+     "k": "big"
+    },
+    {
+     "id": "6",
+     "k": "big"
+    },
+    {
+     "id": "7",
+     "k": "small"
+    }
+   ],
+   "sql": "SELECT c.id, c.n > 1 ? 'big' : 'small' AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "ternary_undef",
+   "rows": [
+    {
+     "id": "1",
+     "k": "big"
+    },
+    {
+     "id": "2",
+     "k": "big"
+    },
+    {
+     "id": "3",
+     "k": "small"
+    },
+    {
+     "id": "4",
+     "k": "small"
+    },
+    {
+     "id": "5",
+     "k": "small"
+    },
+    {
+     "id": "6",
+     "k": "small"
+    },
+    {
+     "id": "7",
+     "k": "small"
+    }
+   ],
+   "sql": "SELECT c.id, c.f > 1 ? 'big' : 'small' AS k FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "div_zero",
+   "sql": "SELECT VALUE 1 / 0 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "mod_zero",
+   "sql": "SELECT VALUE 5 % 0 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "fn_SUBSTRING_3136",
+   "rows": [
+    {
+     "id": "1",
+     "v": "ell"
+    },
+    {
+     "id": "2",
+     "v": "ell"
+    },
+    {
+     "id": "3",
+     "v": ""
+    },
+    {
+     "id": "4",
+     "v": "b,c"
+    },
+    {
+     "id": "5",
+     "v": "%y_"
+    },
+    {
+     "id": "6",
+     "v": "aïv"
+    },
+    {
+     "id": "7",
+     "v": " b "
+    }
+   ],
+   "sql": "SELECT c.id, SUBSTRING(c.s, 1, 3) AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_SUBSTRING_33144",
+   "rows": [
+    {
+     "id": "1",
+     "v": ""
+    },
+    {
+     "id": "2",
+     "v": ""
+    },
+    {
+     "id": "3",
+     "v": ""
+    },
+    {
+     "id": "4",
+     "v": ""
+    },
+    {
+     "id": "5",
+     "v": ""
+    },
+    {
+     "id": "6",
+     "v": ""
+    },
+    {
+     "id": "7",
+     "v": ""
+    }
+   ],
+   "sql": "SELECT c.id, SUBSTRING(c.s, -1, 3) AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_SUBSTRING_80604",
+   "rows": [
+    {
+     "id": "1",
+     "v": ""
+    },
+    {
+     "id": "2",
+     "v": ""
+    },
+    {
+     "id": "3",
+     "v": ""
+    },
+    {
+     "id": "4",
+     "v": ""
+    },
+    {
+     "id": "5",
+     "v": ""
+    },
+    {
+     "id": "6",
+     "v": ""
+    },
+    {
+     "id": "7",
+     "v": ""
+    }
+   ],
+   "sql": "SELECT c.id, SUBSTRING(c.s, 100, 3) AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_LASTINDEXOF_58433",
+   "rows": [
+    {
+     "id": "1",
+     "v": 9
+    },
+    {
+     "id": "2",
+     "v": 3
+    },
+    {
+     "id": "3",
+     "v": -1
+    },
+    {
+     "id": "4",
+     "v": -1
+    },
+    {
+     "id": "5",
+     "v": -1
+    },
+    {
+     "id": "6",
+     "v": -1
+    },
+    {
+     "id": "7",
+     "v": -1
+    }
+   ],
+   "sql": "SELECT c.id, LASTINDEXOF(c.s, 'l') AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_LASTINDEXOF_93335",
+   "rows": [
+    {
+     "id": "1",
+     "v": 10
+    },
+    {
+     "id": "2",
+     "v": 4
+    },
+    {
+     "id": "3",
+     "v": 0
+    },
+    {
+     "id": "4",
+     "v": 7
+    },
+    {
+     "id": "5",
+     "v": 4
+    },
+    {
+     "id": "6",
+     "v": 6
+    },
+    {
+     "id": "7",
+     "v": 4
+    }
+   ],
+   "sql": "SELECT c.id, LASTINDEXOF(c.s, '') AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_REPLACE_72759",
+   "rows": [
+    {
+     "id": "1",
+     "v": "HeLLo WorLd"
+    },
+    {
+     "id": "2",
+     "v": "heLLo"
+    },
+    {
+     "id": "3",
+     "v": ""
+    },
+    {
+     "id": "4",
+     "v": "ab,cd,ef"
+    },
+    {
+     "id": "5",
+     "v": "x%y_z"
+    },
+    {
+     "id": "6",
+     "v": "naïve ☃"
+    },
+    {
+     "id": "7",
+     "v": "a b c"
+    }
+   ],
+   "sql": "SELECT c.id, REPLACE(c.s, 'l', 'L') AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "fn_REPLACE_69020",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id, REPLACE(c.s, '', 'L') AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "m_SQRT_87448",
+   "rows": [
+    {
+     "id": "1",
+     "v": 1
+    },
+    {
+     "id": "2",
+     "v": 1.4142135623730951
+    },
+    {
+     "id": "5",
+     "v": 2.23606797749979
+    }
+   ],
+   "sql": "SELECT c.id, SQRT(c.n) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "m_SQRT_73962",
+   "sql": "SELECT c.id, SQRT(-1) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "name": "m_LOG_25706",
+   "rows": [
+    {
+     "id": "1",
+     "v": 0.4054651081081644
+    },
+    {
+     "id": "2",
+     "v": 0.9162907318741551
+    },
+    {
+     "id": "5",
+     "v": -2.3025850929940455
+    }
+   ],
+   "sql": "SELECT c.id, LOG(c.f) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "m_LOG_50209",
+   "sql": "SELECT c.id, LOG(0) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "m_LOG_73962",
+   "sql": "SELECT c.id, LOG(-1) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "name": "m_LOG10_25706",
+   "rows": [
+    {
+     "id": "1",
+     "v": 0.17609125905568124
+    },
+    {
+     "id": "2",
+     "v": 0.3979400086720376
+    },
+    {
+     "id": "5",
+     "v": -1
+    }
+   ],
+   "sql": "SELECT c.id, LOG10(c.f) AS v FROM c WHERE c.id IN ('1','2','5')"
+  },
+  {
+   "container": "c",
+   "name": "ar_SETINTERSECT_9976",
+   "rows": [
+    {
+     "id": "1",
+     "v": [
+      1,
+      3
+     ]
+    },
+    {
+     "id": "2",
+     "v": []
+    },
+    {
+     "id": "3",
+     "v": []
+    },
+    {
+     "id": "4",
+     "v": []
+    },
+    {
+     "id": "5",
+     "v": []
+    },
+    {
+     "id": "6",
+     "v": [
+      1
+     ]
+    },
+    {
+     "id": "7",
+     "v": [
+      3,
+      1
+     ]
+    }
+   ],
+   "sql": "SELECT c.id, SETINTERSECT(c.arr, [3, 1, 9]) AS v FROM c"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEPART_68518",
+   "rows": [
+    {
+     "id": "1",
+     "v": 2024
+    },
+    {
+     "id": "3",
+     "v": 2024
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEPART('yyyy', c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEPART_14745",
+   "rows": [
+    {
+     "id": "1",
+     "v": 123
+    },
+    {
+     "id": "3",
+     "v": 0
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEPART('ms', c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEPART_17050",
+   "rows": [
+    {
+     "id": "1",
+     "v": 123456700
+    },
+    {
+     "id": "3",
+     "v": 0
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEPART('ns', c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEADD_80736",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2024-03-16T10:20:30.1234567Z"
+    },
+    {
+     "id": "3",
+     "v": "2024-03-16T00:00:00.0000000Z"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEADD('dd', 1, c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEADD_91914",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2024-02-29T00:00:00.0000000Z"
+    },
+    {
+     "id": "3",
+     "v": "2024-02-29T00:00:00.0000000Z"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEADD('mm', 1, '2024-01-31T00:00:00Z') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEADD_6626",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2025-02-28T00:00:00.0000000Z"
+    },
+    {
+     "id": "3",
+     "v": "2025-02-28T00:00:00.0000000Z"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEADD('yyyy', 1, '2024-02-29T00:00:00Z') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEDIFF_50835",
+   "rows": [
+    {
+     "id": "1",
+     "v": 5
+    },
+    {
+     "id": "3",
+     "v": 5
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEDIFF('dd', c.d, '2024-03-20T00:00:00Z') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEDIFF_26625",
+   "rows": [
+    {
+     "id": "1",
+     "v": 1
+    },
+    {
+     "id": "3",
+     "v": 1
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEDIFF('yyyy', '2023-12-31T23:59:59Z', '2024-01-01T00:00:00Z') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEDIFF_43658",
+   "rows": [
+    {
+     "id": "1",
+     "v": 1
+    },
+    {
+     "id": "3",
+     "v": 1
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEDIFF('mm', '2024-01-31T00:00:00Z', '2024-02-01T00:00:00Z') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEBIN_34736",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2024-03-15T08:00:00.0000000Z"
+    },
+    {
+     "id": "3",
+     "v": "2024-03-15T00:00:00.0000000Z"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEBIN(c.d, 'hh', 4) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEBIN_27740",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEBIN('2024-03-15T10:20:30Z', 'mm', 5) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEFROMPARTS_80791",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2024-03-15T01:02:03.0000004Z"
+    },
+    {
+     "id": "3",
+     "v": "2024-03-15T01:02:03.0000004Z"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEFROMPARTS(2024, 3, 15, 1, 2, 3, 4) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMETOTICKS_64998",
+   "rows": [
+    {
+     "id": "1",
+     "v": 17104980301234567
+    },
+    {
+     "id": "3",
+     "v": 17104608000000000
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMETOTICKS(c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMETOTIMESTAMP_64998",
+   "rows": [
+    {
+     "id": "1",
+     "v": 1710498030123
+    },
+    {
+     "id": "3",
+     "v": 1710460800000
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMETOTIMESTAMP(c.d) AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEFORMAT_71158",
+   "rows": [
+    {
+     "id": "1",
+     "v": "2024-03-15 10:20:30.123"
+    },
+    {
+     "id": "3",
+     "v": "2024-03-15 00:00:00.000"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEFORMAT(c.d, 'yyyy-MM-dd HH:mm:ss.fff') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEFORMAT_81594",
+   "rows": [
+    {
+     "id": "1",
+     "v": "15 03 15, 2024 10:20 AM"
+    },
+    {
+     "id": "3",
+     "v": "15 03 15, 2024 12:00 AM"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEFORMAT(c.d, 'dddd MMMM d, yyyy h:mm tt') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "dt_DATETIMEFORMAT_80597",
+   "rows": [
+    {
+     "id": "1",
+     "v": "20240315T102030"
+    },
+    {
+     "id": "3",
+     "v": "20240315T000000"
+    }
+   ],
+   "sql": "SELECT c.id, DATETIMEFORMAT(c.d, 'yyyyMMddTHHmmss') AS v FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2042",
+    "pos": [
+     7,
+     8
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'SELECT *' is only valid with a single input set."
+   },
+   "name": "select_star_join",
+   "sql": "SELECT * FROM c JOIN a IN c.arr"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2022",
+    "pos": [
+     25,
+     26
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Object creation error, property name 'x' specified more than once."
+   },
+   "name": "projection_alias_dup",
+   "sql": "SELECT c.id AS x, c.n AS x FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2022",
+    "pos": [
+     15,
+     17
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Object creation error, property name 'id' specified more than once."
+   },
+   "name": "projection_key_dup",
+   "sql": "SELECT c.id, c.id FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "where_param_missing",
+   "parameters": [
+    {
+     "name": "@t",
+     "value": "abc"
+    }
+   ],
+   "rows": [],
+   "sql": "SELECT c.id FROM c WHERE c.t = @zzz"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'FROM'."
+   },
+   "name": "err_syntax",
+   "sql": "SELECT FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1002",
+    "pos": [
+     21,
+     21
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, unexpected end-of-file."
+   },
+   "name": "err_syntax_trailing",
+   "sql": "SELECT * FROM c WHERE"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     0,
+     6
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'SELEKT'."
+   },
+   "name": "err_syntax2",
+   "sql": "SELEKT * FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2050",
+    "pos": [
+     7,
+     22
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The UPPER function requires 1 argument(s)."
+   },
+   "name": "err_wrong_args",
+   "sql": "SELECT UPPER(c.t, c.t) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2050",
+    "pos": [
+     7,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The UPPER function requires 1 argument(s)."
+   },
+   "name": "err_wrong_args0",
+   "sql": "SELECT UPPER() FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2021",
+    "pos": [
+     21,
+     22
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The input set name or alias 'c' is specified more than once in the FROM clause."
+   },
+   "name": "err_dup_alias",
+   "sql": "SELECT * FROM c JOIN c IN c.arr"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1021",
+    "pos": [
+     7,
+     8
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, 'SELECT *' is not valid if FROM clause is omitted."
+   },
+   "name": "err_select_star_no_from",
+   "sql": "SELECT *"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2101",
+    "pos": [
+     7,
+     20
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Cannot perform an aggregate function on an expression containing an aggregate or a subquery."
+   },
+   "name": "err_nested_agg",
+   "sql": "SELECT SUM(COUNT(1)) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2104",
+    "pos": [
+     25,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Aggregates are not allowed in the WHERE clause."
+   },
+   "name": "err_agg_in_where",
+   "sql": "SELECT c.id FROM c WHERE SUM(c.n) > 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2102",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Property reference 'c.id' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause."
+   },
+   "name": "err_groupby_nonkey",
+   "sql": "SELECT c.id, COUNT(1) FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     33,
+     39
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'HAVING'."
+   },
+   "name": "err_having",
+   "sql": "SELECT c.pk FROM c GROUP BY c.pk HAVING COUNT(1) > 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'CASE'."
+   },
+   "name": "err_case",
+   "sql": "SELECT CASE WHEN c.n = 1 THEN 1 ELSE 0 END FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'CAST'."
+   },
+   "name": "err_cast",
+   "sql": "SELECT CAST(c.n AS string) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The input user defined function 'nope' is not present in the collection. Ensure to pass a valid function identifier."
+   },
+   "name": "err_udf_missing",
+   "sql": "SELECT udf.nope(1) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1002",
+    "pos": [
+     0,
+     0
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, unexpected end-of-file."
+   },
+   "name": "err_empty",
+   "sql": ""
+  },
+  {
+   "container": "c",
+   "name": "err_empty_array_eq",
+   "rows": [
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.arr = []"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     15,
+     16
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token ';'."
+   },
+   "name": "err_semicolon",
+   "sql": "SELECT * FROM c;"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1012",
+    "pos": [
+     28,
+     32
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid string literal token ''abc'."
+   },
+   "name": "err_unterminated_str",
+   "sql": "SELECT * FROM c WHERE c.t = 'abc"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     9,
+     15
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'select'."
+   },
+   "name": "err_reserved",
+   "sql": "SELECT c.select FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     9,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'value'."
+   },
+   "name": "err_reserved2",
+   "sql": "SELECT c.value FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     32,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '('."
+   },
+   "name": "err_from_func",
+   "sql": "SELECT * FROM GETCURRENTDATETIME()"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2205",
+    "pos": [
+     0,
+     54
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "A TOP cannot be used in the same query or subquery as an OFFSET."
+   },
+   "name": "err_top_offset_limit",
+   "sql": "SELECT TOP 1 c.id FROM c ORDER BY c.t OFFSET 0 LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     33,
+     34
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near ')'."
+   },
+   "name": "err_in_empty",
+   "sql": "SELECT c.id FROM c WHERE c.n IN ()"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "err_nan",
+   "sql": "SELECT VALUE 0.0/0.0 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "gbs_basic",
+   "partition_key": "c",
+   "rows": [
+    {
+     "k": 3,
+     "pk": "c"
+    }
+   ],
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "gbs_undef_key",
+   "partition_key": "c",
+   "rows": [
+    {
+     "k": 1,
+     "x": null
+    },
+    {
+     "k": 2
+    }
+   ],
+   "sql": "SELECT c.o.x AS x, COUNT(1) AS k FROM c GROUP BY c.o.x"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2102",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Property reference 'c.id' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause."
+   },
+   "name": "gbs_nonkey",
+   "partition_key": "c",
+   "sql": "SELECT c.id, COUNT(1) AS k FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "gbs_value",
+   "partition_key": "c",
+   "rows": [
+    3
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "gbs_order_seen",
+   "ordered": true,
+   "partition_key": "c",
+   "rows": [
+    {
+     "k": 1,
+     "n": -3
+    },
+    {
+     "k": 1,
+     "n": 5
+    },
+    {
+     "k": 1,
+     "n": 9007199254740993
+    }
+   ],
+   "sql": "SELECT c.n, COUNT(1) AS k FROM c GROUP BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "gbs_order_seen2",
+   "ordered": true,
+   "partition_key": "a",
+   "rows": [
+    {
+     "k": 1,
+     "t": "abc"
+    },
+    {
+     "k": 1,
+     "t": "abd"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "c",
+   "name": "gbs_order_seen3",
+   "ordered": true,
+   "partition_key": "b",
+   "rows": [
+    {
+     "k": 1,
+     "s": ""
+    },
+    {
+     "k": 1,
+     "s": "ab,cd,ef"
+    }
+   ],
+   "sql": "SELECT c.s, COUNT(1) AS k FROM c GROUP BY c.s"
+  },
+  {
+   "container": "c",
+   "name": "gbs_distinct_order",
+   "ordered": true,
+   "partition_key": "c",
+   "rows": [
+    -3,
+    5,
+    9007199254740993
+   ],
+   "sql": "SELECT DISTINCT VALUE c.n FROM c"
+  },
+  {
+   "container": "c",
+   "name": "gbs_distinct_order2",
+   "ordered": true,
+   "partition_key": "a",
+   "rows": [
+    "abc",
+    "abd"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2102",
+    "pos": [
+     7,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Property reference 'c.id' is invalid in the select list because it is not contained in either an aggregate function or the GROUP BY clause."
+   },
+   "name": "agg_mix_single",
+   "partition_key": "c",
+   "sql": "SELECT c.id, COUNT(1) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "agg_multi_single_empty",
+   "partition_key": "c",
+   "rows": [
+    {
+     "n": 0,
+     "s": 0
+    }
+   ],
+   "sql": "SELECT COUNT(1) AS n, SUM(c.n) AS s, MIN(c.t) AS lo FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "agg_sum_empty_single",
+   "partition_key": "c",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE SUM(c.n) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "agg_avg_single",
+   "partition_key": "c",
+   "rows": [
+    3002399751580332
+   ],
+   "sql": "SELECT VALUE AVG(c.n) FROM c WHERE IS_NUMBER(c.n)"
+  },
+  {
+   "container": "c",
+   "name": "a_sum_undef",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE SUM(c.zzz) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "a_sum_undef_where",
+   "partition_key": "a",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE SUM(c.zzz) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "a_sum_undef_sel",
+   "partition_key": "a",
+   "rows": [
+    {
+     "k": 0,
+     "s": 0
+    }
+   ],
+   "sql": "SELECT SUM(c.zzz) AS s, COUNT(c.zzz) AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "a_avg_undef",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT VALUE AVG(c.zzz) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "a_avg_empty_single",
+   "partition_key": "a",
+   "rows": [],
+   "sql": "SELECT VALUE AVG(c.n) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "a_avg_int_only",
+   "partition_key": "a",
+   "rows": [
+    1.5
+   ],
+   "sql": "SELECT VALUE AVG(c.n) FROM c WHERE IS_NUMBER(c.n)"
+  },
+  {
+   "container": "c",
+   "name": "a_min_undef",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT VALUE MIN(c.zzz) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "a_min_empty_single",
+   "partition_key": "a",
+   "rows": [],
+   "sql": "SELECT VALUE MIN(c.n) FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "a_count_undef",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE COUNT(c.zzz) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "a_max_empty_sel",
+   "partition_key": "a",
+   "rows": [
+    {
+     "k": 0
+    }
+   ],
+   "sql": "SELECT MAX(c.n) AS m, MIN(c.n) AS lo, AVG(c.n) AS av, COUNT(1) AS k FROM c WHERE c.id = 'none'"
+  },
+  {
+   "container": "c",
+   "name": "a_subq_sum_zerorows",
+   "rows": [
+    {
+     "id": "1",
+     "k": 0
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE SUM(a) FROM a IN c.arr WHERE a > 100) AS k FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "a_subq_avg_empty",
+   "rows": [
+    {
+     "id": "1",
+     "k": 2
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE AVG(a) FROM a IN c.arr) AS k FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "a_subq_min_empty",
+   "rows": [
+    {
+     "id": "1",
+     "k": 1
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE MIN(a) FROM a IN c.arr) AS k FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "a_group_sum_empty",
+   "partition_key": "a",
+   "rows": [],
+   "sql": "SELECT VALUE SUM(c.n) FROM c WHERE c.id='none' GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "a_group_sum_undef",
+   "partition_key": "a",
+   "rows": [
+    {
+     "pk": "a",
+     "s": 0
+    }
+   ],
+   "sql": "SELECT c.pk, SUM(c.zzz) AS s FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "x_agg_value_one",
+   "rows": [
+    7
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "x_agg_two_sel",
+   "sql": "SELECT COUNT(1) AS a FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "x_agg_sel_noalias",
+   "sql": "SELECT COUNT(1) FROM c"
+  },
+  {
+   "container": "c",
+   "name": "x_top_order",
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT TOP 3 c.id FROM c ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     11,
+     12
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'c'."
+   },
+   "name": "x_top_no_num",
+   "sql": "SELECT TOP c.id FROM c"
+  },
+  {
+   "container": "c",
+   "name": "x_top_zero",
+   "rows": [],
+   "sql": "SELECT TOP 0 c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Compositions of aggregates and other expressions are not allowed."
+   },
+   "name": "x_value_obj_agg",
+   "sql": "SELECT VALUE {a: COUNT(1)} FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Compositions of aggregates and other expressions are not allowed."
+   },
+   "name": "x_value_obj_agg_b",
+   "sql": "SELECT VALUE {a: COUNT(1), b: 1} FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Compositions of aggregates and other expressions are not allowed."
+   },
+   "name": "x_value_arith_agg",
+   "sql": "SELECT VALUE COUNT(1) + 1 FROM c"
+  },
+  {
+   "container": "explicit",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The index path corresponding to the specified order-by item is excluded."
+   },
+   "name": "o_excl_s",
+   "sql": "SELECT c.id FROM c ORDER BY c.s"
+  },
+  {
+   "container": "explicit",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The index path corresponding to the specified order-by item is excluded."
+   },
+   "name": "o_excl_s_single",
+   "partition_key": "a",
+   "sql": "SELECT c.id FROM c ORDER BY c.s"
+  },
+  {
+   "container": "noindex",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "A query has been specified for a document collection with indexing mode 'none'. Consider adding allow scan header in the request."
+   },
+   "name": "o_none_n",
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "noindex",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "A query has been specified for a document collection with indexing mode 'none'. Consider adding allow scan header in the request."
+   },
+   "name": "o_none_n_single",
+   "partition_key": "a",
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "noindex",
+   "name": "o_none_where",
+   "rows": [
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.n = 1"
+  },
+  {
+   "container": "explicit",
+   "name": "o_explicit_where_excl",
+   "rows": [
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.s = 'hello'"
+  },
+  {
+   "container": "c",
+   "name": "o_nested_path",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.o.x"
+  },
+  {
+   "container": "explicit",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The index path corresponding to the specified order-by item is excluded."
+   },
+   "name": "o_nested_path_explicit",
+   "sql": "SELECT c.id FROM c ORDER BY c.o.x"
+  },
+  {
+   "container": "c",
+   "name": "o_nested_bracket",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c['o']['x']"
+  },
+  {
+   "container": "mixed",
+   "name": "o_mixed_asc",
+   "partition_key": "m",
+   "rows": [
+    {
+     "id": "m8"
+    },
+    {
+     "id": "m4"
+    },
+    {
+     "id": "m7"
+    },
+    {
+     "id": "m1"
+    },
+    {
+     "id": "m5"
+    },
+    {
+     "id": "m3"
+    },
+    {
+     "id": "m11"
+    },
+    {
+     "id": "m6"
+    },
+    {
+     "id": "m12"
+    },
+    {
+     "id": "m2"
+    },
+    {
+     "id": "m9"
+    },
+    {
+     "id": "m10"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "mixed",
+   "name": "o_mixed_desc",
+   "partition_key": "m",
+   "rows": [
+    {
+     "id": "m10"
+    },
+    {
+     "id": "m9"
+    },
+    {
+     "id": "m2"
+    },
+    {
+     "id": "m12"
+    },
+    {
+     "id": "m6"
+    },
+    {
+     "id": "m11"
+    },
+    {
+     "id": "m3"
+    },
+    {
+     "id": "m5"
+    },
+    {
+     "id": "m1"
+    },
+    {
+     "id": "m7"
+    },
+    {
+     "id": "m4"
+    },
+    {
+     "id": "m8"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n DESC"
+  },
+  {
+   "container": "mixed",
+   "name": "o_mixed_cross",
+   "rows": [
+    {
+     "id": "m8"
+    },
+    {
+     "id": "m4"
+    },
+    {
+     "id": "m7"
+    },
+    {
+     "id": "m1"
+    },
+    {
+     "id": "m5"
+    },
+    {
+     "id": "m3"
+    },
+    {
+     "id": "m11"
+    },
+    {
+     "id": "m6"
+    },
+    {
+     "id": "m12"
+    },
+    {
+     "id": "m2"
+    },
+    {
+     "id": "m9"
+    },
+    {
+     "id": "m10"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "mixed",
+   "name": "o_value_n",
+   "partition_key": "m",
+   "rows": [
+    null,
+    false,
+    true,
+    1.5,
+    3,
+    3,
+    "a",
+    "a",
+    "b",
+    [
+     1
+    ],
+    {
+     "a": 1
+    }
+   ],
+   "sql": "SELECT VALUE c.n FROM c ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o_id",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.id"
+  },
+  {
+   "container": "c",
+   "name": "o_id_desc",
+   "rows": [
+    {
+     "id": "7"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.id DESC"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The index path corresponding to the specified order-by item is excluded."
+   },
+   "name": "o_root",
+   "sql": "SELECT c.id FROM c ORDER BY c"
+  },
+  {
+   "container": "c",
+   "name": "o_ts",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c._ts"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "o_param",
+   "parameters": [
+    {
+     "name": "@p",
+     "value": 1
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY @p"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "o_literal",
+   "sql": "SELECT c.id FROM c ORDER BY 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "2206",
+    "status": 400,
+    "sub": null,
+    "text": "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path."
+   },
+   "name": "o_subq",
+   "sql": "SELECT c.id FROM c ORDER BY (SELECT VALUE 1)"
+  },
+  {
+   "container": "c",
+   "name": "o_join_other",
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT c.id FROM c JOIN a IN c.arr ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "name": "o_from_subq",
+   "rows": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7"
+   ],
+   "sql": "SELECT VALUE t.id FROM (SELECT c.id FROM c) t ORDER BY t.id"
+  },
+  {
+   "container": "c",
+   "name": "o_where_ordered",
+   "rows": [
+    {
+     "id": "2"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.n > 1 ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o_ties_asc",
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "o_ties_desc2",
+   "partition_key": "m",
+   "rows": [
+    {
+     "id": "m11",
+     "t": "e"
+    },
+    {
+     "id": "m10",
+     "t": "e"
+    },
+    {
+     "id": "m9",
+     "t": "d"
+    },
+    {
+     "id": "m8",
+     "t": "d"
+    },
+    {
+     "id": "m6",
+     "t": "c"
+    },
+    {
+     "id": "m5",
+     "t": "c"
+    },
+    {
+     "id": "m7",
+     "t": "b"
+    },
+    {
+     "id": "m1",
+     "t": "b"
+    },
+    {
+     "id": "m4",
+     "t": "a"
+    },
+    {
+     "id": "m3",
+     "t": "a"
+    },
+    {
+     "id": "m2",
+     "t": "B"
+    },
+    {
+     "id": "m12",
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT c.id, c.t FROM c ORDER BY c.t DESC"
+  },
+  {
+   "container": "c",
+   "name": "o_top_desc",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT TOP 2 c.id FROM c ORDER BY c.t DESC"
+  },
+  {
+   "container": "composite",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The order by query does not have a corresponding composite index that it can be served from."
+   },
+   "name": "o_composite_none",
+   "sql": "SELECT c.id FROM c ORDER BY c.n DESC, c.t ASC"
+  },
+  {
+   "container": "composite",
+   "name": "o_composite_ok",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n ASC, c.t ASC"
+  },
+  {
+   "container": "composite",
+   "name": "o_composite_inv",
+   "rows": [
+    {
+     "id": "4"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n DESC, c.t DESC"
+  },
+  {
+   "container": "mixed",
+   "name": "g_mixed",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1
+    },
+    {
+     "k": 1,
+     "n": null
+    },
+    {
+     "k": 1,
+     "n": false
+    },
+    {
+     "k": 1,
+     "n": true
+    },
+    {
+     "k": 1,
+     "n": 1.5
+    },
+    {
+     "k": 2,
+     "n": 3
+    },
+    {
+     "k": 2,
+     "n": "a"
+    },
+    {
+     "k": 1,
+     "n": "b"
+    },
+    {
+     "k": 1,
+     "n": [
+      1
+     ]
+    },
+    {
+     "k": 1,
+     "n": {
+      "a": 1
+     }
+    }
+   ],
+   "sql": "SELECT c.n, COUNT(1) AS k FROM c GROUP BY c.n"
+  },
+  {
+   "container": "mixed",
+   "name": "g_mixed_t",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g_expr",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 3,
+     "u": "A"
+    },
+    {
+     "k": 3,
+     "u": "B"
+    },
+    {
+     "k": 2,
+     "u": "C"
+    },
+    {
+     "k": 2,
+     "u": "D"
+    },
+    {
+     "k": 2,
+     "u": "E"
+    }
+   ],
+   "sql": "SELECT UPPER(c.t) AS u, COUNT(1) AS k FROM c GROUP BY UPPER(c.t)"
+  },
+  {
+   "container": "mixed",
+   "name": "g_two",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "n": true,
+     "t": "b"
+    },
+    {
+     "k": 1,
+     "n": "b",
+     "t": "B"
+    },
+    {
+     "k": 1,
+     "n": 3,
+     "t": "a"
+    },
+    {
+     "k": 1,
+     "n": null,
+     "t": "a"
+    },
+    {
+     "k": 1,
+     "n": 1.5,
+     "t": "c"
+    },
+    {
+     "k": 1,
+     "n": "a",
+     "t": "c"
+    },
+    {
+     "k": 1,
+     "n": false,
+     "t": "b"
+    },
+    {
+     "k": 1,
+     "t": "d"
+    },
+    {
+     "k": 1,
+     "n": [
+      1
+     ],
+     "t": "d"
+    },
+    {
+     "k": 1,
+     "n": {
+      "a": 1
+     },
+     "t": "e"
+    },
+    {
+     "k": 1,
+     "n": 3,
+     "t": "e"
+    },
+    {
+     "k": 1,
+     "n": "a",
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT c.t, c.n, COUNT(1) AS k FROM c GROUP BY c.t, c.n"
+  },
+  {
+   "container": "mixed",
+   "name": "g_value_key",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "A",
+    "B",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "sql": "SELECT VALUE c.t FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g_value_count",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    1,
+    1,
+    2,
+    2,
+    2,
+    2,
+    2
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g_having_like",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c WHERE c.t != 'x' GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g_alias_key",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "tt": "A"
+    },
+    {
+     "k": 1,
+     "tt": "B"
+    },
+    {
+     "k": 2,
+     "tt": "a"
+    },
+    {
+     "k": 2,
+     "tt": "b"
+    },
+    {
+     "k": 2,
+     "tt": "c"
+    },
+    {
+     "k": 2,
+     "tt": "d"
+    },
+    {
+     "k": 2,
+     "tt": "e"
+    }
+   ],
+   "sql": "SELECT c.t AS tt, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "d_mixed",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    null,
+    false,
+    true,
+    1.5,
+    3,
+    "a",
+    "b",
+    [
+     1
+    ],
+    {
+     "a": 1
+    }
+   ],
+   "sql": "SELECT DISTINCT VALUE c.n FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_mixed_t",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "A",
+    "B",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_expr",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "B",
+    "A",
+    "C",
+    "D",
+    "E"
+   ],
+   "sql": "SELECT DISTINCT VALUE UPPER(c.t) FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_obj",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "n": true,
+     "t": "b"
+    },
+    {
+     "n": "b",
+     "t": "B"
+    },
+    {
+     "n": 3,
+     "t": "a"
+    },
+    {
+     "n": null,
+     "t": "a"
+    },
+    {
+     "n": 1.5,
+     "t": "c"
+    },
+    {
+     "n": "a",
+     "t": "c"
+    },
+    {
+     "n": false,
+     "t": "b"
+    },
+    {
+     "t": "d"
+    },
+    {
+     "n": [
+      1
+     ],
+     "t": "d"
+    },
+    {
+     "n": {
+      "a": 1
+     },
+     "t": "e"
+    },
+    {
+     "n": 3,
+     "t": "e"
+    },
+    {
+     "n": "a",
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.t, c.n FROM c"
+  },
+  {
+   "container": "c",
+   "name": "d_obj_cross",
+   "ordered": true,
+   "rows": [
+    {
+     "pk": "a",
+     "t": "abc"
+    },
+    {
+     "pk": "a",
+     "t": "abd"
+    },
+    {
+     "pk": "b",
+     "t": "b"
+    },
+    {
+     "pk": "b",
+     "t": "Abc"
+    },
+    {
+     "pk": "c",
+     "t": "abc"
+    },
+    {
+     "pk": "c",
+     "t": "ABC"
+    },
+    {
+     "pk": "c",
+     "t": "a"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.pk, c.t FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_obj2",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "t": "A"
+    },
+    {
+     "t": "B"
+    },
+    {
+     "t": "a"
+    },
+    {
+     "t": "b"
+    },
+    {
+     "t": "c"
+    },
+    {
+     "t": "d"
+    },
+    {
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.t FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_star",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "m1",
+    "m10",
+    "m11",
+    "m12",
+    "m2",
+    "m3",
+    "m4",
+    "m5",
+    "m6",
+    "m7",
+    "m8",
+    "m9"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.id FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_where",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c WHERE c.t > 'a'"
+  },
+  {
+   "container": "c",
+   "name": "d_join",
+   "ordered": true,
+   "partition_key": "c",
+   "rows": [
+    {
+     "a": 1,
+     "b": 2
+    },
+    {
+     "a": 3
+    },
+    null,
+    true,
+    1,
+    3,
+    2
+   ],
+   "sql": "SELECT DISTINCT VALUE a FROM c JOIN a IN c.arr"
+  },
+  {
+   "container": "mixed",
+   "name": "d_top",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "A",
+    "B",
+    "a"
+   ],
+   "sql": "SELECT DISTINCT TOP 3 VALUE c.t FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d_ordered_desc",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "e",
+    "d",
+    "c",
+    "b",
+    "a",
+    "B",
+    "A"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c ORDER BY c.t DESC"
+  },
+  {
+   "container": "mixed",
+   "name": "d_num",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    1.5,
+    3
+   ],
+   "sql": "SELECT DISTINCT VALUE c.n FROM c WHERE IS_NUMBER(c.n)"
+  },
+  {
+   "container": "c",
+   "name": "d_cross",
+   "ordered": true,
+   "rows": [
+    "ABC",
+    "Abc",
+    "a",
+    "abc",
+    "abd",
+    "b"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c"
+  },
+  {
+   "container": "c",
+   "name": "d_cross_n",
+   "ordered": true,
+   "rows": [
+    -3,
+    1,
+    2,
+    5,
+    9007199254740993,
+    "5"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.n FROM c"
+  },
+  {
+   "container": "c",
+   "name": "s_const",
+   "rows": [
+    {
+     "id": "1",
+     "s": 1
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE 1) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_obj",
+   "rows": [
+    {
+     "id": "1",
+     "s": {
+      "t": "abc"
+     }
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT c.t) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2203",
+    "pos": [
+     21,
+     26
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'TOP' is not supported in subqueries."
+   },
+   "name": "s_top1",
+   "sql": "SELECT c.id, (SELECT TOP 1 VALUE a FROM a IN c.arr) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2203",
+    "pos": [
+     21,
+     26
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'TOP' is not supported in subqueries."
+   },
+   "name": "s_top2",
+   "sql": "SELECT c.id, (SELECT TOP 2 VALUE a FROM a IN c.arr) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2204",
+    "pos": [
+     45,
+     61
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'OFFSET LIMIT' clause is not supported in subqueries."
+   },
+   "name": "s_limit1",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr OFFSET 0 LIMIT 1) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2204",
+    "pos": [
+     45,
+     61
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'OFFSET LIMIT' clause is not supported in subqueries."
+   },
+   "name": "s_limit2",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr OFFSET 0 LIMIT 2) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_from_path",
+   "rows": [
+    {
+     "id": "1",
+     "s": {
+      "x": 1,
+      "y": "z"
+     }
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE x FROM c.o x) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_from_path_val",
+   "rows": [
+    {
+     "id": "1",
+     "s": 1
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE x.x FROM c.o x) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_from_arr_path",
+   "rows": [
+    {
+     "id": "1",
+     "s": [
+      1,
+      2,
+      3
+     ]
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE x FROM c.arr x) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     62
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_groupby",
+   "sql": "SELECT c.id, (SELECT VALUE COUNT(1) FROM a IN c.arr GROUP BY a) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_agg_where",
+   "rows": [
+    {
+     "id": "1",
+     "s": 3
+    }
+   ],
+   "sql": "SELECT c.id, (SELECT VALUE MAX(a) FROM a IN c.arr WHERE a > 1) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     56
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_where_only",
+   "sql": "SELECT c.id, (SELECT VALUE a FROM a IN c.arr WHERE a = 2) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     26,
+     68
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_in_where",
+   "sql": "SELECT c.id FROM c WHERE (SELECT VALUE a FROM a IN c.arr WHERE a = 2) = 2"
+  },
+  {
+   "container": "c",
+   "name": "s_in_where_cnt",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE (SELECT VALUE COUNT(1) FROM a IN c.arr) = 3"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     44
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_in_value",
+   "sql": "SELECT VALUE (SELECT VALUE a FROM a IN c.arr) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     53
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_distinct",
+   "sql": "SELECT c.id, (SELECT DISTINCT VALUE a FROM a IN c.arr) AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "s_exists_multi",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE EXISTS(SELECT VALUE a FROM a IN c.arr)"
+  },
+  {
+   "container": "c",
+   "name": "s_array_in_array",
+   "rows": [
+    {
+     "id": "1",
+     "s": [
+      3
+     ]
+    }
+   ],
+   "sql": "SELECT c.id, [(SELECT VALUE COUNT(1) FROM a IN c.arr)] AS s FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2201",
+    "pos": [
+     14,
+     96
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The cardinality of a scalar subquery result set cannot be greater than one."
+   },
+   "name": "s_nested",
+   "sql": "SELECT c.id, (SELECT VALUE (SELECT VALUE COUNT(1) FROM b IN a) FROM a IN c.arr WHERE IS_ARRAY(a)) AS s FROM c WHERE c.id = '4'"
+  },
+  {
+   "container": "c",
+   "name": "n_where_div0",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE 1 / 0 > 1"
+  },
+  {
+   "container": "c",
+   "name": "n_where_div0b",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.n / 0 > 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_div0_arr",
+   "sql": "SELECT VALUE [1/0] FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_div0_obj",
+   "sql": "SELECT VALUE {a: 1/0} FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "n_div0_cmp",
+   "rows": [
+    true
+   ],
+   "sql": "SELECT VALUE (1/0 = 1/0) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_nan_lit",
+   "sql": "SELECT VALUE NaN FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_inf_lit",
+   "sql": "SELECT VALUE Infinity FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_neg_inf",
+   "sql": "SELECT VALUE -Infinity FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_power_big",
+   "sql": "SELECT VALUE POWER(10, 400) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_exp_big",
+   "sql": "SELECT VALUE EXP(1000) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_pow_neg",
+   "sql": "SELECT VALUE POWER(0, -1) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_acos",
+   "sql": "SELECT VALUE ACOS(2) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_asin",
+   "sql": "SELECT VALUE ASIN(2) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_log10",
+   "sql": "SELECT VALUE LOG10(0) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_log10neg",
+   "sql": "SELECT VALUE LOG10(-5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "n_atn2",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE ATN2(0, 0) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_cot0",
+   "sql": "SELECT VALUE COT(0) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "n_sqrt_where",
+   "rows": [],
+   "sql": "SELECT c.id FROM c WHERE SQRT(-1) > 0"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "4001",
+    "status": 400,
+    "sub": 4001,
+    "text": "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN)."
+   },
+   "name": "n_mul_overflow",
+   "sql": "SELECT VALUE 1e308 * 10 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "n_int_overflow",
+   "rows": [
+    9.223372036854776e+18
+   ],
+   "sql": "SELECT VALUE 9223372036854775807 + 1 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1011",
+    "pos": [
+     13,
+     18
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid numeric value token '1e400'."
+   },
+   "name": "n_big_lit",
+   "sql": "SELECT VALUE 1e400 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "n_tostring_nan",
+   "rows": [
+    "NaN"
+   ],
+   "sql": "SELECT VALUE TOSTRING(NaN) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "t_str",
+   "rows": [
+    {
+     "id": "1",
+     "k": "n"
+    },
+    {
+     "id": "2",
+     "k": "n"
+    },
+    {
+     "id": "3",
+     "k": "n"
+    },
+    {
+     "id": "4",
+     "k": "n"
+    },
+    {
+     "id": "5",
+     "k": "n"
+    },
+    {
+     "id": "6",
+     "k": "n"
+    },
+    {
+     "id": "7",
+     "k": "n"
+    }
+   ],
+   "sql": "SELECT c.id, c.s ? 'y' : 'n' AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "t_num",
+   "rows": [
+    {
+     "id": "1",
+     "k": "n"
+    },
+    {
+     "id": "3",
+     "k": "n"
+    }
+   ],
+   "sql": "SELECT c.id, c.n ? 'y' : 'n' AS k FROM c WHERE c.id IN ('1', '3')"
+  },
+  {
+   "container": "c",
+   "name": "t_branch_undef",
+   "rows": [
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id, true ? c.zzz : 'n' AS k FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "t_nested",
+   "rows": [
+    {
+     "id": "1",
+     "k": "c"
+    },
+    {
+     "id": "2",
+     "k": "b"
+    },
+    {
+     "id": "3",
+     "k": "c"
+    },
+    {
+     "id": "4",
+     "k": "c"
+    },
+    {
+     "id": "5",
+     "k": "a"
+    },
+    {
+     "id": "6",
+     "k": "a"
+    },
+    {
+     "id": "7",
+     "k": "c"
+    }
+   ],
+   "sql": "SELECT c.id, (c.n > 1 ? (c.n > 3 ? 'a' : 'b') : 'c') AS k FROM c"
+  },
+  {
+   "container": "c",
+   "name": "t_not",
+   "rows": [
+    {
+     "id": "1",
+     "k": "n"
+    },
+    {
+     "id": "3",
+     "k": "n"
+    }
+   ],
+   "sql": "SELECT c.id, NOT c.n ? 'y' : 'n' AS k FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "t_in_where",
+   "rows": [
+    {
+     "id": "2"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE (c.n > 1 ? true : false)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     15
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "p_missing_top",
+   "sql": "SELECT TOP @zzz c.id FROM c"
+  },
+  {
+   "container": "c",
+   "name": "p_missing_select",
+   "rows": [
+    {}
+   ],
+   "sql": "SELECT @zzz AS v FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "p_missing_value",
+   "rows": [],
+   "sql": "SELECT VALUE @zzz FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "p_missing_arith",
+   "rows": [],
+   "sql": "SELECT VALUE @zzz + 1 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "p_top_float",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": 1.5
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "p_top_neg",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": -1
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "p_top_str",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": "1"
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "p_top_null",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": null
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2062",
+    "pos": [
+     39,
+     41
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The OFFSET count value exceeds the maximum allowed value."
+   },
+   "name": "p_offset_neg",
+   "parameters": [
+    {
+     "name": "@o",
+     "value": -1
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET @o LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2062",
+    "pos": [
+     39,
+     41
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The OFFSET count value exceeds the maximum allowed value."
+   },
+   "name": "p_offset_float",
+   "parameters": [
+    {
+     "name": "@o",
+     "value": 1.5
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET @o LIMIT 1"
+  },
+  {
+   "container": "c",
+   "name": "p_unused",
+   "parameters": [
+    {
+     "name": "@x",
+     "value": "abc"
+    }
+   ],
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.t = 'abc'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Invalid query. Specified duplicate parameter name '@x'."
+   },
+   "name": "p_dupe",
+   "parameters": [
+    {
+     "name": "@x",
+     "value": "abc"
+    },
+    {
+     "name": "@x",
+     "value": "abd"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.t = @x"
+  },
+  {
+   "container": "c",
+   "name": "p_case",
+   "parameters": [
+    {
+     "name": "@x",
+     "value": "abc"
+    }
+   ],
+   "rows": [],
+   "sql": "SELECT c.id FROM c WHERE c.t = @X"
+  },
+  {
+   "container": "c",
+   "name": "p_in_select",
+   "parameters": [
+    {
+     "name": "@x",
+     "value": {
+      "a": 1
+     }
+    }
+   ],
+   "rows": [
+    {
+     "v": {
+      "a": 1
+     }
+    }
+   ],
+   "sql": "SELECT @x AS v FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     31,
+     32
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token '@'."
+   },
+   "name": "p_param_bad",
+   "sql": "SELECT c.id FROM c WHERE c.t = @1x"
+  },
+  {
+   "container": "c",
+   "name": "p_param_underscore",
+   "parameters": [
+    {
+     "name": "@_x",
+     "value": "abc"
+    }
+   ],
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.t = @_x"
+  },
+  {
+   "container": "c",
+   "name": "p_param_unicode",
+   "parameters": [
+    {
+     "name": "@é",
+     "value": "abc"
+    }
+   ],
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.t = @é"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     31,
+     32
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token '@'."
+   },
+   "name": "p_param_at",
+   "parameters": [],
+   "sql": "SELECT c.id FROM c WHERE c.t = @"
+  },
+  {
+   "container": "c",
+   "name": "c_comment_end",
+   "rows": [
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.id = '1' -- hi"
+  },
+  {
+   "container": "c",
+   "name": "c_comment_mid",
+   "rows": [
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id -- x\nFROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     13,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '*'."
+   },
+   "name": "c_comment_block",
+   "sql": "SELECT c.id /* x */ FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "c_minus_minus",
+   "rows": [
+    5
+   ],
+   "sql": "SELECT VALUE 5--3 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "c_minus_minus_sp",
+   "rows": [
+    8
+   ],
+   "sql": "SELECT VALUE 5 - -3 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     0,
+     1
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token ';'."
+   },
+   "name": "x_semicolon_only",
+   "sql": ";"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     11,
+     12
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token ';'."
+   },
+   "name": "x_semicolon_mid",
+   "sql": "SELECT c.id; FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1010",
+    "pos": [
+     7,
+     8
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid token '`'."
+   },
+   "name": "x_backtick",
+   "sql": "SELECT `c`.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     9,
+     10
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '*'."
+   },
+   "name": "x_select_c_star",
+   "sql": "SELECT c.* FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     8,
+     9
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near ','."
+   },
+   "name": "x_select_star_star",
+   "sql": "SELECT *, c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     9,
+     11
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'AS'."
+   },
+   "name": "x_select_star_alias",
+   "sql": "SELECT * AS x FROM c"
+  },
+  {
+   "container": "c",
+   "name": "x_limit_zero",
+   "rows": [],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 0 LIMIT 0"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     47,
+     50
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '1.5'."
+   },
+   "name": "x_limit_float",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 0 LIMIT 1.5"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     39,
+     42
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near ''0''."
+   },
+   "name": "x_limit_str",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET '0' LIMIT 1"
+  },
+  {
+   "container": "c",
+   "name": "x_offset_noorder",
+   "rows": [
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id FROM c OFFSET 1 LIMIT 2"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     13,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '*'."
+   },
+   "name": "x_count_star",
+   "sql": "SELECT COUNT(*) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2050",
+    "pos": [
+     7,
+     14
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The COUNT function requires 1 argument(s)."
+   },
+   "name": "x_count_none",
+   "sql": "SELECT COUNT() FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2050",
+    "pos": [
+     7,
+     18
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The COUNT function requires 1 argument(s)."
+   },
+   "name": "x_count_two",
+   "sql": "SELECT COUNT(1, 2) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2050",
+    "pos": [
+     7,
+     18
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The SUM function requires 1 argument(s)."
+   },
+   "name": "x_sum_two",
+   "sql": "SELECT SUM(c.n, 1) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2041",
+    "pos": [
+     7,
+     8
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "'SELECT *' is not allowed with GROUP BY."
+   },
+   "name": "x_groupby_no_agg_star",
+   "sql": "SELECT * FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."
+   },
+   "name": "x_groupby_count_star_nokey",
+   "sql": "SELECT COUNT(1) AS k FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "x_groupby_value_obj",
+   "partition_key": "a",
+   "rows": [
+    {
+     "k": 2,
+     "pk": "a"
+    }
+   ],
+   "sql": "SELECT VALUE {pk: c.pk, k: COUNT(1)} FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2022",
+    "pos": [
+     20,
+     21
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Object creation error, property name 'a' specified more than once."
+   },
+   "name": "x_dup_alias_value",
+   "sql": "SELECT VALUE {a: 1, a: 2} FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_dup_alias_case",
+   "rows": [
+    {
+     "X": 1,
+     "x": "1"
+    }
+   ],
+   "sql": "SELECT c.id AS x, c.n AS X FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_dup_unnamed",
+   "rows": [
+    {
+     "$1": 2,
+     "$2": 3
+    }
+   ],
+   "sql": "SELECT c.n + 1, c.n + 2 FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_join_nonarr",
+   "rows": [],
+   "sql": "SELECT VALUE 1 FROM c JOIN x IN c.s WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_join_path_noin",
+   "rows": [
+    {
+     "x": 1,
+     "y": "z"
+    }
+   ],
+   "sql": "SELECT VALUE x FROM c JOIN c.o x WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_join_subq",
+   "rows": [
+    1,
+    2,
+    3
+   ],
+   "sql": "SELECT VALUE s FROM c JOIN (SELECT VALUE a FROM a IN c.arr) s WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_bad_escape",
+   "rows": [
+    "aqb"
+   ],
+   "sql": "SELECT VALUE 'a\\qb' FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     16,
+     18
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '.3'."
+   },
+   "name": "x_bad_num",
+   "sql": "SELECT VALUE 1.2.3 FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1011",
+    "pos": [
+     13,
+     15
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, invalid numeric value token '1e'."
+   },
+   "name": "x_bad_num2",
+   "sql": "SELECT VALUE 1e FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     33,
+     34
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near ')'."
+   },
+   "name": "x_in_empty",
+   "sql": "SELECT c.id FROM c WHERE c.n IN ()"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     32,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '1'."
+   },
+   "name": "x_in_no_paren",
+   "sql": "SELECT c.id FROM c WHERE c.n IN 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     32,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '['."
+   },
+   "name": "x_in_array_expr",
+   "sql": "SELECT c.id FROM c WHERE c.n IN [1,2]"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2207",
+    "pos": [
+     45,
+     47
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The invalid escape character '' was specified in a LIKE predicate."
+   },
+   "name": "x_escape_empty",
+   "sql": "SELECT c.id FROM c WHERE c.s LIKE 'a' ESCAPE ''"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     45,
+     47
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '@e'."
+   },
+   "name": "x_escape_param",
+   "parameters": [
+    {
+     "name": "@e",
+     "value": "!!"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.s LIKE 'a' ESCAPE @e"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     45,
+     46
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '1'."
+   },
+   "name": "x_escape_num",
+   "sql": "SELECT c.id FROM c WHERE c.s LIKE 'a' ESCAPE 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     32,
+     33
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'c'."
+   },
+   "name": "x_exists_noselect",
+   "sql": "SELECT c.id FROM c WHERE EXISTS(c.arr)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     13,
+     17
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'CASE'."
+   },
+   "name": "x_case_when",
+   "sql": "SELECT VALUE CASE WHEN true THEN 1 END FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     13,
+     17
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'CAST'."
+   },
+   "name": "x_cast",
+   "sql": "SELECT VALUE CAST(1 AS string) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     33,
+     39
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'HAVING'."
+   },
+   "name": "x_having",
+   "sql": "SELECT c.pk FROM c GROUP BY c.pk HAVING COUNT(1) > 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     15,
+     21
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'SELECT'."
+   },
+   "name": "x_union",
+   "sql": "SELECT 1 UNION SELECT 2"
+  },
+  {
+   "container": "c",
+   "name": "x_idx_neg",
+   "rows": [],
+   "sql": "SELECT VALUE c.arr[-1] FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_idx_str",
+   "rows": [],
+   "sql": "SELECT VALUE c.arr['0'] FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_idx_float",
+   "rows": [
+    2
+   ],
+   "sql": "SELECT VALUE c.arr[1.0] FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_func_case",
+   "rows": [
+    "A"
+   ],
+   "sql": "SELECT VALUE upper('a') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_func_space",
+   "rows": [
+    "A"
+   ],
+   "sql": "SELECT VALUE UPPER ('a') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "x_func_noargs_pi",
+   "rows": [
+    3.141592653589793
+   ],
+   "sql": "SELECT VALUE PI() FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_DOCUMENTID_44655",
+   "rows": [
+    1
+   ],
+   "sql": "SELECT VALUE DOCUMENTID(c) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_VECTORDISTANCE_54216",
+   "rows": [
+    0.9838699100999074
+   ],
+   "sql": "SELECT VALUE VECTORDISTANCE([1,2],[3,4]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_VECTORDISTANCE_9355",
+   "rows": [
+    2.8284271247461903
+   ],
+   "sql": "SELECT VALUE VECTORDISTANCE([1,2],[3,4],false,{'distanceFunction':'euclidean'}) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_VECTORDISTANCE_78768",
+   "rows": [
+    11
+   ],
+   "sql": "SELECT VALUE VECTORDISTANCE([1,2],[3,4],false,{'distanceFunction':'dotproduct'}) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_TOSTRING_19374",
+   "rows": [
+    "1e+20"
+   ],
+   "sql": "SELECT VALUE TOSTRING(1e20) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_TOSTRING_31798",
+   "rows": [
+    "1.5e-07"
+   ],
+   "sql": "SELECT VALUE TOSTRING(1.5e-7) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_TOSTRING_77433",
+   "rows": [
+    "1e-07"
+   ],
+   "sql": "SELECT VALUE TOSTRING(0.0000001) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_documentid_all",
+   "rows": [
+    {
+     "d": 1,
+     "id": "1"
+    },
+    {
+     "d": 2,
+     "id": "2"
+    },
+    {
+     "d": 3,
+     "id": "3"
+    },
+    {
+     "d": 4,
+     "id": "4"
+    },
+    {
+     "d": 5,
+     "id": "5"
+    },
+    {
+     "d": 6,
+     "id": "6"
+    },
+    {
+     "d": 7,
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id, DOCUMENTID(c) AS d FROM c ORDER BY c.id"
+  },
+  {
+   "container": "c",
+   "name": "f_setintersect_dups",
+   "rows": [
+    [
+     1,
+     3
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([1,1,2,3], [1,3,3]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_setintersect_order2",
+   "rows": [
+    [
+     1,
+     3
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([3,1,2], [1,3]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_setintersect_str",
+   "rows": [
+    [
+     "A",
+     1
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([1,2,'A','B'], ['A',1]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_lastindexof_empty",
+   "rows": [
+    2
+   ],
+   "sql": "SELECT VALUE LASTINDEXOF('abc', '') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_lastindexof_empty_str",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE LASTINDEXOF('', '') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_lastindexof_miss",
+   "rows": [
+    -1
+   ],
+   "sql": "SELECT VALUE LASTINDEXOF('abc', 'z') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_substring_neg0",
+   "rows": [
+    ""
+   ],
+   "sql": "SELECT VALUE SUBSTRING('Hello', -1, 3) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_substring_neg5",
+   "rows": [
+    ""
+   ],
+   "sql": "SELECT VALUE SUBSTRING('Hello', -5, 3) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_substring_neglen",
+   "rows": [
+    ""
+   ],
+   "sql": "SELECT VALUE SUBSTRING('Hello', 1, -1) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_left_neg",
+   "rows": [
+    ""
+   ],
+   "sql": "SELECT VALUE LEFT('Hello', -1) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_left_float",
+   "rows": [],
+   "sql": "SELECT VALUE LEFT('Hello', 2.5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_left_big",
+   "rows": [
+    "Hello"
+   ],
+   "sql": "SELECT VALUE LEFT('Hello', 100) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replace_empty_old",
+   "rows": [],
+   "sql": "SELECT VALUE REPLACE('abc', '', 'x') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replace_empty_new",
+   "rows": [
+    "ac"
+   ],
+   "sql": "SELECT VALUE REPLACE('abc', 'b', '') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replace_empty_src",
+   "rows": [],
+   "sql": "SELECT VALUE REPLACE('', '', 'x') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replicate_0",
+   "rows": [
+    ""
+   ],
+   "sql": "SELECT VALUE REPLICATE('ab', 0) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replicate_neg",
+   "rows": [],
+   "sql": "SELECT VALUE REPLICATE('ab', -1) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_replicate_float",
+   "rows": [],
+   "sql": "SELECT VALUE REPLICATE('ab', 1.5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2207",
+    "pos": [
+     34,
+     38
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The invalid escape character '!!' was specified in a LIKE predicate."
+   },
+   "name": "f_like_esc_2",
+   "sql": "SELECT VALUE ('a' LIKE 'a' ESCAPE '!!') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2207",
+    "pos": [
+     34,
+     36
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The invalid escape character '' was specified in a LIKE predicate."
+   },
+   "name": "f_like_esc_empty",
+   "sql": "SELECT VALUE ('a' LIKE 'a' ESCAPE '') FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     34,
+     35
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '1'."
+   },
+   "name": "f_like_esc_num",
+   "sql": "SELECT VALUE ('a' LIKE 'a' ESCAPE 1) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_dt_bin_mm",
+   "rows": [],
+   "sql": "SELECT VALUE DATETIMEBIN('2024-03-15T10:20:30Z', 'mm', 5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_dt_bin_mi",
+   "rows": [
+    "2024-03-15T10:20:00.0000000Z"
+   ],
+   "sql": "SELECT VALUE DATETIMEBIN('2024-03-15T10:20:30Z', 'mi', 5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "f_dt_bin_n",
+   "rows": [
+    "2024-03-15T10:20:00.0000000Z"
+   ],
+   "sql": "SELECT VALUE DATETIMEBIN('2024-03-15T10:20:30Z', 'n', 5) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "o2_nested_prop_def",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.o.x"
+  },
+  {
+   "container": "composite",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The order by query does not have a corresponding composite index that it can be served from."
+   },
+   "name": "o2_two_same",
+   "sql": "SELECT c.id FROM c ORDER BY c.t, c.t"
+  },
+  {
+   "container": "c",
+   "name": "o2_bool_key",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.b"
+  },
+  {
+   "container": "c",
+   "name": "o2_null_key",
+   "rows": [
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.nl"
+  },
+  {
+   "container": "c",
+   "name": "o2_system_ts",
+   "rows": [
+    {
+     "id": "7"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c._ts DESC"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Primary key order-by is not supported."
+   },
+   "name": "o2_system_rid",
+   "sql": "SELECT c.id FROM c ORDER BY c._rid"
+  },
+  {
+   "container": "composite",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "The order by query does not have a corresponding composite index that it can be served from."
+   },
+   "name": "o2_id_pk",
+   "sql": "SELECT c.id FROM c ORDER BY c.pk, c.id"
+  },
+  {
+   "container": "explicit",
+   "name": "o2_excl_id",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.id"
+  },
+  {
+   "container": "explicit",
+   "name": "o2_expl_n_where_t",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "5"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.t = 'abc' ORDER BY c.n"
+  },
+  {
+   "container": "explicit",
+   "name": "o2_expl_pk",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.pk"
+  },
+  {
+   "container": "explicit",
+   "name": "o2_expl_n_single_a",
+   "partition_key": "a",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o2_top_undef",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT TOP 2 c.id FROM c ORDER BY c.zzz"
+  },
+  {
+   "container": "c",
+   "name": "o2_top_desc_undef",
+   "rows": [
+    {
+     "id": "2"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT TOP 2 c.id FROM c ORDER BY c.f DESC"
+  },
+  {
+   "container": "c",
+   "name": "o2_top_asc_undef",
+   "rows": [
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT TOP 2 c.id FROM c ORDER BY c.f"
+  },
+  {
+   "container": "c",
+   "name": "o2_offset_undef",
+   "rows": [
+    {
+     "id": "4"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.f OFFSET 1 LIMIT 3"
+  },
+  {
+   "container": "c",
+   "name": "o2_where_undef",
+   "rows": [
+    {
+     "id": "5"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.f > 0 ORDER BY c.f"
+  },
+  {
+   "container": "c",
+   "name": "o2_distinct_undef",
+   "rows": [
+    0.1,
+    1.5,
+    2.5
+   ],
+   "sql": "SELECT DISTINCT VALUE c.f FROM c ORDER BY c.f"
+  },
+  {
+   "container": "c",
+   "name": "o2_distinct_undef_n",
+   "rows": [
+    {},
+    {
+     "f": 0.1
+    },
+    {
+     "f": 1.5
+    },
+    {
+     "f": 2.5
+    }
+   ],
+   "sql": "SELECT DISTINCT c.f FROM c ORDER BY c.f"
+  },
+  {
+   "container": "c",
+   "name": "o2_join_c_prop",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    },
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c JOIN a IN c.arr WHERE c.id = '1' ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o2_join_count",
+   "rows": [
+    15
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c JOIN a IN c.arr ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o2_select_alias_order",
+   "rows": [
+    {
+     "num": null
+    },
+    {
+     "num": -3
+    },
+    {
+     "num": 1
+    },
+    {
+     "num": 2
+    },
+    {
+     "num": 5
+    },
+    {
+     "num": 9007199254740993
+    },
+    {
+     "num": "5"
+    }
+   ],
+   "sql": "SELECT c.n AS num FROM c ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "o2_value_order_path",
+   "rows": [
+    "5",
+    9007199254740993,
+    5,
+    2,
+    1,
+    -3,
+    null
+   ],
+   "sql": "SELECT VALUE c.n FROM c ORDER BY c.n DESC"
+  },
+  {
+   "container": "c",
+   "name": "o2_sub_alias",
+   "rows": [
+    null,
+    -3,
+    1,
+    2,
+    5,
+    9007199254740993,
+    "5"
+   ],
+   "sql": "SELECT VALUE t.n FROM (SELECT c.n FROM c) t ORDER BY t.n"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_expr_two",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 3,
+     "u": "B"
+    },
+    {
+     "k": 3,
+     "u": "A"
+    },
+    {
+     "k": 2,
+     "u": "C"
+    },
+    {
+     "k": 2,
+     "u": "D"
+    },
+    {
+     "k": 2,
+     "u": "E"
+    }
+   ],
+   "sql": "SELECT UPPER(c.t) AS u, COUNT(1) AS k FROM c GROUP BY UPPER(c.t), c.pk"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_where",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 1,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c WHERE c.n != 'zz' GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_orderby",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 2,
+     "t": "e"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 1,
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t ORDER BY c.t DESC"
+  },
+  {
+   "container": "mixed",
+   "error": {
+    "code": "SC2103",
+    "pos": [
+     55,
+     58
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Property reference 'c.k' is invalid in the ORDER BY clause because it is not contained in either an aggregate function or the GROUP BY clause."
+   },
+   "name": "g2_orderby_alias",
+   "ordered": true,
+   "partition_key": "m",
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t ORDER BY c.k"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_sum_key",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "hi": true,
+     "lo": false,
+     "t": "b"
+    },
+    {
+     "hi": "b",
+     "lo": "b",
+     "t": "B"
+    },
+    {
+     "hi": 3,
+     "lo": null,
+     "t": "a"
+    },
+    {
+     "hi": "a",
+     "lo": 1.5,
+     "t": "c"
+    },
+    {
+     "t": "d"
+    },
+    {
+     "t": "e"
+    },
+    {
+     "hi": "a",
+     "lo": "a",
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT c.t, SUM(c.n) AS s, AVG(c.n) AS a, MIN(c.n) AS lo, MAX(c.n) AS hi FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_value_sum",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [],
+   "sql": "SELECT VALUE SUM(c.n) FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_value_max",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    true,
+    "b",
+    3,
+    "a",
+    "a"
+   ],
+   "sql": "SELECT VALUE MAX(c.n) FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_group_noagg",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "t": "A"
+    },
+    {
+     "t": "B"
+    },
+    {
+     "t": "a"
+    },
+    {
+     "t": "b"
+    },
+    {
+     "t": "c"
+    },
+    {
+     "t": "d"
+    },
+    {
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT c.t FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_top",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    }
+   ],
+   "sql": "SELECT TOP 2 c.t, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_offset",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t OFFSET 1 LIMIT 2"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_distinct_group",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.t, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_key_case",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT c.t, COUNT(1) AS k FROM c GROUP BY c.t"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_key_id_expr",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "l": "a"
+    },
+    {
+     "l": "b"
+    },
+    {
+     "l": "c"
+    },
+    {
+     "l": "d"
+    },
+    {
+     "l": "e"
+    }
+   ],
+   "sql": "SELECT LOWER(c.t) AS l FROM c GROUP BY LOWER(c.t)"
+  },
+  {
+   "container": "mixed",
+   "name": "g2_sub_key",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "k": 1,
+     "t": "A"
+    },
+    {
+     "k": 1,
+     "t": "B"
+    },
+    {
+     "k": 2,
+     "t": "a"
+    },
+    {
+     "k": 2,
+     "t": "b"
+    },
+    {
+     "k": 2,
+     "t": "c"
+    },
+    {
+     "k": 2,
+     "t": "d"
+    },
+    {
+     "k": 2,
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT t.t, COUNT(1) AS k FROM (SELECT c.t FROM c) t GROUP BY t.t"
+  },
+  {
+   "container": "c",
+   "name": "g2_sub_groupby",
+   "rows": [
+    3
+   ],
+   "sql": "SELECT VALUE (SELECT VALUE COUNT(1) FROM a IN c.arr) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "g2_prop_of_key",
+   "ordered": true,
+   "partition_key": "c",
+   "rows": [
+    {
+     "k": 2
+    },
+    {
+     "k": 1,
+     "x": null
+    }
+   ],
+   "sql": "SELECT c.o.x AS x, COUNT(1) AS k FROM c GROUP BY c.o.x"
+  },
+  {
+   "container": "c",
+   "error": {
+    "status": 400,
+    "sub": null,
+    "text": "Query contains 1 or more unsupported features. Upgrade your SDK to a version that does support the requested features:"
+   },
+   "name": "g2_cross_value_pk",
+   "ordered": true,
+   "sql": "SELECT VALUE c.pk FROM c GROUP BY c.pk"
+  },
+  {
+   "container": "c",
+   "name": "d2_ordered_cross",
+   "ordered": true,
+   "rows": [
+    "b",
+    "abd",
+    "abc",
+    "a",
+    "Abc",
+    "ABC"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c ORDER BY c.t DESC"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_obj_one_alias",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "tt": "A"
+    },
+    {
+     "tt": "B"
+    },
+    {
+     "tt": "a"
+    },
+    {
+     "tt": "b"
+    },
+    {
+     "tt": "c"
+    },
+    {
+     "tt": "d"
+    },
+    {
+     "tt": "e"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.t AS tt FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_obj_one_expr",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "tt": "a"
+    },
+    {
+     "tt": "b"
+    },
+    {
+     "tt": "c"
+    },
+    {
+     "tt": "d"
+    },
+    {
+     "tt": "e"
+    }
+   ],
+   "sql": "SELECT DISTINCT LOWER(c.t) AS tt FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_obj_three",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "id": "m1",
+     "n": true,
+     "t": "b"
+    },
+    {
+     "id": "m2",
+     "n": "b",
+     "t": "B"
+    },
+    {
+     "id": "m3",
+     "n": 3,
+     "t": "a"
+    },
+    {
+     "id": "m4",
+     "n": null,
+     "t": "a"
+    },
+    {
+     "id": "m5",
+     "n": 1.5,
+     "t": "c"
+    },
+    {
+     "id": "m6",
+     "n": "a",
+     "t": "c"
+    },
+    {
+     "id": "m7",
+     "n": false,
+     "t": "b"
+    },
+    {
+     "id": "m8",
+     "t": "d"
+    },
+    {
+     "id": "m9",
+     "n": [
+      1
+     ],
+     "t": "d"
+    },
+    {
+     "id": "m10",
+     "n": {
+      "a": 1
+     },
+     "t": "e"
+    },
+    {
+     "id": "m11",
+     "n": 3,
+     "t": "e"
+    },
+    {
+     "id": "m12",
+     "n": "a",
+     "t": "A"
+    }
+   ],
+   "sql": "SELECT DISTINCT c.t, c.n, c.id FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_value_obj",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    {
+     "t": "A"
+    },
+    {
+     "t": "B"
+    },
+    {
+     "t": "a"
+    },
+    {
+     "t": "b"
+    },
+    {
+     "t": "c"
+    },
+    {
+     "t": "d"
+    },
+    {
+     "t": "e"
+    }
+   ],
+   "sql": "SELECT DISTINCT VALUE {t: c.t} FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_value_id",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "m1",
+    "m10",
+    "m11",
+    "m12",
+    "m2",
+    "m3",
+    "m4",
+    "m5",
+    "m6",
+    "m7",
+    "m8",
+    "m9"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.id FROM c"
+  },
+  {
+   "container": "c",
+   "name": "d2_value_nested",
+   "ordered": true,
+   "partition_key": "c",
+   "rows": [
+    null
+   ],
+   "sql": "SELECT DISTINCT VALUE c.o.x FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_after_where_order",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "A",
+    "B",
+    "a",
+    "b",
+    "c",
+    "d",
+    "e"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c WHERE c.t != 'q'"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_top1",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "A"
+   ],
+   "sql": "SELECT DISTINCT TOP 1 VALUE c.t FROM c"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_offset",
+   "ordered": true,
+   "partition_key": "m",
+   "rows": [
+    "B",
+    "a"
+   ],
+   "sql": "SELECT DISTINCT VALUE c.t FROM c ORDER BY c.t OFFSET 1 LIMIT 2"
+  },
+  {
+   "container": "mixed",
+   "name": "d2_count_distinct_sub",
+   "partition_key": "m",
+   "rows": [
+    7
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM (SELECT DISTINCT VALUE c.t FROM c) t"
+  },
+  {
+   "container": "c",
+   "name": "c_eq_cross",
+   "rows": [
+    {
+     "e": false,
+     "en": false,
+     "id": "1",
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": false,
+     "id": "2",
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": false,
+     "id": "4",
+     "lt": true,
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": false,
+     "id": "5",
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": false,
+     "id": "6",
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": false,
+     "id": "7",
+     "ne": true,
+     "nen": true
+    },
+    {
+     "e": false,
+     "en": true,
+     "id": "3",
+     "ne": true,
+     "nen": false
+    }
+   ],
+   "sql": "SELECT c.id, c.n = 'x' AS e, c.n != 'x' AS ne, c.n < 'x' AS lt, c.n = null AS en, c.n != null AS nen FROM c"
+  },
+  {
+   "container": "c",
+   "name": "c_eq_undef",
+   "rows": [
+    {
+     "id": "1"
+    }
+   ],
+   "sql": "SELECT c.id, c.zzz = 1 AS e, c.zzz != 1 AS ne, c.zzz = c.zzz AS ee FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "c_eq_arr_obj",
+   "rows": [
+    {
+     "e": false,
+     "id": "1",
+     "ne": true,
+     "ne2": false,
+     "ne3": true
+    }
+   ],
+   "sql": "SELECT c.id, c.arr = c.o AS e, c.arr != c.o AS ne, c.arr != [1,2,3] AS ne2, c.o != {} AS ne3, c.arr < c.arr AS lt FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "c_not_cross",
+   "rows": [
+    {
+     "id": "1",
+     "lt": "u",
+     "ne": true
+    },
+    {
+     "id": "3",
+     "lt": "u",
+     "ne": true
+    }
+   ],
+   "sql": "SELECT c.id, NOT (c.n = 'x') AS ne, (c.n < 'x') ?? 'u' AS lt FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "c_in_cross",
+   "rows": [
+    {
+     "i": false,
+     "id": "1",
+     "ni": true
+    },
+    {
+     "i": false,
+     "id": "3",
+     "ni": true
+    }
+   ],
+   "sql": "SELECT c.id, c.n IN ('a') AS i, c.n NOT IN ('a') AS ni FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "name": "c_cross_where_ne",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE c.n != 'x'"
+  },
+  {
+   "container": "c",
+   "name": "c_cross_where_not",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "2"
+    },
+    {
+     "id": "3"
+    },
+    {
+     "id": "4"
+    },
+    {
+     "id": "5"
+    },
+    {
+     "id": "6"
+    },
+    {
+     "id": "7"
+    }
+   ],
+   "sql": "SELECT c.id FROM c WHERE NOT (c.n = 'x')"
+  },
+  {
+   "container": "c",
+   "name": "c_cross_where_not_lt",
+   "rows": [],
+   "sql": "SELECT c.id FROM c WHERE NOT (c.n < 'x')"
+  },
+  {
+   "container": "c",
+   "name": "c_between_cross",
+   "rows": [
+    {
+     "id": "1"
+    },
+    {
+     "id": "3"
+    }
+   ],
+   "sql": "SELECT c.id, c.n BETWEEN 'a' AND 'z' AS b FROM c WHERE c.id IN ('1','3')"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     21,
+     22
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '('."
+   },
+   "name": "u_upper_udf",
+   "sql": "SELECT VALUE UDF.nope(1) FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     17,
+     21
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'FROM'."
+   },
+   "name": "u_udf_alias",
+   "sql": "SELECT VALUE udf FROM c"
+  },
+  {
+   "container": "c",
+   "name": "u_udf_prop",
+   "rows": [],
+   "sql": "SELECT VALUE c.UDF FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "a_order_agg_value",
+   "rows": [
+    7
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c ORDER BY c.n"
+  },
+  {
+   "container": "c",
+   "name": "a_order_agg_sel",
+   "partition_key": "a",
+   "rows": [
+    2
+   ],
+   "sql": "SELECT VALUE MAX(c.n) FROM c ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "name": "a_order_agg_group",
+   "partition_key": "a",
+   "rows": [
+    {
+     "k": 2,
+     "pk": "a"
+    }
+   ],
+   "sql": "SELECT c.pk, COUNT(1) AS k FROM c GROUP BY c.pk ORDER BY c.pk DESC"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     39,
+     42
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near '1.5'."
+   },
+   "name": "a_offset_float_lit",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 1.5 LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2062",
+    "pos": [
+     39,
+     41
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The OFFSET count value exceeds the maximum allowed value."
+   },
+   "name": "a_offset_param_str",
+   "parameters": [
+    {
+     "name": "@o",
+     "value": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET @o LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2062",
+    "pos": [
+     39,
+     41
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The OFFSET count value exceeds the maximum allowed value."
+   },
+   "name": "a_offset_param_missing",
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET @o LIMIT 1"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2061",
+    "pos": [
+     47,
+     49
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The LIMIT count value exceeds the maximum allowed value."
+   },
+   "name": "a_limit_param_neg",
+   "parameters": [
+    {
+     "name": "@l",
+     "value": -1
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 0 LIMIT @l"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2061",
+    "pos": [
+     47,
+     49
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The LIMIT count value exceeds the maximum allowed value."
+   },
+   "name": "a_limit_param_float",
+   "parameters": [
+    {
+     "name": "@l",
+     "value": 1.5
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 0 LIMIT @l"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2061",
+    "pos": [
+     47,
+     49
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The LIMIT count value exceeds the maximum allowed value."
+   },
+   "name": "a_limit_param_str",
+   "parameters": [
+    {
+     "name": "@l",
+     "value": "1"
+    }
+   ],
+   "sql": "SELECT c.id FROM c ORDER BY c.t OFFSET 0 LIMIT @l"
+  },
+  {
+   "container": "c",
+   "name": "a_top_param_ok",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": 2
+    }
+   ],
+   "rows": [
+    {
+     "id": "6"
+    },
+    {
+     "id": "4"
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c ORDER BY c.t"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "a_top_param_big",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": 99999999999
+    }
+   ],
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC2060",
+    "pos": [
+     11,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "The count value provided for a TOP clause must be an integer."
+   },
+   "name": "a_top_param_single",
+   "parameters": [
+    {
+     "name": "@n",
+     "value": -1
+    }
+   ],
+   "partition_key": "a",
+   "sql": "SELECT TOP @n c.id FROM c"
+  },
+  {
+   "container": "c",
+   "name": "si_arr1",
+   "rows": [
+    [
+     5,
+     3
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([1,2,3,4,5], [5,3]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr2",
+   "rows": [
+    [
+     5,
+     3
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([5,3], [1,2,3,4,5]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr3",
+   "rows": [
+    [
+     5,
+     3,
+     1
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([5,3,1], [1,3,5]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr4",
+   "rows": [
+    [
+     1,
+     3,
+     5
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([1,3,5], [5,3,1]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr5",
+   "rows": [
+    [
+     1,
+     9
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([3,1,2,9], [9,1,7]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr6",
+   "rows": [
+    [
+     9,
+     1
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([9,1,7], [3,1,2,9]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr7",
+   "rows": [
+    [
+     1,
+     2
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([1,1,2,2], [2,1,1]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "si_arr8",
+   "rows": [
+    [
+     2,
+     1
+    ]
+   ],
+   "sql": "SELECT VALUE SETINTERSECT([2,1], [1,2]) FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "w_prop_all",
+   "partition_key": "a",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.all)"
+  },
+  {
+   "container": "c",
+   "name": "w_prop_count",
+   "partition_key": "a",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.count)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     52
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'from'."
+   },
+   "name": "w_prop_from",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.from)"
+  },
+  {
+   "container": "c",
+   "name": "w_prop_id",
+   "partition_key": "a",
+   "rows": [
+    2
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.id)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     52
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'left'."
+   },
+   "name": "w_prop_left",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.left)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     52
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'null'."
+   },
+   "name": "w_prop_null",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.null)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     53
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'order'."
+   },
+   "name": "w_prop_order",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.order)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     54
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'select'."
+   },
+   "name": "w_prop_select",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.select)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     51
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'udf'."
+   },
+   "name": "w_prop_udf",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.udf)"
+  },
+  {
+   "container": "c",
+   "name": "w_prop_union",
+   "partition_key": "a",
+   "rows": [
+    0
+   ],
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.union)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     48,
+     53
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'value'."
+   },
+   "name": "w_prop_value",
+   "partition_key": "a",
+   "sql": "SELECT VALUE COUNT(1) FROM c WHERE IS_DEFINED(c.value)"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     15,
+     20
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'value'."
+   },
+   "name": "w_alias_value",
+   "sql": "SELECT c.id AS value FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     25,
+     30
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'value'."
+   },
+   "name": "w_from_value",
+   "sql": "SELECT VALUE 1 FROM c AS value WHERE value.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     12,
+     15
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'top'."
+   },
+   "name": "w_alias_bare_top",
+   "sql": "SELECT c.id top FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "w_alias_count",
+   "rows": [
+    {
+     "count": "1"
+    }
+   ],
+   "sql": "SELECT c.id AS count FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     14,
+     20
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'select'."
+   },
+   "name": "w_objkey_select",
+   "sql": "SELECT VALUE {select: 1} FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "w_alias_bare_all",
+   "rows": [
+    {
+     "all": "1"
+    }
+   ],
+   "sql": "SELECT c.id all FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "w_objkey_id",
+   "rows": [
+    {
+     "id": 1
+    }
+   ],
+   "sql": "SELECT VALUE {id: 1} FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "name": "w_bracket_select",
+   "rows": [
+    {}
+   ],
+   "sql": "SELECT c['select'] AS v FROM c WHERE c.id = '1'"
+  },
+  {
+   "container": "c",
+   "error": {
+    "code": "SC1001",
+    "pos": [
+     7,
+     13
+    ],
+    "status": 400,
+    "sub": null,
+    "text": "Syntax error, incorrect syntax near 'select'."
+   },
+   "name": "w_ident_select",
+   "sql": "SELECT select FROM c"
+  }
+ ],
+ "composite_policy": {
+  "compositeIndexes": [
+   [
+    {
+     "order": "ascending",
+     "path": "/n"
+    },
+    {
+     "order": "ascending",
+     "path": "/t"
+    }
+   ]
+  ],
+  "excludedPaths": [
+   {
+    "path": "/\"_etag\"/?"
+   }
+  ],
+  "includedPaths": [
+   {
+    "path": "/*"
+   }
+  ],
+  "indexingMode": "consistent"
+ },
+ "docs": [
+  {
+   "arr": [
+    1,
+    2,
+    3
+   ],
+   "b": true,
+   "d": "2024-03-15T10:20:30.1234567Z",
+   "f": 1.5,
+   "id": "1",
+   "n": 1,
+   "nl": null,
+   "o": {
+    "x": 1,
+    "y": "z"
+   },
+   "pk": "a",
+   "s": "Hello World",
+   "t": "abc"
+  },
+  {
+   "arr": [
+    "a",
+    "b"
+   ],
+   "b": false,
+   "f": 2.5,
+   "id": "2",
+   "n": 2,
+   "o": {
+    "x": 2
+   },
+   "pk": "a",
+   "s": "hello",
+   "t": "abd"
+  },
+  {
+   "arr": [],
+   "d": "2024-03-15",
+   "id": "3",
+   "n": null,
+   "o": {},
+   "pk": "b",
+   "s": "",
+   "t": "b"
+  },
+  {
+   "arr": [
+    [
+     1,
+     2
+    ],
+    [
+     3
+    ]
+   ],
+   "id": "4",
+   "n": "5",
+   "o": {
+    "x": {
+     "y": 1
+    }
+   },
+   "pk": "b",
+   "s": "ab,cd,ef",
+   "t": "Abc"
+  },
+  {
+   "arr": [
+    {
+     "a": 1,
+     "b": 2
+    },
+    {
+     "a": 3
+    }
+   ],
+   "f": 0.1,
+   "id": "5",
+   "n": 5,
+   "pk": "c",
+   "s": "x%y_z",
+   "t": "abc"
+  },
+  {
+   "arr": [
+    null,
+    true,
+    1
+   ],
+   "big": 1e+20,
+   "id": "6",
+   "n": 9007199254740993,
+   "pk": "c",
+   "s": "naïve ☃",
+   "t": "ABC"
+  },
+  {
+   "arr": [
+    3,
+    1,
+    2
+   ],
+   "id": "7",
+   "n": -3,
+   "o": {
+    "x": null
+   },
+   "pk": "c",
+   "s": "a b c",
+   "t": "a"
+  }
+ ],
+ "explicit_policy": {
+  "excludedPaths": [
+   {
+    "path": "/*"
+   }
+  ],
+  "includedPaths": [
+   {
+    "path": "/n/?"
+   },
+   {
+    "path": "/pk/?"
+   },
+   {
+    "path": "/t/?"
+   },
+   {
+    "path": "/o/?"
+   },
+   {
+    "path": "/arr/?"
+   }
+  ],
+  "indexingMode": "consistent"
+ },
+ "mixed": [
+  {
+   "id": "m1",
+   "n": true,
+   "pk": "m",
+   "t": "b"
+  },
+  {
+   "id": "m2",
+   "n": "b",
+   "pk": "m",
+   "t": "B"
+  },
+  {
+   "id": "m3",
+   "n": 3,
+   "pk": "m",
+   "t": "a"
+  },
+  {
+   "id": "m4",
+   "n": null,
+   "pk": "m",
+   "t": "a"
+  },
+  {
+   "id": "m5",
+   "n": 1.5,
+   "pk": "m",
+   "t": "c"
+  },
+  {
+   "id": "m6",
+   "n": "a",
+   "pk": "m",
+   "t": "c"
+  },
+  {
+   "id": "m7",
+   "n": false,
+   "pk": "m",
+   "t": "b"
+  },
+  {
+   "id": "m8",
+   "pk": "m",
+   "t": "d"
+  },
+  {
+   "id": "m9",
+   "n": [
+    1
+   ],
+   "pk": "m",
+   "t": "d"
+  },
+  {
+   "id": "m10",
+   "n": {
+    "a": 1
+   },
+   "pk": "m",
+   "t": "e"
+  },
+  {
+   "id": "m11",
+   "n": 3,
+   "pk": "m",
+   "t": "e"
+  },
+  {
+   "id": "m12",
+   "n": "a",
+   "pk": "m",
+   "t": "A"
+  }
+ ],
+ "noindex_policy": {
+  "automatic": false,
+  "indexingMode": "none"
+ }
+}

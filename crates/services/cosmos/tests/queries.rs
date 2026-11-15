@@ -52,7 +52,11 @@ async fn cross_partition_query_plan_round_trip() {
         .req(
             "POST",
             "dbs/d/colls/c/docs",
-            &[("content-type", "application/query+json"), ("x-ms-cosmos-is-query-plan-request", "True")],
+            &[
+                ("content-type", "application/query+json"),
+                ("x-ms-cosmos-is-query-plan-request", "True"),
+                ("x-ms-cosmos-supported-query-features", "OrderBy"),
+            ],
             &q.to_string(),
         )
         .await;
@@ -71,8 +75,9 @@ async fn cross_partition_query_plan_round_trip() {
     // the partition key ranges
     let r = h.req("GET", "dbs/d/colls/c/pkranges", &[], "").await;
     assert_eq!(r.json()["PartitionKeyRanges"][0]["minInclusive"], "");
-    let etag = r.header("etag").unwrap().to_string();
-    assert_eq!(h.req("GET", "dbs/d/colls/c/pkranges", &[("if-none-match", &etag)], "").await.status, 304);
+    // no etag, and `If-None-Match` is ignored, as on Azure
+    assert!(r.header("etag").is_none());
+    assert_eq!(h.req("GET", "dbs/d/colls/c/pkranges", &[("if-none-match", "\"x\"")], "").await.status, 200);
 }
 
 /// MIN and MAX are answered by the partitions in the form the asking SDK reads: the JavaScript SDK
@@ -91,16 +96,27 @@ async fn min_and_max_plan_follows_the_sdk_that_asks() {
     let features = "Aggregate,CompositeAggregate,Distinct,MultipleOrderBy,OffsetAndLimit,OrderBy,Top,GroupBy,MultipleAggregates";
     let js = plan_of(&h, &q, &[("x-ms-cosmos-query-version", "1.4"), ("x-ms-cosmos-supported-query-features", features)]).await;
     assert_eq!(js["aggregates"], json!(["Min"]));
-    assert!(js["rewrittenQuery"].as_str().unwrap().contains("\"min\": MIN(c.n), \"count\": COUNT(c.n)"), "{js}");
-    let py = plan_of(
-        &h,
-        &q,
-        &[("x-ms-cosmos-query-version", "1.0"), ("x-ms-cosmos-supported-query-features", "Aggregate,CompositeAggregate,Distinct")],
-    )
-    .await;
-    assert_eq!(py["rewrittenQuery"], "SELECT VALUE [{\"item\": MIN(c.n)}]\nFROM c");
-    let none = plan_of(&h, &q, &[]).await;
-    assert_eq!(none["rewrittenQuery"], py["rewrittenQuery"]);
+    // `item` is the bare value, `item2` the composite that the JavaScript and Java SDKs read
+    assert!(
+        js["rewrittenQuery"].as_str().unwrap().contains("{\"item\": MIN(c.n), \"item2\": {\"min\": MIN(c.n), \"count\": COUNT(c.n)}}"),
+        "{js}"
+    );
+    // every client gets it, whatever its query version or its list (a real account does the same)
+    let v10 = plan_of(&h, &q, &[("x-ms-cosmos-query-version", "1.0"), ("x-ms-cosmos-supported-query-features", features)]).await;
+    assert_eq!(v10["rewrittenQuery"], js["rewrittenQuery"]);
+    let py = plan_of(&h, &q, &[("x-ms-cosmos-query-version", "1.0"), ("x-ms-cosmos-supported-query-features", "Aggregate,Distinct")]).await;
+    assert_eq!(py["rewrittenQuery"], js["rewrittenQuery"]);
+    // a request with no feature list supports none: 400 that names the feature
+    let r = h
+        .req(
+            "POST",
+            "dbs/d/colls/c/docs",
+            &[("content-type", "application/query+json"), ("x-ms-cosmos-is-query-plan-request", "True")],
+            &q.to_string(),
+        )
+        .await;
+    assert_eq!(r.status, 400);
+    assert!(r.text().contains("Query contained Aggregate, which the calling client does not support."), "{}", r.text());
     // the 1004 answer to a cross partition query carries the same plan
     let r = h
         .query("d", "c", &[CROSS, ("x-ms-cosmos-query-version", "1.4"), ("x-ms-cosmos-supported-query-features", features)], q.clone())
@@ -111,7 +127,7 @@ async fn min_and_max_plan_follows_the_sdk_that_asks() {
     let rq = json!({"query": js["rewrittenQuery"].as_str().unwrap()});
     let r = h.query("d", "c", &[CROSS, ("x-ms-documentdb-partitionkeyrangeid", "0")], rq).await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!(r.json()["Documents"], json!([[{"item": {"min": 1, "count": 5}}]]));
+    assert_eq!(r.json()["Documents"], json!([[{"item": 1, "item2": {"min": 1, "count": 5}}]]));
 }
 
 #[tokio::test]

@@ -7,7 +7,7 @@ use azemu_core::etag;
 use serde_json::{json, Map, Value};
 
 use crate::epk;
-use crate::errors::{check_item_id, pk_mismatch, CosmosError, R};
+use crate::errors::{item_id, pk_fewer_components, pk_mismatch, pk_more_components, CosmosError, R};
 use crate::out::{doc_charge, Cx, Out};
 use crate::paging;
 use crate::pk::{self, DocKey, PkValue};
@@ -39,13 +39,9 @@ pub struct Prepared {
 /// header when one is sent).
 pub fn prepare(body: Value, c: &Container, header_pk: Option<&PkValue>) -> R<Prepared> {
     let Value::Object(mut m) = body else {
-        return Err(CosmosError::bad_request("The document body must be a JSON object."));
+        return Err(CosmosError::bad_request("One of the specified inputs is invalid"));
     };
-    let id = match m.get("id") {
-        Some(Value::String(s)) => s.clone(),
-        _ => return Err(CosmosError::bad_request("The input content is invalid because the required properties - 'id; ' - are missing")),
-    };
-    check_item_id(&id)?;
+    let id = item_id(&m)?;
     crate::limits::check_map_nesting(&m)?;
     for k in SYSTEM {
         m.shift_remove(k);
@@ -77,8 +73,11 @@ fn full_key(c: &Container, v: PkValue) -> R<PkValue> {
     if v.is_empty() && c.pk.paths.len() == 1 {
         return Ok(vec![crate::pk::PkComp::Undefined]);
     }
-    if v.len() != c.pk.paths.len() {
-        return Err(pk_mismatch());
+    if v.len() < c.pk.paths.len() {
+        return Err(pk_fewer_components());
+    }
+    if v.len() > c.pk.paths.len() {
+        return Err(pk_more_components());
     }
     Ok(v)
 }
@@ -108,7 +107,7 @@ pub fn op_pk(c: &Container, op: &Value) -> R<Option<PkValue>> {
 
 /// Header key for operations that cannot find the document without it.
 pub fn require_pk(cx: &Cx, c: &Container) -> R<PkValue> {
-    header_pk(cx, c)?.ok_or_else(|| CosmosError::bad_request("PartitionKey value must be supplied for this operation."))
+    header_pk(cx, c)?.ok_or_else(pk_fewer_components)
 }
 
 /// The document with this `_rid` (the id as a client may have written it: `-` or `/`).
@@ -145,12 +144,18 @@ pub fn render(loc: &Loc, c: &Container, props: &Map<String, Value>, rid: &str, e
 /// Store a validated document. `existing` rid and replacement semantics are decided by
 /// the caller. Returns the stored JSON.
 pub fn store(cx: &Cx, loc: &Loc, c: &mut Container, p: Prepared, undo: &mut Undo) -> R<(Value, bool, u64)> {
+    store_as(cx, loc, c, p, undo, None)
+}
+
+/// [`store`], giving a new document the resource id `rid` (the one a renamed document keeps).
+fn store_as(cx: &Cx, loc: &Loc, c: &mut Container, p: Prepared, undo: &mut Undo, rid: Option<String>) -> R<(Value, bool, u64)> {
     let key = DocKey { pk: p.pk.clone(), id: p.id.clone() };
     let existing = c.docs.get(&key).map(|d| d.rid.clone());
     let created = existing.is_none();
-    let rid = match existing {
-        Some(r) => r,
-        None => c.next_doc_rid().1,
+    let rid = match (existing, rid) {
+        (Some(r), _) => r,
+        (None, Some(r)) => r,
+        (None, None) => c.next_doc_rid().1,
     };
     let etag = etag::new_etag();
     let value = render(loc, c, &p.props, &rid, &etag, cx.now);
@@ -219,7 +224,7 @@ pub fn create(cx: &Cx, loc: &Loc, c: &mut Container, upsert: bool) -> R<Out> {
 pub fn read(cx: &Cx, c: &mut Container, id: &str) -> R<Out> {
     c.purge_expired(cx.now);
     let key = locate(cx, c, id)?;
-    let doc = c.docs.get(&key).ok_or_else(|| CosmosError::not_found("Entity with the specified id does not exist in the system."))?;
+    let doc = c.docs.get(&key).ok_or_else(CosmosError::item_not_found)?;
     if let Some(m) = cx.header("if-none-match") {
         let m = m.trim();
         if m == "*" || etag::eq(m, &doc.etag) {
@@ -235,31 +240,46 @@ pub fn read(cx: &Cx, c: &mut Container, id: &str) -> R<Out> {
     Ok(doc_out(cx, c, 200, (*doc.value).clone(), false))
 }
 
+/// Replaces the document the path names. A body with another `id` renames it: the document keeps its resource id and the
+/// old id is gone (checked against Azure in November 2026); a new id that is taken is a 409.
 pub fn replace(cx: &Cx, loc: &Loc, c: &mut Container, id: &str) -> R<Out> {
     check_size(cx)?;
     c.purge_expired(cx.now);
     let body = cx.body_json()?;
     let hp = header_pk(cx, c)?;
     let p = prepare(body, c, hp.as_ref())?;
-    if p.id != id && key_by_rid(c, id).is_none() {
-        return Err(CosmosError::bad_request("The document id in the body does not match the id in the request path."));
-    }
-    let mut key = DocKey { pk: p.pk.clone(), id: p.id.clone() };
-    if !c.docs.contains_key(&key) {
-        // addressed by _rid
-        key = locate(cx, c, id)?;
-    }
-    let existing = c.docs.get(&key).ok_or_else(|| CosmosError::not_found("Entity with the specified id does not exist in the system."))?;
+    let old_key = match (&hp, key_by_rid(c, id)) {
+        (Some(_), _) => locate(cx, c, id)?,
+        (None, Some(k)) => k,
+        // no partition key header: the body's key says where the document is
+        (None, None) => DocKey { pk: p.pk.clone(), id: id.to_string() },
+    };
+    let existing = c.docs.get(&old_key).ok_or_else(CosmosError::item_not_found)?;
     check_write_preconditions(cx, existing)?;
+    let new_key = DocKey { pk: p.pk.clone(), id: p.id.clone() };
     let mut undo = c.begin();
-    let (value, _, _) = store(cx, loc, c, p, &mut undo)?;
-    Ok(doc_out(cx, c, 200, value, true))
+    if new_key == old_key {
+        let (value, _, _) = store(cx, loc, c, p, &mut undo)?;
+        return Ok(doc_out(cx, c, 200, value, true));
+    }
+    if c.docs.contains_key(&new_key) {
+        return Err(CosmosError::conflict());
+    }
+    let rid = existing.rid.clone();
+    c.delete(&old_key, &mut undo, cx.now);
+    match store_as(cx, loc, c, p, &mut undo, Some(rid)) {
+        Ok((value, _, _)) => Ok(doc_out(cx, c, 200, value, true)),
+        Err(e) => {
+            c.rollback(undo);
+            Err(e)
+        }
+    }
 }
 
 pub fn delete(cx: &Cx, c: &mut Container, id: &str) -> R<Out> {
     c.purge_expired(cx.now);
     let key = locate(cx, c, id)?;
-    let existing = c.docs.get(&key).ok_or_else(|| CosmosError::not_found("Entity with the specified id does not exist in the system."))?;
+    let existing = c.docs.get(&key).ok_or_else(CosmosError::item_not_found)?;
     check_write_preconditions(cx, existing)?;
     let mut undo = c.begin();
     c.delete(&key, &mut undo, cx.now);
@@ -277,7 +297,7 @@ pub fn list(cx: &Cx, c: &mut Container) -> R<Out> {
         return crate::change_feed::read_all_versions(cx, c);
     }
     let sel = Selector::from_headers(cx, c)?;
-    let tok = paging::decode(cx.header("x-ms-continuation"));
+    let tok = paging::decode(cx.header("x-ms-continuation"), &c.meta.rid)?;
     // Resume right behind the last document of the previous page: the documents are in key
     // order, so no page needs to look at the pages before it.
     let start = match (&tok.after, &sel.pk) {
@@ -286,6 +306,7 @@ pub fn list(cx: &Cx, c: &mut Container) -> R<Out> {
         (None, None) => Bound::Unbounded,
     };
     let limit = cx.max_item_count().unwrap_or(usize::MAX);
+    let rid = c.meta.rid.clone();
     let mut iter = c
         .docs
         .range((start, Bound::Unbounded))
@@ -299,18 +320,22 @@ pub fn list(cx: &Cx, c: &mut Container) -> R<Out> {
     let mut last: Option<DocKey> = None;
     let mut bytes = 0usize;
     let mut more = false;
-    for (k, d) in iter.by_ref() {
-        let size = paging::approx_size(&d.value);
-        if items.len() >= limit || (!items.is_empty() && bytes + size > paging::MAX_PAGE_BYTES) {
+    while let Some((k, d)) = iter.next() {
+        if items.len() >= limit {
             more = true;
             break;
         }
-        bytes += size;
+        bytes += paging::approx_size(&d.value);
         items.push((*d.value).clone());
         last = Some(k.clone());
+        // the page ends after the document that takes it to 4 MB (what Azure does)
+        if bytes >= paging::MAX_PAGE_BYTES {
+            more = iter.next().is_some();
+            break;
+        }
     }
     let next = match (more, last) {
-        (true, Some(k)) => Some(paging::encode(&paging::Token { after: Some(k), ..Default::default() })),
+        (true, Some(k)) => Some(paging::encode(&paging::Token { after: Some(k), ..Default::default() }, &rid)),
         _ => None,
     };
     let n = items.len();

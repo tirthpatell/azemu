@@ -239,9 +239,12 @@ class CosmosTest {
         c.deleteItem(id, pk, new CosmosItemRequestOptions());
     }
 
-    @Test void idWithASlash_isRefusedByTheSdkBeforeSending() {
+    @Test void idWithASlash_isCreatedButCannotBeReadById() {
+        // A real account answered in November 2026: 201 on create, and every request by id fails (the gateway reads another path
+        // than the one that was signed). The Java SDK sends the id as it is.
         CosmosContainer c = container();
-        assertThrows(RuntimeException.class, () -> c.createItem(Cos.doc("a/b", "p"), new PartitionKey("p"), new CosmosItemRequestOptions()));
+        c.createItem(Cos.doc("a/b", "p"), new PartitionKey("p"), new CosmosItemRequestOptions());
+        assertThrows(RuntimeException.class, () -> c.readItem("a/b", new PartitionKey("p"), JsonNode.class));
     }
 
     @Test void itemOver2MB_is413() {

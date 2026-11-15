@@ -147,7 +147,7 @@ async fn properties_are_per_account_and_reset() {
     let logging = "<Logging><Version>1.0</Version><Delete>true</Delete><Read>true</Read><Write>true</Write><RetentionPolicy><Enabled>false</Enabled></RetentionPolicy></Logging>";
     q.send("PUT", GET_PROPS, &[], &props_body(logging)).await;
     let other = q.srv.url("queue", "acct2");
-    let r = q.srv.send("GET", &format!("{other}{GET_PROPS}"), &[("Authorization", "SharedKey acct2:x")], "").await;
+    let r = q.srv.send("GET", &format!("{other}{GET_PROPS}"), &[("Authorization", "SharedKey acct2:AAAA")], "").await;
     assert!(r.text().contains("<Read>false</Read>"));
     q.srv.reset();
     assert!(q.send("GET", GET_PROPS, &[], "").await.text().contains("<Read>false</Read>"));
@@ -157,7 +157,7 @@ async fn properties_are_per_account_and_reset() {
 async fn stats_answer_live_on_the_secondary_endpoint() {
     let q = start().await;
     let secondary = q.srv.url("queue", "acct1-secondary");
-    let r = q.srv.send("GET", &format!("{secondary}/?restype=service&comp=stats"), &[("Authorization", "SharedKey acct1:x")], "").await;
+    let r = q.srv.send("GET", &format!("{secondary}/?restype=service&comp=stats"), &[("Authorization", "SharedKey acct1:AAAA")], "").await;
     assert_eq!(r.status, 200);
     let b = r.text();
     assert!(b.contains("<StorageServiceStats><GeoReplication><Status>live</Status><LastSyncTime>"));
@@ -232,9 +232,11 @@ async fn preflight_follows_the_rules_and_needs_no_credentials() {
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.header("access-control-allow-origin"), Some("http://a.example"));
     assert_eq!(r.header("access-control-allow-methods"), Some("PUT"));
-    assert_eq!(r.header("access-control-allow-headers"), Some("x-ms-meta-data1,x-ms-meta-data2"));
+    // the request headers come back as they were sent; there is no Vary (checked against Azure in November 2026)
+    assert_eq!(r.header("access-control-allow-headers"), Some("x-ms-meta-data1, x-ms-meta-data2"));
     assert_eq!(r.header("access-control-max-age"), Some("500"));
-    assert_eq!(r.header("vary"), Some("Origin"));
+    assert_eq!(r.header("access-control-allow-credentials"), Some("true"));
+    assert!(r.header("vary").is_none());
     assert!(r.header("x-ms-request-id").is_some());
     // each way of not matching
     for (origin, method, headers) in
@@ -258,11 +260,12 @@ async fn preflight_missing_headers_is_400() {
     let q = start().await;
     set_cors(&q, &rule("*")).await;
     let r = q.anon_with("OPTIONS", "/q", &[("Access-Control-Request-Method", "GET")]).await;
-    assert_eq!((r.status, error_code(&r).as_str()), (400, "MissingRequiredHeader"));
-    assert!(r.text().contains("<HeaderName>Origin</HeaderName>"));
+    assert_eq!((r.status, error_code(&r).as_str()), (400, "InvalidHeaderValue"));
+    assert!(r.text().contains("<Message>A required CORS header is not present."), "{}", r.text());
+    assert!(r.text().contains("<MessageDetails>Missing required CORS header Origin</MessageDetails>"));
     let r = q.anon_with("OPTIONS", "/q", &[("Origin", "http://a.example")]).await;
-    assert_eq!((r.status, error_code(&r).as_str()), (400, "MissingRequiredHeader"));
-    assert!(r.text().contains("<HeaderName>Access-Control-Request-Method</HeaderName>"));
+    assert_eq!((r.status, error_code(&r).as_str()), (400, "InvalidHeaderValue"));
+    assert!(r.text().contains("<MessageDetails>Missing required CORS header Access-Control-Request-Method</MessageDetails>"));
 }
 
 #[tokio::test]
@@ -289,6 +292,12 @@ async fn actual_requests_with_origin_get_the_cors_headers() {
     let r = q.send("DELETE", "/corsq", &[("Origin", "http://a.example")], "").await;
     assert_eq!(r.status, 204);
     assert!(r.header("access-control-allow-origin").is_none());
+    // a request with no Origin is matched by a rule that lists `*` (as Azure does)
+    let r = q.send("GET", "/?comp=list", &[], "").await;
+    assert_eq!(r.header("access-control-allow-origin"), Some("*"));
+    // with only exact origins a GET without Origin gets Vary
+    set_cors(&q, &rule("http://a.example")).await;
     let r = q.send("GET", "/?comp=list", &[], "").await;
     assert!(r.header("access-control-allow-origin").is_none());
+    assert_eq!(r.header("vary"), Some("Origin"));
 }

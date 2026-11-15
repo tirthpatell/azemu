@@ -61,6 +61,15 @@ fn params_of(n: Option<&Node>) -> ApiResult<Params> {
     Ok(p)
 }
 
+/// A refused rule: 400 with the service's text (the one for an expression that does not parse has two spaces before the tracking text).
+fn sql_error(text: String) -> ApiError {
+    if text.ends_with(']') {
+        ApiError::bad_raw(format!("{text} "))
+    } else {
+        ApiError::bad_raw(text)
+    }
+}
+
 /// Build the rule `name` from a `RuleDescription` element.
 pub fn parse(name: &str, desc: &Node, now: i64) -> ApiResult<Rule> {
     let bad = |m: String| ApiError::bad(m, true);
@@ -70,11 +79,7 @@ pub fn parse(name: &str, desc: &Node, now: i64) -> ApiResult<Rule> {
         Some("FalseFilter") => Rule { name: name.into(), filter: RuleFilter::False, action: None, created_ms: now },
         Some("SqlFilter") => {
             let expr = filter.and_then(|f| f.child("SqlExpression")).map(|e| e.val().to_string()).unwrap_or_default();
-            if expr.is_empty() {
-                return Err(ApiError::bad_request());
-            }
-            Rule::sql_filter(name, &expr, params_of(filter)?, now)
-                .map_err(|e| bad(format!("The SQL expression of the filter is not valid: {e}")))?
+            Rule::sql_filter(name, &expr, params_of(filter)?, now).map_err(sql_error)?
         }
         Some("CorrelationFilter") => {
             let f = filter.ok_or_else(ApiError::bad_request)?;
@@ -93,6 +98,18 @@ pub fn parse(name: &str, desc: &Node, now: i64) -> ApiResult<Rule> {
             if let Some(p) = f.child("Properties") {
                 cf.properties.extend(key_values(p, false)?);
             }
+            let empty = cf.correlation_id.is_none()
+                && cf.message_id.is_none()
+                && cf.to.is_none()
+                && cf.reply_to.is_none()
+                && cf.label.is_none()
+                && cf.session_id.is_none()
+                && cf.reply_to_session_id.is_none()
+                && cf.content_type.is_none()
+                && cf.properties.is_empty();
+            if empty {
+                return Err(sql_error("At least one system or user property must be set for a correlation filter.".into()));
+            }
             Rule { name: name.into(), filter: RuleFilter::Correlation(cf), action: None, created_ms: now }
         }
         Some(other) => return Err(bad(format!("The filter type '{other}' is not supported."))),
@@ -102,9 +119,10 @@ pub fn parse(name: &str, desc: &Node, now: i64) -> ApiResult<Rule> {
         None | Some("") | Some("EmptyRuleAction") => {}
         Some("SqlRuleAction") => {
             let expr = action.and_then(|a| a.child("SqlExpression")).map(|e| e.val().to_string()).unwrap_or_default();
-            rule = rule
-                .with_action(&expr, params_of(action)?)
-                .map_err(|e| bad(format!("The SQL expression of the action is not valid: {e}")))?;
+            if expr.is_empty() {
+                return Err(sql_error("The property 'SqlExpression' is null or empty.".into()));
+            }
+            rule = rule.with_action(&expr, params_of(action)?).map_err(sql_error)?;
         }
         Some(other) => return Err(bad(format!("The action type '{other}' is not supported."))),
     }

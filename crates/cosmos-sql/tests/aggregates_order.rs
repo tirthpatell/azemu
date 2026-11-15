@@ -41,9 +41,9 @@ fn aggregate_functions() {
             ("SELECT VALUE SUM(c.id) FROM c", "[15]"),
             ("SELECT VALUE AVG(c.id) FROM c", "[3]"),
             ("SELECT VALUE SUM(c.city) FROM c", "[]"),
-            ("SELECT VALUE SUM(c.nothing) FROM c", "[]"),
+            ("SELECT VALUE SUM(c.nothing) FROM c", "[0]"), // the sum of no values is 0 on Azure
             ("SELECT VALUE AVG(c.nothing) FROM c", "[]"),
-            ("SELECT VALUE SUM(c.id) FROM c WHERE false", "[]"),
+            ("SELECT VALUE SUM(c.id) FROM c WHERE false", "[0]"),
             ("SELECT VALUE SUM(c.city = 'NY' ? 1 : 0) FROM c", "[2]"), // the row without city yields undefined and is skipped
             // MIN / MAX use the cross-type order null < boolean < number < string
             ("SELECT VALUE MIN(c.age) FROM c", "[25]"),
@@ -97,8 +97,10 @@ fn aggregate_over_mixed_values() {
         &[
             ("SELECT VALUE COUNT(c.v) FROM c", "[6]"),
             ("SELECT VALUE SUM(c.v) FROM c", "[]"),
-            ("SELECT VALUE MIN(c.v) FROM c", "[null]"),
-            ("SELECT VALUE MAX(c.v) FROM c", r#"[{"a":1}]"#),
+            ("SELECT VALUE MIN(c.v) FROM c", "[]"),
+            // an array or an object among the values makes MIN and MAX undefined (a real account answers that way)
+            ("SELECT VALUE MAX(c.v) FROM c", "[]"),
+            ("SELECT VALUE MAX(c.v) FROM c WHERE IS_ARRAY(c.v) OR IS_OBJECT(c.v)", "[]"),
             ("SELECT VALUE MAX(c.v) FROM c WHERE IS_PRIMITIVE(c.v)", r#"["s"]"#),
             ("SELECT VALUE MIN(c.v) FROM c WHERE IS_BOOL(c.v) OR IS_NUMBER(c.v)", "[true]"),
             ("SELECT VALUE SUM(c.v) FROM c WHERE IS_NUMBER(c.v)", "[1]"),
@@ -117,32 +119,36 @@ fn group_by() {
     check_table(
         &p,
         &[
-            ("SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city", r#"[{"city":"Seattle","n":2},{"city":"NY","n":2},{"n":1}]"#),
-            ("SELECT VALUE COUNT(1) FROM c GROUP BY c.city", "[2,2,1]"),
-            ("SELECT c.city, AVG(c.age) AS a FROM c GROUP BY c.city", r#"[{"city":"Seattle","a":27.5},{"city":"NY"},{"a":35}]"#),
+            ("SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city", r#"[{"n":1},{"city":"NY","n":2},{"city":"Seattle","n":2}]"#),
+            ("SELECT VALUE COUNT(1) FROM c GROUP BY c.city", "[1,2,2]"),
+            ("SELECT c.city, AVG(c.age) AS a FROM c GROUP BY c.city", r#"[{"city":"Seattle","a":27.5},{"city":"NY"},{"a":35}]"#), // AVG, SUM, MIN, MAX: order of first appearance
             (
                 "SELECT c.city, MIN(c.id) AS lo, MAX(c.id) AS hi, SUM(c.id) AS s FROM c GROUP BY c.city",
                 r#"[{"city":"Seattle","lo":1,"hi":2,"s":3},{"city":"NY","lo":3,"hi":4,"s":7},{"lo":5,"hi":5,"s":5}]"#,
             ),
             (
                 "SELECT c.age > 30 AS older, COUNT(1) AS n FROM c GROUP BY c.age > 30",
-                r#"[{"older":false,"n":2},{"older":true,"n":2},{"n":1}]"#,
+                r#"[{"n":1},{"older":false,"n":2},{"older":true,"n":2}]"#,
             ),
             (
                 "SELECT c.city, c.age, COUNT(1) AS n FROM c WHERE c.id < 3 GROUP BY c.city, c.age",
                 r#"[{"city":"Seattle","age":30,"n":1},{"city":"Seattle","age":25,"n":1}]"#,
             ),
-            ("SELECT c.city FROM c GROUP BY c.city", r#"[{"city":"Seattle"},{"city":"NY"},{}]"#),
-            ("SELECT VALUE c.city FROM c GROUP BY c.city", r#"["Seattle","NY"]"#),
+            // one GROUP BY expression: the groups come in ascending order of the key, undefined first
+            ("SELECT c.city FROM c GROUP BY c.city", r#"[{},{"city":"NY"},{"city":"Seattle"}]"#),
+            ("SELECT VALUE c.city FROM c GROUP BY c.city", r#"["NY","Seattle"]"#),
             ("SELECT COUNT(1) AS n FROM c WHERE false GROUP BY c.city", "[]"),
             (
                 "SELECT VALUE {city: c.city, n: COUNT(1)} FROM c GROUP BY c.city",
-                r#"[{"city":"Seattle","n":2},{"city":"NY","n":2},{"n":1}]"#,
+                r#"[{"n":1},{"city":"NY","n":2},{"city":"Seattle","n":2}]"#,
             ),
-            ("SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city ORDER BY c.city", r#"[{"city":"NY","n":2},{"city":"Seattle","n":2}]"#),
+            (
+                "SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city ORDER BY c.city",
+                r#"[{"n":1},{"city":"NY","n":2},{"city":"Seattle","n":2}]"#,
+            ),
             ("SELECT c.city, COUNT(1) AS n FROM c GROUP BY c.city OFFSET 1 LIMIT 1", r#"[{"city":"NY","n":2}]"#),
-            ("SELECT TOP 1 c.city, COUNT(1) AS n FROM c GROUP BY c.city", r#"[{"city":"Seattle","n":2}]"#),
-            ("SELECT DISTINCT VALUE COUNT(1) FROM c GROUP BY c.city", "[2,1]"),
+            ("SELECT TOP 1 c.city, COUNT(1) AS n FROM c GROUP BY c.city", r#"[{"n":1}]"#),
+            ("SELECT DISTINCT VALUE COUNT(1) FROM c GROUP BY c.city", "[1,2]"),
         ],
     );
     // group-by page: the group of items without the field is the empty object
@@ -192,18 +198,15 @@ fn order_by_cross_type() {
     check_table(
         &d,
         &[
-            ("SELECT VALUE c.id FROM c ORDER BY c.v", r#"["null","false","true","num2","num","str2","str","arr","obj"]"#),
-            ("SELECT VALUE c.id FROM c ORDER BY c.v DESC", r#"["obj","arr","str","str2","num","num2","true","false","null"]"#),
-            ("SELECT VALUE c.id FROM c ORDER BY c.v ASC", r#"["null","false","true","num2","num","str2","str","arr","obj"]"#),
+            ("SELECT VALUE c.id FROM c ORDER BY c.v", r#"["undef","null","false","true","num2","num","str2","str","arr","obj"]"#),
+            ("SELECT VALUE c.id FROM c ORDER BY c.v DESC", r#"["obj","arr","str","str2","num","num2","true","false","null","undef"]"#),
+            ("SELECT VALUE c.id FROM c ORDER BY c.v ASC", r#"["undef","null","false","true","num2","num","str2","str","arr","obj"]"#),
         ],
     );
-    // undefined values: excluded by default (Cosmos behaviour with the default index) ...
-    let mut opts = fixed_clock_opts();
+    // undefined values are part of the result: first when ascending, last when descending (a real account does the
+    // same with its default indexing policy)
+    let opts = fixed_clock_opts();
     let q = azemu_cosmos_sql::parse("SELECT VALUE c.id FROM c ORDER BY c.v").unwrap();
-    let got = q.execute(&d, &Default::default(), &opts).unwrap();
-    assert!(!got.contains(&json!("undef")));
-    // ... and sorted first when the switch is off
-    opts.order_by_excludes_undefined = false;
     let got = q.execute(&d, &Default::default(), &opts).unwrap();
     assert_eq!(got[0], json!("undef"));
     assert_eq!(got.len(), 10);
@@ -222,12 +225,9 @@ fn order_by_forms() {
             ("SELECT VALUE c.id FROM c ORDER BY c.id DESC", "[5,4,3,2,1]"),
             ("SELECT VALUE c.id FROM c ORDER BY c.age", "[2,1,5,3,4]"), // 25, 30, 35, 40, "x"
             ("SELECT VALUE c.id FROM c ORDER BY c.age DESC", "[4,3,5,1,2]"),
-            ("SELECT VALUE c.id FROM c ORDER BY c.city, c.age DESC", "[4,3,1,2]"), // id 5 has no city: excluded; "x" sorts after 40
-            ("SELECT VALUE c.id FROM c ORDER BY c.city DESC, c.id", "[1,2,3,4]"),
+            ("SELECT VALUE c.id FROM c ORDER BY c.city, c.age DESC", "[5,4,3,1,2]"), // id 5 has no city: first; "x" sorts after 40
+            ("SELECT VALUE c.id FROM c ORDER BY c.city DESC, c.id", "[1,2,3,4,5]"),
             ("SELECT VALUE c.id FROM c ORDER BY c.score", "[3,4,5,1,2]"), // null, 5, 7, 10, 20.5
-            ("SELECT VALUE c.id FROM c ORDER BY c.age * -1", "[3,5,1,2]"), // "x" * -1 is undefined: that row is excluded
-            ("SELECT VALUE c.id FROM c WHERE IS_NUMBER(c.age) ORDER BY c.age * -1", "[3,5,1,2]"),
-            ("SELECT VALUE c.id FROM c WHERE c.id < 4 ORDER BY LENGTH(c.city) DESC, c.id DESC", "[2,1,3]"),
             ("SELECT TOP 2 VALUE c.id FROM c ORDER BY c.id DESC", "[5,4]"),
             ("SELECT VALUE c.id FROM c ORDER BY c.id OFFSET 1 LIMIT 2", "[2,3]"),
             ("SELECT c.id, c.city FROM c WHERE c.id < 3 ORDER BY c.city ASC", r#"[{"id":1,"city":"Seattle"},{"id":2,"city":"Seattle"}]"#),
@@ -237,7 +237,6 @@ fn order_by_forms() {
                 r#"[{"id":2,"city":"Seattle","age":25,"score":20.5},{"id":1,"city":"Seattle","age":30,"score":10}]"#,
             ),
             ("SELECT VALUE c.id FROM c ORDER BY c.id ASC, c.age DESC", "[1,2,3,4,5]"),
-            ("SELECT VALUE c.id FROM c ORDER BY ABS(c.id - 3), c.id", "[3,2,4,1,5]"),
             ("select value c.id from c order by c.id desc", "[5,4,3,2,1]"),
         ],
     );
@@ -245,16 +244,32 @@ fn order_by_forms() {
     let ties = vec![json!({"i": 1, "k": 1}), json!({"i": 2, "k": 0}), json!({"i": 3, "k": 1}), json!({"i": 4, "k": 0})];
     check_table(
         &ties,
-        &[("SELECT VALUE c.i FROM c ORDER BY c.k", "[2,4,1,3]"), ("SELECT VALUE c.i FROM c ORDER BY c.k DESC", "[1,3,2,4]")],
+        &[
+            ("SELECT VALUE c.i FROM c ORDER BY c.k", "[2,4,1,3]"),
+            // all keys DESC: equal keys come last-arrived first (a backwards scan of the index)
+            ("SELECT VALUE c.i FROM c ORDER BY c.k DESC", "[3,1,4,2]"),
+        ],
     );
+    // ORDER BY takes a path of the document only (Azure: 2206 for an expression or a function)
+    for sql in [
+        "SELECT VALUE c.id FROM c ORDER BY c.age * -1",
+        "SELECT VALUE c.id FROM c ORDER BY LENGTH(c.city) DESC, c.id DESC",
+        "SELECT VALUE c.id FROM c ORDER BY ABS(c.id - 3)",
+    ] {
+        let e = err(sql);
+        assert_eq!((e.code.as_str(), e.shape), ("2206", azemu_cosmos_sql::Shape::Coded), "{sql}");
+        assert_eq!(e.message, "Unsupported ORDER BY clause. ORDER BY item expression could not be mapped to a document path.");
+    }
     // numbers: integers and floats compare by value; strings by code point
     let n = vec![json!({"v": 10}), json!({"v": 2}), json!({"v": 1.5}), json!({"v": -3}), json!({"v": 2.0}), json!({"v": 1e20})];
     check_table(&n, &[("SELECT VALUE c.v FROM c ORDER BY c.v", "[-3,1.5,2,2.0,10,1e20]")]);
     let s = vec![json!({"v": "b"}), json!({"v": "B"}), json!({"v": "a"}), json!({"v": ""}), json!({"v": "é"}), json!({"v": "ab"})];
     check_table(&s, &[("SELECT VALUE c.v FROM c ORDER BY c.v", r#"["","B","a","ab","b","é"]"#)]);
-    // ORDER BY on joined values
+    // ORDER BY a value of a JOIN is refused, ORDER BY a property of the document is not
     let j = vec![json!({"id": 1, "t": [3, 1]}), json!({"id": 2, "t": [2]})];
-    check_table(&j, &[("SELECT c.id, x FROM c JOIN x IN c.t ORDER BY x", r#"[{"id":1,"x":1},{"id":2,"x":2},{"id":1,"x":3}]"#)]);
+    let e = err("SELECT c.id, x FROM c JOIN x IN c.t ORDER BY x");
+    assert_eq!((e.shape, e.message.as_str()), (azemu_cosmos_sql::Shape::Gateway, "Order-by over correlated collections is not supported."));
+    check_table(&j, &[("SELECT c.id, x FROM c JOIN x IN c.t ORDER BY c.id DESC", r#"[{"id":2,"x":2},{"id":1,"x":1},{"id":1,"x":3}]"#)]);
 }
 
 #[test]
@@ -271,15 +286,16 @@ fn distinct_top_offset_limit() {
         &d,
         &[
             ("SELECT DISTINCT VALUE c.a FROM c", "[1,2]"),
-            ("SELECT DISTINCT c.a FROM c", r#"[{"a":1},{"a":2},{}]"#),
+            // one value: ascending, as Azure reads the index
+            ("SELECT DISTINCT c.a FROM c", r#"[{},{"a":1},{"a":2}]"#),
             ("SELECT DISTINCT c.a, c.b FROM c", r#"[{"a":1,"b":"x"},{"a":2,"b":"x"},{"a":1,"b":"y"},{"b":"x"}]"#),
             ("SELECT DISTINCT VALUE c FROM c", r#"[{"a":1,"b":"x"},{"a":2,"b":"x"},{"a":1,"b":"y"},{"b":"x"}]"#),
             ("SELECT DISTINCT VALUE [c.a, c.b] FROM c", r#"[[1,"x"],[2,"x"],[1,"y"],["x"]]"#),
             ("SELECT DISTINCT TOP 2 VALUE c.b FROM c", r#"["x","y"]"#),
-            ("SELECT DISTINCT VALUE {\"b\": c.b, \"a\": c.a} FROM c", r#"[{"b":"x","a":1},{"b":"x","a":2},{"b":"y","a":1},{"b":"x"}]"#),
+            ("SELECT DISTINCT VALUE {\"b\": c.b, \"a\": c.a} FROM c", r#"[{"b":"x","a":1},{"b":"y","a":1},{"b":"x","a":2},{"b":"x"}]"#),
             ("SELECT TOP 3 VALUE c.a FROM c", "[1,1,2]"),
             ("SELECT TOP 100 VALUE c.a FROM c WHERE c.a = 2", "[2]"),
-            ("SELECT TOP (2) VALUE c.a FROM c", "[1,1]"),
+            ("SELECT TOP 2 VALUE c.a FROM c", "[1,1]"),
             ("SELECT VALUE c.a FROM c OFFSET 2 LIMIT 2", "[2,1]"),
             ("SELECT VALUE c.a FROM c OFFSET 0 LIMIT 0", "[]"),
             ("SELECT VALUE c.a FROM c OFFSET 100 LIMIT 3", "[]"),
@@ -288,4 +304,12 @@ fn distinct_top_offset_limit() {
             ("SELECT VALUE c.b FROM c ORDER BY c.b OFFSET 3 LIMIT 3", r#"["x","x","y"]"#),
         ],
     );
+    // TOP and OFFSET LIMIT take a number or a parameter, not an expression
+    for sql in
+        ["SELECT TOP (2) VALUE c.a FROM c", "SELECT TOP -1 VALUE c.a FROM c", "SELECT VALUE c.a FROM c ORDER BY c.a OFFSET -1 LIMIT 1"]
+    {
+        assert_eq!(err(sql).code, "SC1001", "{sql}");
+    }
+    assert_eq!(err("SELECT TOP 1.5 VALUE c.a FROM c").code, "SC2060");
+    assert_eq!(err("SELECT TOP 1 VALUE c.a FROM c OFFSET 0 LIMIT 1").code, "SC2205");
 }

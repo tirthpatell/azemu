@@ -41,7 +41,7 @@ async fn fixed_state(svc: Arc<QueueService>) -> Q {
     // never expires, so the fixture does not go stale
     assert_eq!(q.put("work", "first", "messagettl=-1").await.status, 201);
     assert_eq!(q.put("work", "second", "messagettl=-1").await.status, 201);
-    // one message dequeued once (hidden for a long time, still far in the future when the test reads it)
+    // one message dequeued once and hidden for seven days, the longest a queue allows (the reading test knows the date)
     let got = q.get("work", "numofmessages=1&visibilitytimeout=604800").await;
     assert_eq!(got.status, 200);
     q
@@ -78,13 +78,28 @@ async fn version_1_files_still_load() {
     let meta = q.send("GET", "/work?comp=metadata", &[], "").await;
     assert_eq!(meta.header("x-ms-meta-owner"), Some("alice"));
     assert_eq!(meta.header("x-ms-approximate-messages-count"), Some("2"));
-    // the message that was dequeued is hidden, the other one is visible with its text
+    // The message that was dequeued is hidden for seven days from the day the fixture was written (the longest a queue
+    // allows), until 20 November 2026 12:22:39 GMT. Before that only the other one is visible; afterwards both are, and
+    // the first one shows that it was dequeued once. The test must not depend on the day it runs.
     let peek = q.peek("work", "numofmessages=32").await.text();
-    assert_eq!(tags(&peek, "MessageText"), vec!["second"], "{peek}");
+    if unix_now() < FIRST_IS_VISIBLE_FROM {
+        assert_eq!(tags(&peek, "MessageText"), vec!["second"], "{peek}");
+    } else {
+        let mut seen: Vec<(String, String)> = tags(&peek, "MessageText").into_iter().zip(tags(&peek, "DequeueCount")).collect();
+        seen.sort();
+        assert_eq!(seen, [("first".to_string(), "1".to_string()), ("second".to_string(), "0".to_string())], "{peek}");
+    }
     let acl = q.send("GET", "/work?comp=acl", &[], "").await.text();
     assert!(acl.contains("<Id>p1</Id>") && acl.contains("<Permission>raup</Permission>"), "{acl}");
     let props = q.send("GET", "/?restype=service&comp=properties", &[], "").await.text();
     assert!(props.contains("https://example.com") && props.contains("<MaxAgeInSeconds>60</MaxAgeInSeconds>"), "{props}");
     assert_eq!(q.peek("empty", "").await.status, 200);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 20 November 2026 12:22:39 GMT, a few seconds late so that a run at that very moment is not caught between the two.
+const FIRST_IS_VISIBLE_FROM: i64 = 1_795_177_365;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }

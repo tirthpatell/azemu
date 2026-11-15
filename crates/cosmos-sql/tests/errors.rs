@@ -26,13 +26,7 @@ fn syntax_error_positions() {
         ("SELECT c.id FROM c ORDER c.id", "c", 25, 26),
         ("SELECT c.id FROM c GROUP c.id", "c", 25, 26),
         ("SELECT 1 FROM c OFFSET 1", "", 24, 24),
-        ("SELECT 'abc", "'abc", 7, 11),
-        ("SELECT \"abc", "\"abc", 7, 11),
-        ("SELECT 1 ; ", ";", 9, 10),
-        ("SELECT 1 # x", "#", 9, 10),
-        ("SELECT @", "@", 7, 8),
         ("SELECT 0x", "0x", 7, 9),
-        ("SELECT 'a\\q'", "\\q", 9, 11),
         ("SELECT 'a\\u12'", "\\u", 9, 11),
         ("SELECT VALUE", "", 12, 12),
         ("SELECT c.id AS FROM c", "FROM", 15, 19),
@@ -54,12 +48,40 @@ fn syntax_error_positions() {
     ] {
         let e = err(q);
         let got = (e.kind, e.code.clone(), e.message.clone(), e.start, e.end);
-        let want = (ErrorKind::Syntax, "SC1001".to_string(), format!("Syntax error, incorrect syntax near '{near}'."), s, end);
+        // the end of the text is `SC1002`, as on Azure
+        let want = if near.is_empty() {
+            (ErrorKind::Syntax, "SC1002".to_string(), "Syntax error, unexpected end-of-file.".to_string(), s, end)
+        } else {
+            (ErrorKind::Syntax, "SC1001".to_string(), format!("Syntax error, incorrect syntax near '{near}'."), s, end)
+        };
         if got != want {
             bad.push(format!("{q:?}\n   want {want:?}\n   got  {got:?}"));
         }
     }
     assert!(bad.is_empty(), "{}", bad.join("\n"));
+}
+
+/// Codes of the tokens the language cannot read (a real account answers these, November 2026).
+#[test]
+fn token_errors() {
+    for (q, code, msg, s, end) in [
+        ("SELECT 'abc", "SC1012", "Syntax error, invalid string literal token ''abc'.", 7, 11),
+        ("SELECT \"abc", "SC1012", "Syntax error, invalid string literal token '\"abc'.", 7, 11),
+        ("SELECT 1 ; ", "SC1010", "Syntax error, invalid token ';'.", 9, 10),
+        ("SELECT 1 # x", "SC1010", "Syntax error, invalid token '#'.", 9, 10),
+        ("SELECT @", "SC1010", "Syntax error, invalid token '@'.", 7, 8),
+        ("SELECT @1x", "SC1010", "Syntax error, invalid token '@'.", 7, 8),
+        ("SELECT 1e", "SC1011", "Syntax error, invalid numeric value token '1e'.", 7, 9),
+        ("SELECT 1e400", "SC1011", "Syntax error, invalid numeric value token '1e400'.", 7, 12),
+        ("SELECT *", "SC1021", "Syntax error, 'SELECT *' is not valid if FROM clause is omitted.", 7, 8),
+    ] {
+        let e = err(q);
+        assert_eq!((e.code.as_str(), e.message.as_str(), e.start, e.end), (code, msg, s, end), "{q}");
+    }
+    // a comment runs to the end of the line; an unknown escape stands for the character
+    assert_eq!(run("SELECT VALUE 1 -- one\n + 2", &[]), vec![json!(3)]);
+    assert_eq!(run("SELECT VALUE 5--3", &[]), vec![json!(5)]);
+    assert_eq!(run("SELECT VALUE 'a\\qb'", &[]), vec![json!("aqb")]);
 }
 
 #[test]
@@ -84,35 +106,56 @@ fn positions_are_in_characters() {
 #[test]
 fn semantic_errors() {
     for (q, code) in [
-        ("SELECT * FROM c WHERE SUM(c.a) > 1", "SC2102"),
-        ("SELECT VALUE SUM(COUNT(1)) FROM c", "SC2104"),
-        ("SELECT c.a FROM c GROUP BY COUNT(1)", "SC2102"),
-        ("SELECT * FROM c GROUP BY c.a", "SC2103"),
+        ("SELECT * FROM c WHERE SUM(c.a) > 1", "SC2104"),
+        ("SELECT VALUE SUM(COUNT(1)) FROM c", "SC2101"),
+        ("SELECT c.a FROM c GROUP BY COUNT(1)", "SC2111"),
+        ("SELECT * FROM c GROUP BY c.a", "SC2041"),
         ("SELECT * FROM c, d", "SC1001"),
-        ("SELECT TOP 1 * FROM c OFFSET 1 LIMIT 1", "SC1001"),
-        ("SELECT * FROM c JOIN d IN c.a", "SC2103"),
-        ("SELECT VALUE c FROM c JOIN c IN c.a", "SC2002"),
+        ("SELECT TOP 1 * FROM c OFFSET 1 LIMIT 1", "SC2205"),
+        ("SELECT * FROM c JOIN d IN c.a", "SC2042"),
+        ("SELECT VALUE c FROM c JOIN c IN c.a", "SC2021"),
         ("SELECT x.y", "SC2001"),
-        ("SELECT VALUE COUNT(1) FROM c OFFSET COUNT(1) LIMIT 1", "SC2102"),
+        ("SELECT c.id, c.id FROM c", "SC2022"),
+        ("SELECT c.id, COUNT(1) FROM c", "SC2102"),
+        ("SELECT UPPER(c.a, c.a) FROM c", "SC2050"),
+        ("SELECT c.a FROM c WHERE c.a LIKE 'x' ESCAPE '!!'", "SC2207"),
+        ("SELECT c.a, (SELECT VALUE x FROM x IN c.arr) FROM c", "SC2201"),
+        ("SELECT c.select FROM c", "SC1001"),
+        ("SELECT VALUE c.arr[1 + 1] FROM c", "SC2990"),
     ] {
         let e = err(q);
         assert_eq!(e.code, code, "{q}: {e}");
     }
     let e = err("SELECT * FROM c WHERE SUM(c.a) > 1");
     assert_eq!((e.start, e.end), (22, 30));
+    // Azure lists every problem it finds: the second source repeats `c`, and `SELECT *` needs one source
+    let e = err("SELECT * FROM c JOIN c IN c.arr");
+    assert_eq!((e.code.as_str(), e.start, e.end), ("SC2021", 21, 22));
+    assert_eq!((e.more[0].code.as_str(), e.more[0].start, e.more[0].end), ("SC2042", 7, 8));
+    // eleven JOINs, counted over the whole query
+    let sql = format!("SELECT 1 FROM c {}", (0..11).map(|i| format!("JOIN j{i} IN c.a")).collect::<Vec<_>>().join(" "));
+    let e = err(&sql);
+    assert_eq!((e.code.as_str(), e.start, e.end), ("SC3002", 0, sql.chars().count()));
+    // no more than ten
+    let ok = format!("SELECT 1 FROM c {}", (0..10).map(|i| format!("JOIN j{i} IN c.a")).collect::<Vec<_>>().join(" "));
+    assert!(parse(&ok).is_ok());
 }
 
 #[test]
 fn evaluation_errors() {
-    for q in [
-        "SELECT VALUE @a",
-        "SELECT TOP -1 VALUE 1",
-        "SELECT VALUE 1 OFFSET 1.5 LIMIT 1",
-        "SELECT VALUE 1 OFFSET -1 LIMIT 1",
-        "SELECT TOP 'a' VALUE 1",
+    // a parameter nobody supplied is undefined, not an error
+    assert_eq!(run("SELECT VALUE @a", &[]), Vec::<Value>::new());
+    // a count that is not a whole number from 0 up is an error on the text of the count
+    for (q, code, start) in [
+        ("SELECT TOP @n VALUE 1", "SC2060", 11),
+        ("SELECT VALUE 1 OFFSET @n LIMIT 1", "SC2062", 22),
+        ("SELECT VALUE 1 OFFSET 0 LIMIT @n", "SC2061", 30),
     ] {
-        let e = err(q);
-        assert_eq!(e.kind, ErrorKind::Evaluation, "{q}: {e}");
+        for v in [json!(-1), json!(1.5), json!("a"), json!(null)] {
+            let p = Params::from_cosmos(&json!([{"name": "@n", "value": v}]));
+            let e = parse(q).unwrap().execute(&[] as &[Value], &p, &EvalOptions::default()).unwrap_err();
+            assert_eq!((e.code.as_str(), e.start), (code, start), "{q} with {v}");
+        }
     }
 }
 

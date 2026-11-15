@@ -47,20 +47,87 @@ const fn unsupported(name: &'static str) -> FuncSpec {
 static MISC: &[FuncSpec] = &[
     f("IIF", 3, 3, iif),
     fu("CHOOSE", 2, VARIADIC, choose),
-    unsupported("DOCUMENTID"),
+    f("DOCUMENTID", 1, 1, document_id),
     unsupported("ST_DISTANCE"),
     unsupported("ST_WITHIN"),
     unsupported("ST_INTERSECTS"),
     unsupported("ST_ISVALID"),
     unsupported("ST_ISVALIDDETAILED"),
     unsupported("ST_AREA"),
-    unsupported("VECTORDISTANCE"),
+    f("VECTORDISTANCE", 2, 4, vector_distance),
     unsupported("FULLTEXTCONTAINS"),
     unsupported("FULLTEXTCONTAINSALL"),
     unsupported("FULLTEXTCONTAINSANY"),
     unsupported("FULLTEXTSCORE"),
-    unsupported("RRF"),
 ];
+
+/// `DOCUMENTID(c)`: the number inside the `_rid` of the item (its counter in the container).
+fn document_id(_: &Ctx, a: &[Val]) -> Val {
+    let rid = match a[0].get_prop("_rid") {
+        Val::Str(s) => s,
+        _ => return Val::Undefined,
+    };
+    // standard base64 (`-` stands for `/`); the counter is in the first seven of the last eight bytes, little endian
+    let mut bytes: Vec<u8> = Vec::new();
+    let (mut acc, mut bits) = (0u32, 0u32);
+    for ch in rid.chars() {
+        let v = match ch {
+            'A'..='Z' => ch as u32 - 'A' as u32,
+            'a'..='z' => ch as u32 - 'a' as u32 + 26,
+            '0'..='9' => ch as u32 - '0' as u32 + 52,
+            '+' => 62,
+            '/' | '-' => 63,
+            '=' => break,
+            _ => return Val::Undefined,
+        };
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    if bytes.len() < 16 {
+        return Val::Undefined;
+    }
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&bytes[bytes.len() - 8..]);
+    eight[7] = 0;
+    Val::int(i64::from_le_bytes(eight))
+}
+
+/// `VectorDistance(a, b [, bruteForce [, {distanceFunction: 'cosine' | 'dotproduct' | 'euclidean'}]])` over two numeric arrays of the
+/// same length. There is no vector index here: every call is a brute force one.
+fn vector_distance(_: &Ctx, a: &[Val]) -> Val {
+    let nums = |v: &Val| -> Option<Vec<f64>> { v.as_arr()?.iter().map(Val::as_f64).collect() };
+    let (x, y) = match (nums(&a[0]), nums(&a[1])) {
+        (Some(x), Some(y)) if x.len() == y.len() && !x.is_empty() => (x, y),
+        _ => return Val::Undefined,
+    };
+    let function = match a.get(3) {
+        None => "cosine".to_string(),
+        Some(o) => match o.get_prop("distanceFunction") {
+            Val::Str(s) => s.to_ascii_lowercase(),
+            Val::Undefined => "cosine".to_string(),
+            _ => return Val::Undefined,
+        },
+    };
+    let dot: f64 = x.iter().zip(&y).map(|(p, q)| p * q).sum();
+    match function.as_str() {
+        "dotproduct" => Val::num(dot),
+        "euclidean" => Val::num(x.iter().zip(&y).map(|(p, q)| (p - q) * (p - q)).sum::<f64>().sqrt()),
+        "cosine" => {
+            let nx: f64 = x.iter().map(|p| p * p).sum::<f64>().sqrt();
+            let ny: f64 = y.iter().map(|p| p * p).sum::<f64>().sqrt();
+            if nx == 0.0 || ny == 0.0 {
+                return Val::Undefined;
+            }
+            Val::num(dot / (nx * ny))
+        }
+        _ => Val::Undefined,
+    }
+}
 
 fn iif(_: &Ctx, a: &[Val]) -> Val {
     if a[0].as_bool() == Some(true) {

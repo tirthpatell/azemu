@@ -20,6 +20,19 @@ pub trait Service: Send + Sync + 'static {
     /// Unique lowercase name: "blob", "queue", "keyvault". Used by --pin and logs.
     fn name(&self) -> &'static str;
     fn mounts(&self) -> Vec<Mount>;
+    /// Does this service take a request for `path` on the gateway when the host names no service (`localhost`, an IP
+    /// address, a bare name) and no [`Mount::PathPrefix`] matches? Asked only where the gateway would otherwise answer
+    /// "No service matched", so a `true` never changes where a request goes today. For a service whose clients build
+    /// their URLs from a host alone and so cannot carry a path prefix (the Entra token paths `/{tenant}/oauth2/v2.0/token`).
+    /// The path is the raw path as sent; the default is `false`.
+    fn claims_root_path(&self, _path: &str) -> bool {
+        false
+    }
+    /// The path shapes [`claims_root_path`](Service::claims_root_path) accepts, for the "no service matched" message
+    /// (`/{tenant}/oauth2/v2.0/token`). Empty by default.
+    fn root_path_forms(&self) -> Vec<&'static str> {
+        Vec::new()
+    }
     /// On a pinned listener, take the account from the first path segment
     /// (Azurite style: `http://127.0.0.1:10000/devstoreaccount1/container`).
     fn path_style_on_pinned(&self) -> bool {

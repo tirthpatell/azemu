@@ -32,7 +32,7 @@ impl EhError {
             condition::NOT_FOUND,
             404,
             format!(
-                "The messaging entity '{}' could not be found. To know more visit https://aka.ms/sbResourceMgrExceptions.  TrackingId:{}, SystemTracker:{}:{}, Timestamp:{}",
+                "The messaging entity '{}' could not be found. To know more visit https://aka.ms/sbResourceMgrExceptions.  TrackingId:{}, SystemTracker:{}.servicebus.windows.net:{}, Timestamp:{}",
                 entity_uri(ns, path),
                 tracking_id(),
                 ns,
@@ -42,11 +42,29 @@ impl EhError {
         )
     }
 
-    pub fn bad_partition(pid: &str) -> EhError {
+    /// A partition id the event hub does not have (checked in November 2026: the text is the same for `4`, `99`, `-1` and `abc`).
+    /// A link (`link`: a sender or receiver attach) gets a second line naming the parameter; `$management` does not.
+    pub fn bad_partition(partitions: usize, link: bool) -> EhError {
+        let mut text = format!(
+            "The specified partition is invalid for an EventHub partition sender or receiver. It should be between 0 and {}.",
+            partitions.saturating_sub(1)
+        );
+        if link {
+            text.push_str("\r\nParameter name: PartitionId");
+        }
+        EhError::new(ARGUMENT_OUT_OF_RANGE, 400, text)
+    }
+
+    /// A start position past the end: `what` is "sequence number" or "offset". `tracker` is `{namespace}:eventhub:{hub}~{partition}`.
+    pub fn position_past_the_end(what: &str, value: i64, last: i64, tracker: &str) -> EhError {
         EhError::new(
-            ARGUMENT_OUT_OF_RANGE,
+            ARGUMENT_ERROR,
             400,
-            format!("The specified partition is invalid for an EventHub partition sender or receiver. Partition '{pid}' does not exist. TrackingId:{}", tracking_id()),
+            format!(
+                "The supplied {what} '{value}' is invalid. The last {what} in the system is '{last}' TrackingId:{}, SystemTracker:{tracker}, Timestamp:{}",
+                tracking_id(),
+                timestamp_now()
+            ),
         )
     }
 

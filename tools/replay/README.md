@@ -46,8 +46,10 @@ were made in accounts that were set up before the recording, so these packages n
 | Package | Setting | Why |
 |---|---|---|
 | blob | `AZEMU_BLOB_VERSIONING=1` | the recordings come from storage accounts with blob versioning turned on: `x-ms-version-id` answers, versions in listings, deletes that keep a version. Without it a new account has versioning off, as on Azure |
+| blob, queue, table, datalake | `AZEMU_LOOSE_AUTH=1` | the recordings carry placeholder signatures (`SharedKey <account>:replay` that the tool adds, `sig=Sanitized`) and the dates of the day they were made. The emulator refuses both by default, as Azure does (a signature that is not base64 is 400 or 403, a Shared Key date more than 15 minutes old is 403); with the setting it checks no signature and no date |
 | eventgrid | `AZEMU_EVENTGRID_AUTOCREATE=1` | the recorded publishes go to topics that were made outside the recordings (in the Azure portal); without auto-creation they answer 404 and the score falls from 100% to 8% |
-| every other package | none | queue, table, key vault, app configuration, Service Bus (management API), Data Lake and Resource Manager recordings create what they use. Data Lake was measured with and without `AZEMU_BLOB_VERSIONING=1`: the same numbers and the same values (94.79 / 97.28 then; 95.03 / 97.52 since the replay keeps the order of the seconds, see "Seconds" below) |
+| servicebus | `AZEMU_SERVICEBUS_TIER=standard` | the recordings come from a Standard namespace, which takes 256 KB as the one message size; the emulator takes the sizes of every tier unless told |
+| every other package | none | key vault, app configuration and Resource Manager recordings create what they use. Data Lake was measured with and without `AZEMU_BLOB_VERSIONING=1`: the same numbers and the same values (94.79 / 97.28 then; 95.03 / 97.52 since the replay keeps the order of the seconds, see "Seconds" below) |
 
 Not `AZEMU_LENIENT` for everything: it would also turn on Service Bus, Event Hubs and Event Grid
 auto-creation for packages that must not have them, and a score would then hide which convenience it needs.

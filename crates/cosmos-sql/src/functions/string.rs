@@ -127,6 +127,10 @@ fn last_index_of(_: &Ctx, a: &[Val]) -> Val {
     };
     let hay: Vec<char> = s.chars().collect();
     let needle: Vec<char> = t.chars().collect();
+    if needle.is_empty() && a.len() == 2 {
+        // an empty needle is found at the last position (length - 1), as on Azure
+        return Val::int((hay.len() as i64 - 1).max(0));
+    }
     let start = match a.get(2) {
         None => hay.len() as i64 - 1,
         Some(v) => match v.as_i64() {
@@ -148,7 +152,8 @@ fn last_index_of(_: &Ctx, a: &[Val]) -> Val {
 
 fn count_arg(v: &Val) -> Option<usize> {
     let n = v.as_f64()?;
-    if n.is_nan() {
+    // a fraction is no count: the result is undefined
+    if n.is_nan() || n.fract() != 0.0 {
         return None;
     }
     Some(if n <= 0.0 {
@@ -210,7 +215,8 @@ fn replace(ctx: &Ctx, a: &[Val]) -> Val {
     match (&a[0], &a[1], &a[2]) {
         (Val::Str(s), Val::Str(from), Val::Str(to)) => {
             if from.is_empty() {
-                Val::Str(s.clone())
+                // nothing to look for: undefined
+                Val::Undefined
             } else {
                 // every match is replaced by `to`: say no before building a string that cannot be stored
                 let matches = s.matches(&**from).count();
@@ -231,7 +237,7 @@ fn replicate(_: &Ctx, a: &[Val]) -> Val {
         (Val::Str(s), Some(n)) => (s, n),
         _ => return Val::Undefined,
     };
-    if !n.is_finite() || n < 0.0 {
+    if !n.is_finite() || n < 0.0 || n.fract() != 0.0 {
         return Val::Undefined;
     }
     let n = n.trunc();
@@ -250,10 +256,14 @@ fn substring(_: &Ctx, a: &[Val]) -> Val {
         (Some(x), Some(y)) if !x.is_nan() && !y.is_nan() => (x, y),
         _ => return Val::Undefined,
     };
-    if len < 0.0 {
+    if start.fract() != 0.0 || len.fract() != 0.0 {
+        return Val::Undefined;
+    }
+    // a negative start or length gives the empty string (Azure does not clamp the start to 0)
+    if len < 0.0 || start < 0.0 {
         return Val::str("");
     }
-    let start = if start < 0.0 { 0 } else { start as usize };
+    let start = start as usize;
     let len = if len >= usize::MAX as f64 { usize::MAX } else { len as usize };
     Val::string(s.chars().skip(start).take(len).collect())
 }
@@ -273,10 +283,29 @@ pub(crate) fn to_text(v: &Val) -> String {
                     "-Infinity".into()
                 }
             } else {
-                v.to_json().map(|j| j.to_string()).unwrap_or_default()
+                v.to_json().map(|j| pad_exponent(j.to_string())).unwrap_or_default()
             }
         }
         _ => v.to_json().map(|j| j.to_string()).unwrap_or_default(),
+    }
+}
+
+/// `1.5e-7` is `1.5e-07` on Azure: at least two digits in the exponent.
+fn pad_exponent(s: String) -> String {
+    match s.find(['e', 'E']) {
+        Some(i) => {
+            let (m, e) = s.split_at(i);
+            let (sign, digits) = match e[1..].strip_prefix(['-', '+']) {
+                Some(d) => (&e[1..2], d),
+                None => ("", &e[1..]),
+            };
+            if digits.len() < 2 {
+                format!("{m}e{sign}{digits:0>2}")
+            } else {
+                s
+            }
+        }
+        None => s,
     }
 }
 

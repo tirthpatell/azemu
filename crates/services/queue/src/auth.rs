@@ -1,15 +1,17 @@
 //! Who may do what.
 //!
-//! Shared Key and SAS signatures are verified for `devstoreaccount1` (policy in
-//! `azemu_core::storage::sig`: placeholders, other accounts and unknown newer layouts
-//! are not checked; `AZEMU_LOOSE_AUTH=1` turns it off). What a SAS says about itself is
+//! The form of a signature is checked for every account and the signature itself for `devstoreaccount1` (policy in
+//! `azemu_core::storage::sig`: other accounts and unknown newer layouts are not compared;
+//! `AZEMU_LOOSE_AUTH=1` turns it off). What a SAS says about itself is
 //! honoured for every account: its start and expiry, the services and resource types of an account SAS, its permissions,
 //! its protocol, and (through `si`) the stored access policy of the queue.
 
 use azemu_core::storage::auth::{classify, Auth, SasParams};
-use azemu_core::storage::sig::{verify_sas, verify_shared_key, SasTarget, StorageService};
+use azemu_core::storage::credentials::{bad_authorization, sip_matches, BadAuthorization};
+use azemu_core::storage::sig::{verify_sas, verify_shared_key, Rejection, SasTarget, StorageService};
 use azemu_core::storage::StorageAccounts;
-use azemu_core::time::{parse_iso8601, rfc1123};
+use azemu_core::time::{parse_iso8601, rfc1123, OffsetDateTime};
+
 use azemu_core::{Request, Response};
 
 use crate::errors;
@@ -57,17 +59,28 @@ pub fn policy_id(req: &Request) -> Option<String> {
 /// policies say about the `si` the SAS names.
 pub fn authorize(req: &Request, op: Op, policy: Lookup<'_>, accounts: &StorageAccounts, queue: Option<&str>) -> Result<(), Response> {
     let ctx = &req.ctx;
+    let rejected = |why: Rejection<'_>| match why {
+        Rejection::AuthenticationFailed(detail) => errors::authentication_failed(ctx, Some(detail)),
+        Rejection::InvalidAuthenticationInfo => errors::invalid_authentication_info(ctx),
+    };
+    match bad_authorization(req) {
+        Some(BadAuthorization::Format) => return Err(errors::invalid_authentication_info(ctx)),
+        Some(BadAuthorization::UnknownScheme(scheme)) => {
+            return Err(errors::authentication_failed(ctx, Some(&format!("Authentication scheme {scheme} is not supported"))))
+        }
+        None => {}
+    }
     match classify(req) {
         Auth::Bearer => Ok(()),
         Auth::SharedKey { .. } => match verify_shared_key(req, StorageService::Queue, accounts).rejection() {
-            Some(detail) => Err(errors::authentication_failed(ctx, Some(detail))),
+            Some(why) => Err(rejected(why)),
             None => Ok(()),
         },
-        Auth::Anonymous => Err(errors::authentication_failed(ctx, None)),
+        Auth::Anonymous => Err(errors::no_credentials(req)),
         Auth::Sas(sas) => {
             let target = SasTarget::Queue { queue };
             match verify_sas(req, StorageService::Queue, accounts, &target).rejection() {
-                Some(detail) => Err(errors::authentication_failed(ctx, Some(detail))),
+                Some(why) => Err(rejected(why)),
                 None => check_sas(req, op, sas, policy),
             }
         }
@@ -110,13 +123,24 @@ fn check_sas(req: &Request, op: Op, mut sas: SasParams, policy: Lookup<'_>) -> R
         return Err(errors::authentication_failed(ctx, None));
     }
 
+    // A start that is not given is the time of the request. Azure refuses an expiry that is not after the start before it
+    // asks whether the SAS is valid now.
     let now = ctx.time;
+    let at = |v: &Option<String>| v.as_deref().and_then(parse_iso8601);
+    let (start, expiry) = (at(&sas.st), at(&sas.se));
+    if let Some(e) = expiry {
+        let from = start.unwrap_or(now);
+        if e <= from {
+            let detail = format!("Signed expiry time [{}] has to be after signed start time [{}]", rfc1123(e), rfc1123(from));
+            return Err(errors::authentication_failed(ctx, Some(&detail)));
+        }
+    }
     if sas.expired(now) || sas.not_yet_valid(now) {
-        let fmt = |v: &Option<String>| v.as_deref().and_then(parse_iso8601).map(rfc1123).unwrap_or_default();
+        let fmt = |t: Option<OffsetDateTime>| t.map(rfc1123).unwrap_or_default();
         let detail = format!(
             "Signature not valid in the specified time frame: Start [{}] - Expiry [{}] - Current [{}]",
-            fmt(&sas.st),
-            fmt(&sas.se),
+            fmt(start),
+            fmt(expiry),
             rfc1123(now)
         );
         return Err(errors::authentication_failed(ctx, Some(&detail)));
@@ -126,6 +150,14 @@ fn check_sas(req: &Request, op: Op, mut sas: SasParams, policy: Lookup<'_>) -> R
         let https_only = spr.split(',').map(str::trim).all(|p| p.eq_ignore_ascii_case("https"));
         if https_only && ctx.endpoint.scheme != "https" {
             return Err(errors::protocol_mismatch(ctx));
+        }
+    }
+
+    if let Some(sip) = sas.sip.as_deref().filter(|s| !s.is_empty()) {
+        match sip_matches(req, sip) {
+            Ok(true) => {}
+            Ok(false) => return Err(errors::authorization_failure(ctx)),
+            Err(detail) => return Err(errors::authentication_failed(ctx, Some(detail))),
         }
     }
 

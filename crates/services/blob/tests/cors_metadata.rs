@@ -59,7 +59,8 @@ async fn preflight_follows_the_cors_rules_on_blob_and_dfs() {
         assert_eq!(other_case.status, 403, "{label}");
         let missing = srv.send("OPTIONS", &url, &[("Origin", "https://example.com")], "").await;
         assert_eq!(missing.status, 400, "{label}");
-        assert_eq!(missing.header("x-ms-error-code"), Some("MissingRequiredHeader"));
+        assert_eq!(missing.header("x-ms-error-code"), Some("InvalidHeaderValue"));
+        assert!(missing.text().contains("<MessageDetails>Missing required CORS header Access-Control-Request-Method</MessageDetails>"));
     }
 
     // an actual request carrying a matching Origin gets the headers

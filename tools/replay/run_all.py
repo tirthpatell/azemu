@@ -49,19 +49,27 @@ VERSIONING = (
 )
 
 
+LOOSE_AUTH = (
+    {"AZEMU_LOOSE_AUTH": "1"},
+    "the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; "
+    "azemu refuses both by default, as Azure does",
+)
+
+
 #: report name, service in /_azemu/health, recordings directory (below SDK), `--exclude` substrings
 PACKAGES = [
-    Package("blob", "blob", "storage/azure-storage-blob", env=VERSIONING[0], why=VERSIONING[1]),
-    Package("queue", "queue", "storage/azure-storage-queue"),
-    Package("table", "table", "tables/azure-data-tables", ("cosmos",)),
+    Package("blob", "blob", "storage/azure-storage-blob", env={**VERSIONING[0], **LOOSE_AUTH[0]}, why=VERSIONING[1] + "; and " + LOOSE_AUTH[1]),
+    Package("queue", "queue", "storage/azure-storage-queue", env=LOOSE_AUTH[0], why=LOOSE_AUTH[1]),
+    Package("table", "table", "tables/azure-data-tables", ("cosmos",), env=LOOSE_AUTH[0], why=LOOSE_AUTH[1]),
     Package("keyvault-secrets", "keyvault", "keyvault/azure-keyvault-secrets"),
     Package("keyvault-keys", "keyvault", "keyvault/azure-keyvault-keys", ("mhsm",)),
     Package("keyvault-certificates", "keyvault", "keyvault/azure-keyvault-certificates"),
     Package("appconfig", "appconfig", "appconfiguration/azure-appconfiguration"),
     Package("eventgrid", "eventgrid", "eventgrid/azure-eventgrid", env={"AZEMU_EVENTGRID_AUTOCREATE": "1"},
             why="the recorded publishes go to topics that were made outside the recordings (in the Azure portal); without auto-creation they answer 404"),
-    Package("servicebus", "servicebus", "servicebus/azure-servicebus"),
-    Package("datalake", "dfs", "storage/azure-storage-file-datalake"),
+    Package("servicebus", "servicebus", "servicebus/azure-servicebus", env={"AZEMU_SERVICEBUS_TIER": "standard"},
+            why="the recordings come from a Standard namespace, which takes 256 KB as the one message size (the emulator takes what Premium takes too unless told)"),
+    Package("datalake", "dfs", "storage/azure-storage-file-datalake", env=LOOSE_AUTH[0], why=LOOSE_AUTH[1]),
     # the 34 azure-mgmt-* recordings (Resource Manager); the host management.azure.com is the emulator's `management`
     Package("arm", "arm", "*/azure-mgmt-*"),
 ]

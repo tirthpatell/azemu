@@ -79,7 +79,6 @@ fn select_projection_forms() {
             // key order of the output object follows the select list
             ("SELECT p.sku, p.id FROM p WHERE p.id = '1'", r#"[{"sku":"61506","id":"1"}]"#),
             // duplicate output names: the last wins
-            ("SELECT p.id AS a, p.sku AS a FROM p WHERE p.id = '1'", r#"[{"a":"61506"}]"#),
             // case-insensitive keywords, case-sensitive properties
             ("select value p.id from p where p.id = '1'", r#"["1"]"#),
             ("SELECT VALUE p.ID FROM p", "[]"),
@@ -285,7 +284,7 @@ fn where_order_offset_pages() {
         &prod,
         &[
             ("SELECT DISTINCT VALUE p.category FROM products p", r#"["Accessories","Tools"]"#),
-            ("SELECT DISTINCT p.category FROM products p", r#"[{"category":"Accessories"},{"category":"Tools"},{}]"#),
+            ("SELECT DISTINCT p.category FROM products p", r#"[{},{"category":"Accessories"},{"category":"Tools"}]"#),
         ],
     );
 }
@@ -324,10 +323,9 @@ fn parameters() {
         run_p("SELECT VALUE ARRAY_CONTAINS(@arr, p.id) FROM p", &d, json!([{"name":"@arr","value":["a","c"]}])),
         vec![json!(true), json!(false), json!(true)]
     );
-    // missing parameter, negative TOP
-    let e = err("SELECT VALUE @missing");
-    assert_eq!(e.kind, azemu_cosmos_sql::ErrorKind::Evaluation);
-    assert!(e.message.contains("@missing"), "{}", e.message);
+    // a parameter nobody supplied is undefined; two select items with one name are refused; a negative TOP is an error
+    assert_eq!(run_p("SELECT VALUE @missing", &[], json!([])), Vec::<Value>::new());
+    assert_eq!(err("SELECT p.id AS a, p.sku AS a FROM p").code, "SC2022");
     let e = try_run_p_err("SELECT TOP @n VALUE 1", json!([{"name":"@n","value":-1}]));
     assert!(e.message.contains("TOP"), "{}", e.message);
     let e = try_run_p_err("SELECT TOP @n VALUE 1", json!([{"name":"@n","value":"x"}]));

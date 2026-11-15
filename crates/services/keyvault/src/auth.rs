@@ -76,25 +76,26 @@ fn http_header(v: &str) -> azemu_core::http::HeaderValue {
     azemu_core::http::HeaderValue::from_str(v).unwrap_or_else(|_| azemu_core::http::HeaderValue::from_static(""))
 }
 
-/// `7.0`, `7.5-preview.1`, `2016-10-01`, `2025-07-01`, `2026-01-01-preview`.
+/// The versions the service knows (tried in November 2026; the newest it calls "the latest supported" is 7.6): `7.0` to `7.6`, each
+/// also as `-preview` and `-preview.<n>`, and these dates. Any other value, `1.0`, `7.7`, `2026-01-01`, is not recognised.
+const DATED_VERSIONS: [&str; 6] = ["2015-06-01", "2016-10-01", "2025-07-01", "2026-01-01-preview", "2026-03-01-preview", "2026-04-01"];
+pub const LATEST_VERSION: &str = "7.6";
+
 fn valid_api_version(v: &str) -> bool {
+    if DATED_VERSIONS.contains(&v) {
+        return true;
+    }
     let is_digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
     let (core, preview) = match v.split_once("-preview") {
         Some((c, rest)) => (c, Some(rest)),
         None => (v, None),
     };
     if let Some(rest) = preview {
-        let ok = rest.is_empty() || rest.strip_prefix('.').map(is_digits).unwrap_or(false);
-        if !ok {
+        if !(rest.is_empty() || rest.strip_prefix('.').map(is_digits).unwrap_or(false)) {
             return false;
         }
     }
-    let dotted: Vec<&str> = core.split('.').collect();
-    if dotted.len() == 2 && dotted.iter().all(|p| is_digits(p)) {
-        return true;
-    }
-    let dashed: Vec<&str> = core.split('-').collect();
-    dashed.len() == 3 && dashed[0].len() == 4 && dashed[1].len() == 2 && dashed[2].len() == 2 && dashed.iter().all(|p| is_digits(p))
+    matches!(core.split_once('.'), Some(("7", minor)) if matches!(minor, "0" | "1" | "2" | "3" | "4" | "5" | "6"))
 }
 
 /// Checks done before routing. `Some(response)` stops the request.
@@ -110,10 +111,10 @@ pub fn precheck(req: &Request) -> Option<Response> {
         return Some(challenge(req));
     }
     match req.query.get("api-version") {
-        None | Some("") => {
-            Some(crate::errors::bad_parameter("The api-version query parameter (?api-version=) is required for all requests."))
-        }
-        Some(v) if !valid_api_version(v) => Some(crate::errors::bad_parameter(&format!("Invalid api-version '{v}'."))),
+        None | Some("") => Some(crate::errors::bad_parameter("api-version must be specified")),
+        Some(v) if !valid_api_version(v) => Some(crate::errors::bad_parameter(&format!(
+            "The specified version ({v}) is not recognized. Consider using the latest supported version ({LATEST_VERSION})."
+        ))),
         Some(_) => None,
     }
 }
@@ -152,7 +153,50 @@ pub fn no_content() -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::challenge_resource;
+    use super::{challenge_resource, valid_api_version};
+
+    #[test]
+    fn the_versions_azure_recognises() {
+        for v in [
+            "7.0",
+            "7.1",
+            "7.2",
+            "7.3",
+            "7.4",
+            "7.5",
+            "7.6",
+            "7.0-preview",
+            "7.3-preview",
+            "7.5-preview.1",
+            "7.6-preview.2",
+            "2015-06-01",
+            "2016-10-01",
+            "2025-07-01",
+            "2026-01-01-preview",
+            "2026-03-01-preview",
+            "2026-04-01",
+        ] {
+            assert!(valid_api_version(v), "{v}");
+        }
+        for v in [
+            "1.0",
+            "1.1",
+            "7",
+            "7.",
+            "7.7",
+            "7.7-preview.1",
+            "7.10",
+            "7.6.1",
+            "7.6-beta",
+            "latest",
+            "2023-02-01",
+            "2025-07-01-preview",
+            "2026-01-01",
+            "2016-10-1",
+        ] {
+            assert!(!valid_api_version(v), "{v}");
+        }
+    }
 
     #[test]
     fn the_resource_is_the_request_domain() {

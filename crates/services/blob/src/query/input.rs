@@ -183,7 +183,8 @@ impl Delimited {
                     if s.avail().is_empty() {
                         return Err(ReadError {
                             name: "ParseError",
-                            message: "The record ends inside a quoted field.".into(),
+                            // as Azure words it: the byte is the end of the blob, the position of the error is 0
+                            message: format!("Unexpected end-of-input within record at [byte: {}]. ", s.total()),
                             position: start,
                         });
                     }

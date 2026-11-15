@@ -39,8 +39,9 @@ async fn make_container(srv: &TestServer) {
 }
 
 fn request_bytes(srv: &TestServer, name: &str, body: &str) -> Vec<u8> {
+    let date = azemu_core::time::rfc1123(azemu_core::time::OffsetDateTime::now_utc());
     format!(
-        "POST /cnt/{name}?comp=query HTTP/1.1\r\nHost: acct.blob.localhost:{}\r\nAuthorization: {AUTH}\r\nx-ms-version: 2023-11-03\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /cnt/{name}?comp=query HTTP/1.1\r\nHost: acct.blob.localhost:{}\r\nAuthorization: {AUTH}\r\nx-ms-date: {date}\r\nx-ms-version: 2023-11-03\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
         srv.port(),
         body.len()
     )

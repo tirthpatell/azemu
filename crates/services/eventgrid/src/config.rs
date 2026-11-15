@@ -69,6 +69,9 @@ pub struct TopicEntry {
     pub name: String,
     #[serde(default)]
     pub input_schema: InputSchema,
+    /// Access keys: with any, a publish to the topic must carry one of them (`aeg-sas-key`).
+    #[serde(default)]
+    pub keys: Vec<String>,
     #[serde(default)]
     pub subscriptions: Vec<SubEntry>,
 }
@@ -143,6 +146,7 @@ pub fn apply(cfg: &ConfigFile, st: &mut State, policy: &crate::WebhookPolicy) {
     let now = Now::now();
     for t in &cfg.topics {
         let mut h = Host::new(&t.name, TopicKind::Custom, t.input_schema);
+        h.keys = t.keys.iter().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
         add_subs(&mut h.subs, &t.subscriptions, TopicKind::Custom, &now, policy);
         st.hosts.insert(key(&t.name), h);
     }

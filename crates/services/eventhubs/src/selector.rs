@@ -28,11 +28,9 @@ pub enum StartPosition {
 }
 
 pub fn parse(expr: &str) -> Result<StartPosition, EhError> {
-    let bad = || {
-        EhError::argument(format!(
-            "The filter '{expr}' is not a valid Event Hubs selector. Expected e.g. amqp.annotation.x-opt-offset > '12'."
-        ))
-    };
+    // Azure refuses every filter it cannot read with `amqp:not-allowed` and this text (checked in November 2026, with an offset
+    // that is not a number)
+    let bad = || EhError::not_allowed(format!("The filter '{expr}' is not a valid amqp filter for EventHub entities"));
     let e = expr.trim();
     let op_at = e.find(['>', '<', '=']).ok_or_else(bad)?;
     let name = e[..op_at].trim();
@@ -46,14 +44,13 @@ pub fn parse(expr: &str) -> Result<StartPosition, EhError> {
     };
     let value = value.trim().trim_matches(|c| c == '\'' || c == '"').trim();
     let name = name.strip_prefix("amqp.annotation.").unwrap_or(name).to_ascii_lowercase();
-    let number =
-        |what: &str| value.parse::<i64>().map_err(|_| EhError::argument(format!("The {what} '{value}' in the filter is not a number.")));
+    let number = || value.parse::<i64>().map_err(|_| bad());
     match name.as_str() {
         "x-opt-offset" => {
             if value.eq_ignore_ascii_case("@latest") {
                 Ok(StartPosition::Latest)
             } else {
-                let v = number("offset")?;
+                let v = number()?;
                 if v < 0 {
                     Ok(StartPosition::Beginning)
                 } else {
@@ -61,8 +58,8 @@ pub fn parse(expr: &str) -> Result<StartPosition, EhError> {
                 }
             }
         }
-        "x-opt-sequence-number" => Ok(StartPosition::Sequence { value: number("sequence number")?, inclusive }),
-        "x-opt-enqueued-time" => Ok(StartPosition::Time { ms: number("enqueued time")?, inclusive }),
+        "x-opt-sequence-number" => Ok(StartPosition::Sequence { value: number()?, inclusive }),
+        "x-opt-enqueued-time" => Ok(StartPosition::Time { ms: number()?, inclusive }),
         _ => Err(bad()),
     }
 }

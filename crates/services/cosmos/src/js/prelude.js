@@ -201,16 +201,21 @@
     if (typeof a === "function") return "[function]";
     try { var s = plain(a); return s === undefined ? String(a) : s; } catch (e) { return "[value]"; }
   }
-  function log() {
-    var parts = [];
-    for (var i = 0; i < arguments.length; i++) parts.push(show(arguments[i]));
-    var line = parts.join(" ");
+  // Azure's console has `log` only (`console.info` is a TypeError there). A call logs its first argument as text
+  // (`String(value)`: `[object Object]` for an object) and the calls are joined with nothing between them (checked in
+  // November 2026: `console.log('hello'); console.log('n =', 3)` gives `hellon =`).
+  function log(a) {
+    var line = arguments.length === 0 ? "" : String(a);
     if (logged < MAX_LOG) {
-      logged += line.length + 1;
+      logged += line.length;
       host("log", line.length > 4096 ? line.slice(0, 4096) : line);
     }
   }
-  var consoleObj = { log: log, info: log, warn: log, error: log, debug: log };
+  var consoleObj = { log: log };
+  // Azure has no other method: calling one is a TypeError with its text (here the method exists only to throw that)
+  ["info", "warn", "error", "debug"].forEach(function (n) {
+    consoleObj[n] = function () { throw new TypeError("Object doesn't support property or method '" + n + "'"); };
+  });
   defineMethod(global, "console", consoleObj);
 
   // ---- the server-side API -------------------------------------------------------------------------------------
@@ -321,7 +326,10 @@
         for (i = 0; i < items.length; i++) out.push(items[i] === null || items[i] === undefined ? undefined : items[i][op.f]);
         return out;
       case "flatten":
-        flattenInto(out, items, op.f === true, true);
+        // Azure flattens one level for `flatten(true)` and leaves the items alone for `flatten()` and `flatten(false)`
+        // (checked in November 2026: `pluck('Tags').flatten()` still answers an array of arrays)
+        if (op.f === true) flattenInto(out, items, true, true);
+        else for (i = 0; i < items.length; i++) out.push(items[i]);
         return out;
       case "sortBy":
       case "sortByDescending":
@@ -358,8 +366,8 @@
     if (typeof cb === "function") {
       queue.push([cb, [undefined, page, next === undefined ? {} : { continuation: next }]]);
     } else {
-      respBody = page;
-      respBodySet = true;
+      // without a callback Azure appends the result, as JSON text, to the response body once the script has returned
+      queue.push([function (err, feed) { response.appendBody(JSON.stringify(feed)); }, [undefined, page]]);
     }
     return { isAccepted: true };
   }

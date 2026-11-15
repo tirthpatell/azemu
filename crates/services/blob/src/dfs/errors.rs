@@ -52,6 +52,8 @@ pub fn into_response(mut e: ApiError, ctx: &RequestCtx) -> Response {
     let mut err = json!({ "code": e.code, "message": message });
     if let Some((_, v)) = e.details.iter().find(|(k, _)| k == "AuthenticationErrorDetail") {
         err["detail"] = json!({ "AuthenticationErrorDetail": v });
+    } else if let Some((_, v)) = e.details.iter().find(|(k, _)| k == "HeaderName") {
+        err["detail"] = json!({ "HeaderName": v });
     }
     let body: Value = json!({ "error": err });
     let mut r = Resp::new(e.status).json(&body).header("x-ms-error-code", &e.code);
@@ -71,9 +73,13 @@ pub fn not_implemented(op: &str) -> ApiError {
     ApiError::new("NotImplemented").msg(format!("dfs: {op} is not implemented by this emulator.")).unsupported(format!("DataLake_{op}"))
 }
 
-/// A bad `x-ms-acl` (not parseable, or more than 32 access or 32 default entries): `400 InvalidHeaderValue`, naming the header.
-/// The value is cut to 200 characters, so a huge header is not sent back.
-pub fn acl_error(value: &str, why: String) -> ApiError {
-    let shown: String = value.chars().take(200).collect();
-    ApiError::invalid_header("x-ms-acl", &shown).msg(why)
+/// A bad `x-ms-acl` (not parseable, or more than 32 access or 32 default entries). The value is not sent back.
+pub fn acl_error(_value: &str, why: String) -> ApiError {
+    // Azure (November 2026): more than 32 entries is `TooManyAclEntries`; an entry that is not valid is
+    // `InvaldAccessControlList` (sic: the name has the typo), with a fixed text
+    if why.starts_with(crate::dfs::acl::TOO_MANY) {
+        ApiError::new("TooManyAclEntries").status(400).msg("The number of access control entries is more than allowed.")
+    } else {
+        ApiError::new("InvaldAccessControlList").status(400).msg("The access control list value is invalid.")
+    }
 }

@@ -205,7 +205,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "azemu"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-appconfig",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-amqp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "azemu-core",
  "bytes",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-appconfig"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -253,7 +253,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-arm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-blob"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -297,7 +297,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -328,7 +328,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-cosmos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-cosmos-sql"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regex",
  "serde",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-eventgrid"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -367,6 +367,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "parking_lot",
+ "percent-encoding",
  "rustls",
  "serde",
  "serde_json",
@@ -378,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-eventhubs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -401,7 +402,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-identity"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -419,7 +420,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-kafka"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bytes",
  "flate2",
@@ -427,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-keyvault"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -452,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-queue"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -467,7 +468,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-servicebus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -490,11 +491,11 @@ dependencies = [
 
 [[package]]
 name = "azemu-servicebus-sql"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "azemu-statefile"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "azemu-core",
  "rmp-serde",
@@ -503,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-table"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -518,7 +519,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-testkit"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "base16ct"

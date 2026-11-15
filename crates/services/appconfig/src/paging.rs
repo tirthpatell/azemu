@@ -70,15 +70,28 @@ impl Page {
     }
 }
 
+/// A condition header value, when it is one: in quotes (or weak, or `*`). A bare value is passed over by the service.
+fn quoted(v: Option<&str>) -> Option<&str> {
+    v.filter(|v| v.trim_start().starts_with(['"', 'W', '*']))
+}
+
 /// Answer a list request. With an etag, `If-None-Match` of the page's etag gives 304.
 pub fn respond(req: &Request, page: Page, newer: bool) -> Response {
     let link = page.next.as_ref().map(|n| format!("<{n}>; rel=\"next\""));
+    // Only an etag in quotes is a condition: a bare value is passed over, as the service does (tried in November 2026).
     if let Some(etag) = &page.etag {
+        // `If-Match` of a list: 200 for `*`, the etag of the page or of a setting on it (recordings `*_correct_etag`), 412 for
+        // a quoted value that is none of them.
+        if let Some(m) = quoted(req.header("if-match")) {
+            let wanted: Vec<&str> = m.split(',').map(|t| t.trim().trim_start_matches("W/").trim_matches('"')).collect();
+            let on_page = |t: &str| page.items.iter().any(|i| i.get("etag").and_then(Value::as_str) == Some(t));
+            if !wanted.iter().any(|t| *t == "*" || *t == etag || on_page(t)) {
+                return errors::precondition_failed();
+            }
+        }
         let c = Conditions {
-            // `If-Match` on a page is ignored: real Azure answers 200 to the setting's etag
-            // (recordings `*_correct_etag`) and the recordings never show a 412 on a list.
             if_match: None,
-            if_none_match: req.header("if-none-match"),
+            if_none_match: quoted(req.header("if-none-match")),
             if_modified_since: None,
             if_unmodified_since: None,
         };
@@ -97,7 +110,7 @@ pub fn respond(req: &Request, page: Page, newer: bool) -> Response {
     }
     let count = page.items.len();
     let mut body = Map::new();
-    if let Some(etag) = &page.etag {
+    if let (Some(etag), true) = (&page.etag, crate::auth::lists_have_body_etag(crate::auth::version(req))) {
         body.insert("etag".into(), json!(etag));
     }
     body.insert("items".into(), Value::Array(page.items));

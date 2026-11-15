@@ -16,6 +16,24 @@ use crate::{auth, errors, push, schemas, Shared};
 /// Largest request body (recorded from Azure: "The maximum size (1536000) has been exceeded.").
 pub const MAX_CLASSIC_BODY: usize = 1_536_000;
 
+/// Largest single event, as the JSON text of that event. Azure answers 413 "The maximum size for the JSON content
+/// (1049600) has been exceeded." for an event over this; found by trying: 1,049,430 bytes were taken and 1,049,431 were
+/// refused (the rest of the 1,049,600 is what the service adds to the event).
+pub const MAX_EVENT_BYTES: usize = 1_049_430;
+
+/// Is one event of this body larger than a topic takes? Only a body over the limit is read again.
+fn has_oversized_event(body: &[u8]) -> bool {
+    if body.len() <= MAX_EVENT_BYTES {
+        return false;
+    }
+    let size = |v: &Value| serde_json::to_vec(v).map(|b| b.len()).unwrap_or(0);
+    match serde_json::from_slice::<Value>(body) {
+        Ok(Value::Array(items)) => items.iter().any(|e| size(e) > MAX_EVENT_BYTES),
+        Ok(v @ Value::Object(_)) => size(&v) > MAX_EVENT_BYTES,
+        _ => false,
+    }
+}
+
 /// What `publish_system_event` did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SystemEventOutcome {
@@ -27,17 +45,28 @@ pub struct SystemEventOutcome {
 
 /// `POST /api/events`
 pub fn classic(shared: &Arc<Shared>, req: &Request) -> Response {
-    if let Err(r) = auth::check(req) {
+    if let Some(r) = auth::check_api_version(req) {
+        return r;
+    }
+    let name = req.account.as_str();
+    let (existing, keys, own_id) = {
+        let st = shared.state.lock();
+        let found = st.host(name);
+        (
+            found.map(|h| (h.kind, h.input_schema)),
+            found.map(|h| h.keys.clone()).unwrap_or_default(),
+            found.filter(|h| h.kind == TopicKind::Custom).and_then(|h| h.resource_id.clone()),
+        )
+    };
+    if let Err(r) = auth::check_classic(req, &keys) {
         return r;
     }
     if req.body.len() > MAX_CLASSIC_BODY {
         return errors::payload_too_large(MAX_CLASSIC_BODY);
     }
-    let name = req.account.as_str();
-    let existing = {
-        let st = shared.state.lock();
-        st.host(name).map(|h| (h.kind, h.input_schema))
-    };
+    if has_oversized_event(&req.body) {
+        return errors::event_too_large(req, 1_049_600);
+    }
     let input = match existing {
         Some((TopicKind::Namespace, _)) => {
             return errors::not_found(&format!(
@@ -52,6 +81,20 @@ pub fn classic(shared: &Arc<Shared>, req: &Request) -> Response {
         Ok(e) => e,
         Err(r) => return r,
     };
+    if let Some(id) = own_id {
+        // A topic made through Resource Manager knows its resource id; an event that names another topic is refused.
+        for ev in events.iter().filter(|e| e.schema == Schema::EventGrid) {
+            match ev.body.get("topic").and_then(Value::as_str) {
+                Some(t) if !t.is_empty() && !t.eq_ignore_ascii_case(&id) => {
+                    let m = format!(
+                        "Property 'topic' was found to be set to '{t}', but was expected to either be null/empty or be set to {id}."
+                    );
+                    return errors::Fail::unauthorized(m).into_response(req);
+                }
+                _ => {}
+            }
+        }
+    }
     let now = Now::now();
     let mut jobs = Vec::new();
     {

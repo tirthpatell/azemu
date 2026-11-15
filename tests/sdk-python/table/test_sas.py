@@ -111,12 +111,13 @@ def test_account_sas_without_delete_cannot_delete(seeded, account_sas, sas_clien
     assert seeded.get_entity("p", "r")["v"] == 1
 
 
-def test_expired_account_sas_is_403_authorization_failure(seeded, account_sas, sas_client):
+def test_expired_account_sas_is_403_authentication_failed(seeded, account_sas, sas_client):
     client = sas_client(account_sas(permission="r", start=past(120), expiry=past(60)))
     with pytest.raises(HttpResponseError) as exc:
         list(client.query_entities("PartitionKey eq 'p'"))
     assert exc.value.status_code == 403
-    assert code(exc.value) == "AuthorizationFailure"
+    # Azure answers every SAS that is not valid now with AuthenticationFailed on Table (tried in November 2026)
+    assert code(exc.value) == "AuthenticationFailed"
 
 
 def test_account_sas_that_starts_in_the_future_is_403(seeded, account_sas, sas_client):
@@ -207,7 +208,7 @@ def test_expired_table_sas_is_403(seeded, named_key, table_name, sas_client):
     with pytest.raises(HttpResponseError) as exc:
         list(client.list_entities())
     assert exc.value.status_code == 403
-    assert code(exc.value) == "AuthorizationFailure"
+    assert code(exc.value) == "AuthenticationFailed"
 
 
 def test_table_sas_for_another_table_is_403(seeded, service, named_key, table_name, uniq, sas_client):

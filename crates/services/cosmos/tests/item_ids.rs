@@ -1,6 +1,8 @@
-//! Item ids and partition key values. Azure's service takes every character except `/` and `\` in an item
-//! id, up to 1,023 bytes; databases and containers keep 255 characters and refuse `?` and `#`; a partition key value is at
-//! most 2,048 bytes ("Service quotas and default limits", per-item limits).
+//! Item ids and partition key values, as a real account answered in November 2026. An item id may hold any character, at most
+//! 1,023 characters (a longer one is a 400; one that has more than 1,023 bytes in UTF-8 is a 500); a request by id cannot reach
+//! an id with `#`, `/`, `\`, a trailing space or a percent escape in it (401). A database or container name is at most 254
+//! characters and refuses `/` and `\` only. A partition key value is at most 2,048 bytes ("Service quotas and default
+//! limits", per-item limits).
 
 mod common;
 
@@ -36,10 +38,14 @@ fn enc(id: &str) -> String {
     out
 }
 
-const AWKWARD: [&str; 7] = ["USER#123", "a?b=c", "#", "?", "100% sure", "tab\there", "naïve ☃ id"];
+/// Ids a request by id can reach.
+const AWKWARD: [&str; 5] = ["a?b=c", "?", "100% sure", "tab\there", "naïve ☃ id"];
+/// Ids that are created but cannot be addressed: the gateway cuts the path at `#`, trims a trailing space, decodes a percent
+/// escape a second time and does not take `/` or `\` in a name.
+const UNREACHABLE: [&str; 7] = ["USER#123", "#", "a/b", "a\\b", "x ", "p%20q", "a#b?c#d"];
 
 #[tokio::test]
-async fn an_item_id_may_hold_hash_question_mark_percent_and_other_characters() {
+async fn an_item_id_may_hold_question_mark_percent_and_other_characters() {
     let h = setup().await;
     for id in AWKWARD {
         let r = h.doc("d", "c", &json!("p"), &json!({"id": id, "pk": "p", "v": 1})).await;
@@ -76,6 +82,8 @@ async fn an_item_id_may_hold_hash_question_mark_percent_and_other_characters() {
         assert_eq!(up.status, 200, "{id:?}: {}", up.text());
     }
     // a query finds them by id, with the id as a parameter
+    let r = h.doc("d", "c", &json!("p"), &json!({"id": "USER#123", "pk": "p"})).await;
+    assert_eq!(r.status, 201);
     let q = h
         .query(
             "d",
@@ -94,6 +102,35 @@ async fn an_item_id_may_hold_hash_question_mark_percent_and_other_characters() {
 }
 
 #[tokio::test]
+async fn an_id_the_gateway_cannot_address_is_created_and_every_request_by_id_is_401() {
+    let h = setup().await;
+    for id in UNREACHABLE {
+        let r = h.doc("d", "c", &json!("p"), &json!({"id": id, "pk": "p", "v": 1})).await;
+        assert_eq!(r.status, 201, "{id:?}: {}", r.text());
+        assert_eq!(r.json()["id"], id);
+        let rid = r.json()["_rid"].as_str().unwrap().to_string();
+        let path = format!("dbs/d/colls/c/docs/{}", enc(id));
+        for (method, body) in [("GET", json!(null)), ("PUT", json!({"id": id, "pk": "p"})), ("DELETE", json!(null))] {
+            let r = h.json(method, &path, &[(PK, &pkh("p"))], &body).await;
+            assert_eq!(r.status, 401, "{method} {id:?}: {}", r.text());
+            assert!(r.json()["message"].as_str().unwrap().contains("Server used the following payload to sign:"), "{}", r.text());
+        }
+        // by resource id it can be reached
+        assert_eq!(h.req("GET", &format!("dbs/d/colls/c/docs/{rid}"), &[(PK, &pkh("p"))], "").await.status, 200, "{id:?}");
+    }
+    // what Azure signed for an id with `#`: the path is cut there
+    let r = h.req("GET", &format!("dbs/d/colls/c/docs/{}", enc("USER#123")), &[(PK, &pkh("p"))], "").await;
+    let msg = r.json()["message"].as_str().unwrap().to_string();
+    assert!(msg.contains("payload to sign: 'get\ndocs\ndbs/d/colls/c/docs/USER\nwed, 11 nov 2026 12:00:00 gmt\n\n'"), "{msg}");
+    // a name with `/` leaves nothing to sign
+    let r = h.req("GET", &format!("dbs/d/colls/c/docs/{}", enc("a/b")), &[(PK, &pkh("p"))], "").await;
+    assert!(r.json()["message"].as_str().unwrap().contains("payload to sign: 'get\n\n\nwed, 11 nov 2026"), "{}", r.text());
+    // a percent sign that is not an escape is no problem
+    assert_eq!(h.doc("d", "c", &json!("p"), &json!({"id": "100%", "pk": "p"})).await.status, 201);
+    assert_eq!(h.req("GET", &format!("dbs/d/colls/c/docs/{}", enc("100%")), &[(PK, &pkh("p"))], "").await.status, 200);
+}
+
+#[tokio::test]
 async fn the_change_feeds_show_an_id_with_hash_and_question_mark() {
     let h = setup().await;
     let all = [("A-IM", "Full-Fidelity Feed"), ("x-ms-cosmos-changefeed-wire-format-version", "2021-09-15")];
@@ -103,12 +140,14 @@ async fn the_change_feeds_show_an_id_with_hash_and_question_mark() {
     let r = h.req("GET", "dbs/d/colls/c/docs", &hdrs, "").await;
     assert_eq!(r.status, 304);
     let token = r.header("etag").unwrap().to_string();
-    h.doc("d", "c", &json!("p"), &json!({"id": "USER#1?x", "pk": "p"})).await;
+    let made = h.doc("d", "c", &json!("p"), &json!({"id": "USER#1?x", "pk": "p"})).await;
+    let rid = made.json()["_rid"].as_str().unwrap().to_string();
     // the incremental feed, from the beginning
     let r = h.req("GET", "dbs/d/colls/c/docs", &[("A-IM", "Incremental Feed")], "").await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["Documents"][0]["id"], "USER#1?x");
-    assert_eq!(h.req("DELETE", &format!("dbs/d/colls/c/docs/{}", enc("USER#1?x")), &[(PK, &pkh("p"))], "").await.status, 204);
+    // an id with `#` can only be deleted by its resource id
+    assert_eq!(h.req("DELETE", &format!("dbs/d/colls/c/docs/{rid}"), &[(PK, &pkh("p"))], "").await.status, 204);
     let mut hdrs = all.to_vec();
     hdrs.push(("If-None-Match", &token));
     let r = h.req("GET", "dbs/d/colls/c/docs", &hdrs, "").await;
@@ -166,7 +205,10 @@ async fn a_stored_procedure_reads_and_writes_an_id_with_hash_and_question_mark()
     let r = h.json("POST", "dbs/d/colls/c/sprocs/s", &[(PK, &pkh("p"))], &json!(["S#1?z"])).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json(), json!("S#1?z"));
-    assert_eq!(h.req("GET", &format!("dbs/d/colls/c/docs/{}", enc("S#1?z")), &[(PK, &pkh("p"))], "").await.status, 200);
+    // the id has a `#`, so a request by id is refused (401); a query finds it
+    assert_eq!(h.req("GET", &format!("dbs/d/colls/c/docs/{}", enc("S#1?z")), &[(PK, &pkh("p"))], "").await.status, 401);
+    let q = h.query("d", "c", &[(PK, &pkh("p"))], json!({"query": "SELECT VALUE c.id FROM c"})).await;
+    assert_eq!(q.json()["Documents"], json!(["S#1?z"]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -182,7 +224,7 @@ async fn ids_with_hash_and_question_mark_survive_a_restart() {
     let h = start_on(data.clone()).await;
     h.db("d").await;
     h.coll("d", "c", "/pk").await;
-    for id in AWKWARD {
+    for id in AWKWARD.iter().chain(&UNREACHABLE) {
         assert_eq!(h.doc("d", "c", &json!("p"), &json!({"id": id, "pk": "p"})).await.status, 201);
     }
     h.srv.shutdown().await.unwrap();
@@ -192,30 +234,52 @@ async fn ids_with_hash_and_question_mark_survive_a_restart() {
         assert_eq!(r.status, 200, "{id:?}: {}", r.text());
         assert_eq!(r.json()["id"], id);
     }
+    // the ones a request by id cannot reach are found by a query
+    let q = h2.query("d", "c", &[(PK, &pkh("p"))], json!({"query": "SELECT VALUE COUNT(1) FROM c"})).await;
+    assert_eq!(q.json()["Documents"], json!([(AWKWARD.len() + UNREACHABLE.len()) as i64]));
     h2.srv.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&data);
 }
 
 #[tokio::test]
-async fn the_item_id_limits_are_1023_bytes_and_no_slash_or_backslash() {
+async fn the_item_id_limits_are_1023_characters_and_1023_bytes() {
     let h = setup().await;
     let post = |id: String| {
         let h = &h;
         async move { h.doc("d", "c", &json!("p"), &json!({"id": id, "pk": "p"})).await }
     };
-    // 1,023 bytes pass (more than the 255 characters of a database or container name), 1,024 do not
+    // 1,023 characters pass (more than the 254 of a database or container name), 1,024 do not
     assert_eq!(post("a".repeat(1023)).await.status, 201);
     assert_eq!(post("a".repeat(256)).await.status, 201);
     let r = post("a".repeat(1024)).await;
     assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("1023 bytes"), "{}", r.text());
-    // the limit counts bytes: 341 characters of three bytes are 1,023, 342 are 1,026
+    assert!(
+        r.text().contains("The input name is invalid. Ensure to provide a unique non-empty string less than '1024' characters."),
+        "{}",
+        r.text()
+    );
+    // and the id also has to fit in 1,023 bytes: 341 characters of three bytes are 1,023, 342 are 1,026. Azure answers a 500
+    // to the longer one (and a 400 to more than 1,023 characters whatever they weigh)
     assert_eq!(post("€".repeat(341)).await.status, 201);
-    assert_eq!(post("€".repeat(342)).await.status, 400);
-    // `/` and `\` are refused, and so is an id that ends in a space or is empty
-    for bad in ["a/b", "a\\b", "x ", ""] {
-        let r = post(bad.to_string()).await;
-        assert_eq!(r.status, 400, "{bad:?}: {}", r.text());
+    let r = post("€".repeat(342)).await;
+    assert_eq!(r.status, 500, "{}", r.text());
+    assert!(r.text().contains("An unknown error occurred while processing this request."), "{}", r.text());
+    assert_eq!(post("ä".repeat(512)).await.status, 500, "1,024 bytes");
+    assert_eq!(post("ä".repeat(511)).await.status, 201);
+    assert_eq!(post("ä".repeat(1024)).await.status, 400);
+    // `/`, `\` and a trailing space are accepted (a request by id cannot reach them); an empty id is not
+    for odd in ["a/b", "a\\b", "x ", " y"] {
+        let r = post(odd.to_string()).await;
+        assert_eq!(r.status, 201, "{odd:?}: {}", r.text());
+    }
+    let r = post(String::new()).await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(r.text().contains("The input name '' is invalid."), "{}", r.text());
+    // an id that is not a string names what it was
+    for (value, shown) in [(json!(5), "5"), (json!(true), "true"), (json!(null), "null"), (json!(["x"]), "[")] {
+        let r = h.doc("d", "c", &json!("p"), &json!({"id": value, "pk": "p"})).await;
+        assert_eq!(r.status, 400, "{}", r.text());
+        assert!(r.text().contains(&format!("The input name '{shown}' is invalid.")), "{}", r.text());
     }
     // the same limit applies to a replace and to a batch
     let r = h.json("PUT", "dbs/d/colls/c/docs/a", &[(PK, &pkh("p"))], &json!({"id": "a".repeat(1024), "pk": "p"})).await;
@@ -233,20 +297,45 @@ async fn the_item_id_limits_are_1023_bytes_and_no_slash_or_backslash() {
 }
 
 #[tokio::test]
-async fn database_and_container_names_keep_255_characters_and_refuse_hash_and_question_mark() {
+async fn database_and_container_names_are_at_most_254_characters_and_refuse_slash_and_backslash_only() {
     let h = start().await;
-    assert_eq!(h.json("POST", "dbs", &[], &json!({"id": "d".repeat(255)})).await.status, 201);
-    assert_eq!(h.json("POST", "dbs", &[], &json!({"id": "d".repeat(256)})).await.status, 400);
-    for bad in ["a#b", "a?b", "a/b", "a\\b"] {
-        assert_eq!(h.json("POST", "dbs", &[], &json!({"id": bad})).await.status, 400, "{bad}");
+    assert_eq!(h.json("POST", "dbs", &[], &json!({"id": "d".repeat(254)})).await.status, 201);
+    for len in [255, 256] {
+        let r = h.json("POST", "dbs", &[], &json!({"id": "d".repeat(len)})).await;
+        assert_eq!(r.status, 400, "{len}");
+        assert!(
+            r.text().contains("The input name is invalid. Ensure to provide a unique non-empty string less than '255' characters."),
+            "{}",
+            r.text()
+        );
+        assert!(r.text().contains("The request payload is invalid. Ensure to provide a valid request payload."), "{}", r.text());
     }
+    for bad in ["a/b", "a\\b"] {
+        let r = h.json("POST", "dbs", &[], &json!({"id": bad})).await;
+        assert_eq!(r.status, 400, "{bad}");
+        assert!(r.text().contains("The input name presented contains invalid character."), "{}", r.text());
+    }
+    for odd in ["a#b", "a?b", "a b", "a%b", "x ", " "] {
+        assert_eq!(h.json("POST", "dbs", &[], &json!({"id": odd})).await.status, 201, "{odd:?}");
+    }
+    let r = h.json("POST", "dbs", &[], &json!({"id": ""})).await;
+    assert_eq!(r.status, 400);
+    assert!(r.text().contains("The input name '' is invalid."), "{}", r.text());
     h.db("d").await;
     let pk = json!({"paths": ["/pk"], "kind": "Hash", "version": 2});
-    assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": "c".repeat(255), "partitionKey": pk})).await.status, 201);
-    assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": "c".repeat(256), "partitionKey": pk})).await.status, 400);
-    for bad in ["a#b", "a?b"] {
+    assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": "c".repeat(254), "partitionKey": pk})).await.status, 201);
+    assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": "c".repeat(255), "partitionKey": pk})).await.status, 400);
+    for odd in ["a#b", "a?b", " x"] {
+        assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": odd, "partitionKey": pk})).await.status, 201, "{odd:?}");
+    }
+    for bad in ["a/b", "a\\b"] {
         assert_eq!(h.json("POST", "dbs/d/colls", &[], &json!({"id": bad, "partitionKey": pk})).await.status, 400, "{bad}");
     }
+    // users, stored procedures, triggers and functions refuse neither `/` nor `\\`
+    for odd in ["u/1", "u\\1", "u#1"] {
+        assert_eq!(h.json("POST", "dbs/d/users", &[], &json!({"id": odd})).await.status, 201, "{odd:?}");
+    }
+    assert_eq!(h.json("POST", "dbs/d/users", &[], &json!({"id": "u".repeat(255)})).await.status, 400);
 }
 
 #[tokio::test]
@@ -258,7 +347,7 @@ async fn a_partition_key_value_is_at_most_2048_bytes() {
     assert_eq!(h.doc("d", "c", &json!(ok), &json!({"id": "1", "pk": ok})).await.status, 201);
     let r = h.doc("d", "c", &json!("p"), &json!({"id": "2", "pk": long})).await;
     assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("2048 bytes"), "{}", r.text());
+    assert!(r.text().contains("Supplied partition key length 2049 is bigger than maximum allowed 2048."), "{}", r.text());
     // in the header: a read of the stored one works, a read with the longer value is refused
     let r = h.req("GET", "dbs/d/colls/c/docs/1", &[(PK, &pkh(&ok))], "").await;
     assert_eq!(r.status, 200, "{}", r.text());

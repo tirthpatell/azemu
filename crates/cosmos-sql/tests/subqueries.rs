@@ -64,14 +64,13 @@ fn scalar_subqueries() {
          r#"[{"name":"Remdriel Shoes","colorsCount":3,"sizesCount":3,"tagsCount":2}]"#),
         ("SELECT VALUE p.name FROM products p WHERE (SELECT VALUE COUNT(1) FROM c IN p.colors) >= 3", r#"["Remdriel Shoes"]"#),
         ("SELECT VALUE p.name FROM products p WHERE (SELECT VALUE COUNT(1) FROM c IN p.colors) = 0", r#"["Pricey Parka"]"#),
-        // scalar subquery without rows is undefined; with several rows the first one is used
-        ("SELECT VALUE (SELECT VALUE c FROM c IN p.colors WHERE c = 'nope') FROM products p", "[]"),
-        ("SELECT VALUE (SELECT VALUE c FROM c IN p.colors) FROM products p", r#"["gray","cobalt"]"#),
-        ("SELECT VALUE (SELECT VALUE MAX(s.order) FROM s IN p.sizes) FROM products p", "[4,0,9]"),
+        // a scalar subquery that is an aggregate, or reads one value, is fine; one that can return several rows is refused
+        // when the query is compiled (see `scalar_subquery_that_can_return_several_rows`)
+        ("SELECT VALUE (SELECT VALUE MAX(s[\"order\"]) FROM s IN p.sizes) FROM products p", "[4,0,9]"),
         ("SELECT VALUE (SELECT p.name, p.price).price FROM products p WHERE p.price < 15", "[10]"),
         // nested and correlated
         ("SELECT VALUE (SELECT VALUE (SELECT VALUE p.price + 1)) FROM products p WHERE p.price = 15", "[16]"),
-        ("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN p.tags WHERE (SELECT VALUE COUNT(1) FROM s IN p.sizes WHERE s.order > 2) > 1) FROM products p", "[2,0,0]"),
+        ("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN p.tags WHERE (SELECT VALUE COUNT(1) FROM s IN p.sizes WHERE s[\"order\"] > 2) > 1) FROM products p", "[2,0,0]"),
     ]);
 }
 
@@ -118,14 +117,14 @@ fn from_subqueries_are_container_scoped() {
             ("SELECT VALUE COUNT(1) FROM (SELECT DISTINCT VALUE c.city FROM c)", "[2]"),
             ("SELECT VALUE x FROM (SELECT VALUE c.id FROM c) AS x", "[1,2,3]"),
             ("SELECT t.n FROM (SELECT c.id AS n FROM c WHERE c.id > 1) t", r#"[{"n":2},{"n":3}]"#),
-            ("SELECT VALUE t FROM (SELECT VALUE c.city FROM c ORDER BY c.id DESC) t", r#"["A","B","A"]"#),
+            ("SELECT VALUE t FROM (SELECT VALUE c.city FROM c) t", r#"["A","B","A"]"#),
             ("SELECT VALUE SUM(t.n) FROM (SELECT c.id AS n FROM c) t", "[6]"),
             ("SELECT VALUE e FROM (SELECT c.arr FROM c) t JOIN e IN t.arr", "[1,2,3]"),
             ("SELECT VALUE t.city FROM (SELECT DISTINCT c.city FROM c) t", r#"["A","B"]"#),
             ("SELECT VALUE COUNT(1) FROM (SELECT VALUE COUNT(1) FROM c)", "[1]"),
             ("SELECT VALUE n FROM (SELECT VALUE COUNT(1) FROM c) n", "[3]"),
             ("SELECT VALUE y FROM (SELECT VALUE x FROM (SELECT VALUE c.id FROM c) x WHERE x < 3) y", "[1,2]"),
-            ("SELECT TOP 1 VALUE t.id FROM (SELECT * FROM c ORDER BY c.id DESC) t", "[3]"),
+            ("SELECT TOP 1 VALUE t.id FROM (SELECT * FROM c) t", "[1]"),
         ],
     );
 }
@@ -137,7 +136,7 @@ fn identifier_resolution() {
     check_table(
         &d,
         &[
-            ("SELECT VALUE (SELECT VALUE x.x FROM x IN c.arr) FROM c", r#"["inner"]"#),
+            ("SELECT VALUE ARRAY(SELECT VALUE x.x FROM x IN c.arr) FROM c", r#"[["inner"]]"#),
             ("SELECT VALUE (SELECT VALUE c.x) FROM c", r#"["outer"]"#),
             ("SELECT VALUE ARRAY(SELECT VALUE c.x FROM c IN c.arr) FROM c", r#"[["inner"]]"#),
         ],
@@ -151,7 +150,38 @@ fn identifier_resolution() {
         "SELECT VALUE 1 FROM c JOIN c IN c.arr",
     ] {
         let e = err(q);
-        assert!(["SC2001", "SC2002", "SC2103"].contains(&e.code.as_str()), "{q}: {e}");
+        assert!(["SC2001", "SC2021", "SC2042"].contains(&e.code.as_str()), "{q}: {e}");
     }
     assert_eq!(err("SELECT x FROM c").message, "Identifier 'x' could not be resolved.");
+}
+
+/// Azure refuses a scalar subquery that can return more than one row, when it compiles the query (even if no document would
+/// give two); TOP, OFFSET LIMIT and ORDER BY are refused in any subquery.
+#[test]
+fn scalar_subquery_that_can_return_several_rows() {
+    let sc = |q: &str| err(q).code;
+    assert_eq!(sc("SELECT VALUE (SELECT VALUE c FROM c IN p.colors) FROM products p"), "SC2201");
+    assert_eq!(sc("SELECT VALUE (SELECT VALUE c FROM c IN p.colors WHERE c = 'nope') FROM products p"), "SC2201");
+    assert_eq!(sc("SELECT VALUE (SELECT DISTINCT VALUE c FROM c IN p.colors) FROM products p"), "SC2201");
+    assert_eq!(sc("SELECT VALUE (SELECT VALUE COUNT(1) FROM c IN p.colors GROUP BY c) FROM products p"), "SC2201");
+    let e = err("SELECT VALUE (SELECT TOP 1 VALUE c FROM c IN p.colors) FROM products p");
+    assert_eq!((e.code.as_str(), e.more[0].code.as_str()), ("SC2203", "SC2201"));
+    let e = err("SELECT VALUE (SELECT VALUE c FROM c IN p.colors OFFSET 0 LIMIT 1) FROM products p");
+    assert_eq!((e.code.as_str(), e.more[0].code.as_str()), ("SC2204", "SC2201"));
+    let e = err("SELECT VALUE (SELECT VALUE c FROM c IN p.colors ORDER BY c) FROM products p");
+    assert_eq!((e.code.as_str(), e.more[0].code.as_str()), ("SC2202", "SC2201"));
+    // not the scalar kind, but still a subquery
+    assert_eq!(sc("SELECT VALUE ARRAY(SELECT TOP 1 VALUE c FROM c IN p.colors) FROM products p"), "SC2203");
+    assert_eq!(sc("SELECT * FROM p WHERE EXISTS(SELECT TOP 1 VALUE c FROM c IN p.colors)"), "SC2203");
+    assert_eq!(sc("SELECT VALUE t FROM (SELECT TOP 2 VALUE c FROM c IN p.colors) t"), "SC2203");
+    assert_eq!(sc("SELECT VALUE t FROM (SELECT VALUE c.city FROM c ORDER BY c.id DESC) t"), "SC2202");
+    // fine: no FROM, an aggregate, a value of the item (`FROM p.o x`, not `x IN p.arr`)
+    for q in [
+        "SELECT VALUE (SELECT VALUE 1) FROM p",
+        "SELECT VALUE (SELECT VALUE COUNT(1) FROM c IN p.colors) FROM p",
+        "SELECT VALUE (SELECT VALUE x FROM p.colors x) FROM p",
+        "SELECT VALUE (SELECT p.name, p.price) FROM p",
+    ] {
+        assert!(azemu_cosmos_sql::parse(q).is_ok(), "{q}");
+    }
 }

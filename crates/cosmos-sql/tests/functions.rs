@@ -216,7 +216,7 @@ fn string_functions() {
         ("LENGTH('😀')", "1"),
         ("LENGTH('')", "0"),
         ("LEFT('abc', -1)", "\"\""),
-        ("LEFT('abc', 1.9)", "\"a\""),
+        ("LEFT('abc', 1.9)", "undefined"),
         ("LEFT('', 5)", "\"\""),
         ("LEFT('日本語', 2)", "\"日本\""),
         ("RIGHT('abc', 0)", "\"\""),
@@ -232,14 +232,14 @@ fn string_functions() {
         ("TRIM('xyaxy', 'xy')", "\"a\""),
         ("TRIM('', 'x')", "\"\""),
         ("REPLACE('aaa', 'a', 'bb')", "\"bbbbbb\""),
-        ("REPLACE('abc', '', 'x')", "\"abc\""),
+        ("REPLACE('abc', '', 'x')", "undefined"), // nothing to look for
         ("REPLACE('abc', 'b', '')", "\"ac\""),
         ("REPLACE('', 'a', 'b')", "\"\""),
         ("REPLICATE('ab', 0)", "\"\""),
         ("REPLICATE('a', -1)", "undefined"),
         ("REPLICATE('a', 10001)", "undefined"),
         ("LENGTH(REPLICATE('ab', 5000))", "10000"),
-        ("REPLICATE('a', 1.9)", "\"a\""),
+        ("REPLICATE('a', 1.9)", "undefined"),
         ("REPLICATE('a', Infinity)", "undefined"),
         ("REPLICATE('', 1000000)", "\"\""),
         ("REVERSE('😀a')", "\"a😀\""),
@@ -310,7 +310,6 @@ fn math_functions() {
         ("ABS(-0.5)", "0.5"),
         ("ABS(-9223372036854775808)", "9.223372036854776e18"),
         ("ABS(7)", "7"),
-        ("ABS(Infinity)", "null"),
         ("CEILING(1.2)", "2"),
         ("CEILING(-1.2)", "-1"),
         ("CEILING(5)", "5"),
@@ -332,17 +331,14 @@ fn math_functions() {
         ("SIGN(5.5)", "1"),
         ("SIGN(-1e-300)", "-1"),
         ("SQRT(16)", "4"),
-        ("SQRT(-1)", "null"),
         ("POWER(2, 10)", "1024"),
         ("POWER(2, -1)", "0.5"),
         ("POWER(2, 0.5)", "1.4142135623730951"),
         ("POWER(0, 0)", "1"),
         ("POWER(10, 20)", "1e20"),
         ("EXP(1)", "2.718281828459045"),
-        ("LOG(0)", "null"),
         ("LOG(8, 2)", "3"),
         ("LOG(100, 10)", "2"),
-        ("LOG(-1)", "null"),
         ("LOG(27, 3)", "3"),
         ("LOG10(1000)", "3"),
         ("LOG10(0.001)", "-3"),
@@ -351,7 +347,6 @@ fn math_functions() {
         ("COS(0)", "1"),
         ("TAN(0)", "0"),
         ("ASIN(1)", "1.5707963267948966"),
-        ("ASIN(2)", "null"),
         ("ACOS(1)", "0"),
         ("ATAN(1)", "0.7853981633974483"),
         ("ATN2(1, 1)", "0.7853981633974483"),
@@ -442,7 +437,7 @@ fn array_functions() {
         ("ARRAY_SUM([1, 'a'])", "undefined"),
         ("ARRAY_SUM([null])", "undefined"),
         ("SETUNION([1, 1], [1, 2, 2])", "[1,2]"),
-        ("SETINTERSECT([1, 2, 3], [3, 2])", "[3,2]"),
+        ("SETINTERSECT([1, 2, 3], [3, 2])", "[3,2]"), // the smaller array leads when all of it is in the other
         ("SETDIFFERENCE([1, 2, 2, 3], [2])", "[1,3]"),
         ("SETEQUAL([1], [1.0])", "true"),
         ("SETUNION([{\"a\": 1}], [{\"a\": 1}, {\"a\": 2}])", "[{\"a\":1},{\"a\":2}]"),
@@ -516,15 +511,15 @@ fn date_time_functions() {
         ("DATETIMEFROMPARTS(2023, 2, 29)", "undefined"),
         ("DATETIMEFROMPARTS(10000, 1, 1)", "undefined"),
         ("DATETIMEFROMPARTS(2020, 1, 1, 0, 0, 0, 10000000)", "undefined"),
-        ("DATETIMEBIN('2021-05-17T10:00:00', 'yyyy')", "\"2021-01-01T00:00:00.0000000Z\""),
-        ("DATETIMEBIN('2021-05-17T10:00:00', 'mm')", "\"2021-05-01T00:00:00.0000000Z\""),
+        ("DATETIMEBIN('2021-05-17T10:00:00', 'yyyy')", "undefined"), // only days and smaller units are bins
+        ("DATETIMEBIN('2021-05-17T10:00:00', 'mm')", "undefined"),
         ("DATETIMEBIN('2021-01-08T18:35:00', 'mi', 15)", "\"2021-01-08T18:30:00.0000000Z\""),
         ("DATETIMEBIN('2021-01-08T18:35:00', 'dd', 0)", "undefined"),
         ("DATETIMEBIN('2021-01-08T18:35:00', 'dd', -1)", "undefined"),
         ("DATETIMEBIN('2021-01-08T18:35:00', 'dd', 1, '1500-01-01')", "undefined"),
         ("DATETIMEBIN('2021-01-08T18:35:00', 'dd', 1.5)", "undefined"),
-        ("DATETIMEBIN('2021-05-17', 'mm', 5)", "\"2021-04-01T00:00:00.0000000Z\""),
-        ("DATETIMEBIN('2021-05-17', 'yyyy', 10)", "\"2020-01-01T00:00:00.0000000Z\""),
+        ("DATETIMEBIN('2021-05-17', 'mm', 5)", "undefined"),
+        ("DATETIMEBIN('2021-05-17', 'yyyy', 10)", "undefined"),
         ("DATETIMETOTICKS('1970-01-01')", "0"),
         ("DATETIMETOTICKS('1969-12-31T23:59:59.9999999')", "-1"),
         ("DATETIMETOTICKS('0001-01-01')", "-621355968000000000"),
@@ -583,10 +578,8 @@ fn unsupported_and_unknown_functions() {
     for (q, kind) in [
         ("SELECT VALUE ST_DISTANCE({}, {})", ErrorKind::Unsupported),
         ("SELECT * FROM c WHERE ST_WITHIN(c.loc, {})", ErrorKind::Unsupported),
-        ("SELECT VALUE VectorDistance([1], [2])", ErrorKind::Unsupported),
         ("SELECT VALUE FullTextContains(c.t, 'x') FROM c", ErrorKind::Unsupported),
         ("SELECT VALUE udf.myFunc(1)", ErrorKind::Unsupported),
-        ("SELECT VALUE DOCUMENTID(c) FROM c", ErrorKind::Unsupported),
         ("SELECT VALUE NOPE(1)", ErrorKind::Semantic),
         ("SELECT VALUE ABS()", ErrorKind::Semantic),
         ("SELECT VALUE ABS(1, 2)", ErrorKind::Semantic),
@@ -610,4 +603,37 @@ fn unsupported_and_unknown_functions() {
 #[test]
 fn is_boolean_is_accepted_as_the_name_the_java_sdk_writes() {
     table(&[("IS_BOOLEAN(true)", "true"), ("IS_BOOLEAN(1)", "false"), ("IS_BOOLEAN(undefined)", "false"), ("IS_BOOL(false)", "true")]);
+}
+
+/// JSON cannot write NaN or Infinity: a query that would answer one fails (400, sub-status 4001) on Azure, where the
+/// emulator used to write `null`. Inside the query they are values like any other.
+#[test]
+fn non_finite_results_fail_the_query() {
+    for sql in [
+        "SELECT VALUE 1 / 0",
+        "SELECT VALUE 5 % 0",
+        "SELECT VALUE SQRT(-1)",
+        "SELECT VALUE LOG(0)",
+        "SELECT VALUE ASIN(2)",
+        "SELECT VALUE ABS(Infinity)",
+        "SELECT VALUE NaN",
+        "SELECT VALUE [1 / 0]",
+        "SELECT VALUE {a: 0.0 / 0.0}",
+        "SELECT 1 / 0 AS x",
+    ] {
+        let e = err_run(sql);
+        assert_eq!((e.code.as_str(), e.substatus), ("4001", Some(4001)), "{sql}");
+        assert_eq!(e.shape, azemu_cosmos_sql::Shape::Coded);
+        assert_eq!(e.message, "The response content contains a numeric value that cannot be represented in JSON (e.g. Infinity and NaN).");
+    }
+    // not part of the answer: no error
+    for sql in
+        ["SELECT VALUE IS_FINITE_NUMBER(1 / 0)", "SELECT VALUE (1 / 0 > 1)", "SELECT VALUE TOSTRING(NaN)", "SELECT VALUE 1 WHERE 1 / 0 > 1"]
+    {
+        assert_eq!(try_run(sql, &[], &fixed_clock_opts()).map(|v| v.len()), Ok(1), "{sql}");
+    }
+}
+
+fn err_run(sql: &str) -> azemu_cosmos_sql::SqlError {
+    try_run(sql, &[], &fixed_clock_opts()).unwrap_err()
 }

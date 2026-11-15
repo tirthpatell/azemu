@@ -10,6 +10,7 @@ async fn no_authorization_is_401_with_challenge() {
     let r = t.srv.send("GET", &url, &[], "").await;
     assert_eq!(r.status, 401);
     assert_eq!(r.header("www-authenticate"), Some("HMAC-SHA256, Bearer"));
+    assert_eq!(r.text(), "", "the service sends no body");
     // other schemes are no credentials
     let r = t.srv.send("GET", &url, &[("Authorization", "Basic abc")], "").await;
     assert_eq!(r.status, 401);
@@ -38,20 +39,35 @@ async fn unauthenticated_requests_still_get_common_headers() {
 }
 
 #[tokio::test]
-async fn missing_or_unsupported_api_version_is_400() {
+async fn api_version_as_azure_takes_it() {
     let t = start().await;
+    // no version is taken, and answers in the older shape: no `etag` in the body (tried in November 2026)
     let r = t.srv.send("GET", &format!("{}/kv", t.base), &[AUTH], "").await;
-    assert_eq!(r.status, 400);
-    assert_eq!(r.header("content-type"), Some("application/problem+json; charset=utf-8"));
-    assert_eq!(r.json()["name"], "api-version");
-    assert_eq!(r.json()["type"], "https://azconfig.io/errors/invalid-argument");
-    let r = t.call_v("1999-01-01", "GET", "/kv", &[], "").await;
-    assert_eq!(r.status, 400);
-    let r = t.call_v("banana", "GET", "/kv", &[], "").await;
-    assert_eq!(r.status, 400);
-    for v in ["1.0", "2023-10-01", "2023-11-01", "2024-09-01", "2026-04-01", "2030-01-01"] {
-        assert_eq!(t.call_v(v, "GET", "/kv", &[], "").await.status, 200, "{v}");
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json(), json!({"items": []}));
+    for v in ["1.0", "2022-11-01-preview"] {
+        assert!(t.call_v(v, "GET", "/kv", &[], "").await.json().get("etag").is_none(), "{v}");
     }
+    for v in ["2023-10-01", "2023-11-01", "2024-09-01", "2026-04-01"] {
+        let r = t.call_v(v, "GET", "/kv", &[], "").await;
+        assert_eq!(r.status, 200, "{v}");
+        assert!(r.json()["etag"].is_string(), "{v}");
+    }
+    for v in ["1999-01-01", "2030-01-01", "2022-11-01", "2025-01-01", "2026-04-01-preview", "2.0", "1.1"] {
+        let r = t.call_v(v, "GET", "/kv", &[], "").await;
+        assert_eq!(r.status, 400, "{v}");
+        assert_eq!(r.header("content-type"), Some("application/problem+json; charset=utf-8"));
+        let j = r.json();
+        assert_eq!(j["type"], "https://azconfig.io/errors/invalid-argument");
+        assert_eq!((j["title"].as_str(), j["name"].as_str()), (Some("Unsupported API version"), Some("api-version")));
+        assert_eq!(
+            j["detail"],
+            format!("The HTTP resource that matches the request URI '{}/kv' does not support the API version '{v}'.", t.base)
+        );
+    }
+    // text that is no version at all has another title
+    let r = t.call_v("banana", "GET", "/kv", &[], "").await;
+    assert_eq!((r.status, r.json()["title"].clone()), (400, json!("Invalid API version")));
 }
 
 #[tokio::test]

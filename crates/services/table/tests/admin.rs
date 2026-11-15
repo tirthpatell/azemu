@@ -165,23 +165,49 @@ async fn secondary_endpoint_is_read_only() {
 async fn requests_without_credentials() {
     let e = with_table().await;
     let url = format!("{}/Tables", e.base);
-    // older API versions: 403 AuthenticationFailed
+    // all of this was tried against Azure in November 2026
+    // older API versions (before 2020-12-06, when Entra ID came to Table): 404 ResourceNotFound
     let r = e.srv.send("GET", &url, &[("x-ms-version", "2019-02-02")], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
-    let r = e.srv.send("GET", &url, &[], "").await;
-    assert_eq!(r.status, 403);
-    // newer versions: 401 with the bearer challenge
-    let r = e.srv.send("GET", &url, &[("x-ms-version", "2020-12-06")], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (401, "InvalidAuthenticationInfo"));
-    assert!(r.header("www-authenticate").unwrap().starts_with("Bearer authorization_uri=https://login.microsoftonline.com/"));
-    assert!(r.header("www-authenticate").unwrap().ends_with("resource_id=https://storage.azure.com"));
+    assert_eq!((r.status, code(&r).as_str()), (404, "ResourceNotFound"));
+    // the newest version, or none: 401 NoAuthenticationInformation with the bearer challenge, in plain JSON
+    for h in [vec![], vec![("x-ms-version", "2020-12-06")]] {
+        let r = e.srv.send("GET", &url, &h, "").await;
+        assert_eq!((r.status, code(&r).as_str()), (401, "NoAuthenticationInformation"));
+        assert_eq!(
+            r.header("www-authenticate"),
+            Some(
+                "Bearer authorization_uri=https://login.microsoftonline.com/common/oauth2/authorize resource_id=https://storage.azure.com"
+            )
+        );
+        assert_eq!(r.header("content-type"), Some("application/json"));
+        assert_eq!(r.header("x-ms-error-code"), Some("NoAuthenticationInformation"));
+    }
     // service-level operations answer in XML
     let r = e.srv.send("GET", &format!("{}/?restype=service&comp=stats", e.base), &[("x-ms-version", "2020-12-06")], "").await;
     assert_eq!(r.status, 401);
-    assert!(r.text().contains("<m:code>InvalidAuthenticationInfo</m:code>"));
-    // any credentials are accepted
-    for auth in ["SharedKey acct:whatever", "SharedKeyLite acct:x", "Bearer abc.def.ghi"] {
+    assert!(r.text().contains("<m:code>NoAuthenticationInformation</m:code>"));
+    // a well formed signature of another account, and a bearer token, are accepted
+    for auth in ["SharedKey acct:AAAA", "SharedKeyLite acct:AAAA", "Bearer abc.def.ghi"] {
         let r = e.srv.send("GET", &url, &[("Authorization", auth)], "").await;
         assert_eq!(r.status, 200, "{auth}");
+    }
+    // the form of the header is checked: one word, no token, a signature that is not base64 (400); an unknown scheme (403)
+    for auth in ["Foo", "Bearer", "SharedKey acct", "SharedKey acct:", "SharedKey acct:replay", "SharedKeyLite acct:Sanitized"] {
+        let r = e.srv.send("GET", &url, &[("Authorization", auth)], "").await;
+        assert_eq!((r.status, code(&r).as_str()), (400, "InvalidAuthenticationInfo"), "{auth}");
+        assert_eq!(r.header("content-type"), Some("application/json"));
+    }
+    let r = e.srv.send("GET", &url, &[("Authorization", "Foo bar")], "").await;
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
+    // a Shared Key date more than 15 minutes old, an x-ms-version Azure does not know
+    let r = e.srv.send("GET", &url, &[("Authorization", "SharedKey acct:AAAA"), ("x-ms-date", "Fri, 27 Mar 2026 01:00:51 GMT")], "").await;
+    assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"));
+    for v in ["1999-01-01", "2099-01-01", "banana"] {
+        let r = e.srv.send("GET", &url, &[AUTH, ("x-ms-version", v)], "").await;
+        assert_eq!(r.status, 400, "{v}");
+        assert!(r.header("content-type").unwrap().starts_with("application/xml"));
+        assert!(r.header("x-ms-error-code").is_none());
+        assert!(r.text().contains("<code>InvalidHeaderValue</code>"), "{}", r.text());
+        assert!(r.text().contains("<error xmlns=\"http://schemas.microsoft.com/ado/2007/08/dataservices/metadata\">"), "{}", r.text());
     }
 }

@@ -4,7 +4,7 @@
 # on the standard ports. No name under .localhost has to resolve and nothing is published to the host.
 #
 #   tests/container/run.sh [path-to-azemu-binary]        which emulator image is tested, first match:
-#     1. AZEMU_IMAGE=azemu:0.1.0 tests/container/run.sh   an image you built from the release Dockerfile (or pulled): it is
+#     1. AZEMU_IMAGE=azemu:0.2.0 tests/container/run.sh   an image you built from the release Dockerfile (or pulled): it is
 #                                                         tested as it is, and left in place afterwards
 #     2. a binary given as the argument                   put into a small image with Dockerfile.dev (removed afterwards)
 #     3. the image azemu:latest, when it exists           the release image: `docker build -t azemu:latest .`
@@ -24,6 +24,9 @@ net="azemu-ct-net-$tag"
 emu="azemu-ct-emu-$tag"
 warn="azemu-ct-warn-$tag"
 user_ct="azemu-ct-user-$tag"
+vol_ct="azemu-ct-vol-$tag"
+vol_ca="azemu-ct-ca-$tag"
+vol_data="azemu-ct-data-$tag"
 emu_image="azemu-ct-emulator:$tag"
 client_image="azemu-ct-client:$tag"
 # not /tmp, which is memory-backed on many systems
@@ -40,7 +43,8 @@ cleanup() {
         say "kept: containers $emu, network $net, images $emu_image $client_image"
         return
     fi
-    docker rm -f "$emu" "$warn" "$user_ct" >/dev/null 2>&1
+    docker rm -f "$emu" "$warn" "$user_ct" "$vol_ct" >/dev/null 2>&1
+    docker volume rm "$vol_ca" "$vol_data" >/dev/null 2>&1
     docker network rm "$net" >/dev/null 2>&1
     [ "$built_emu_image" = 1 ] && docker rmi -f "$emu_image" >/dev/null 2>&1
     docker rmi -f "$client_image" >/dev/null 2>&1
@@ -99,6 +103,34 @@ done
 if [ "$healthy" = healthy ]; then step_ok "health: the image's HEALTHCHECK reports healthy"; elif [ -z "$healthy" ]; then step_fail "health: the image has no HEALTHCHECK"; else step_fail "health: the image's HEALTHCHECK says '$healthy'"; fi
 user=$(docker inspect -f '{{.Config.User}}' "$emu_image")
 case "$user" in ""|0|root|0:*|root:*) step_fail "user: the image runs as root ('$user')";; *) step_ok "user: the image runs as '$user', not root";; esac
+
+# the start log has no WARN line: the directories that hold the authority's key and saved keys are private in the image, so
+# azemu has no "mode 755" warning to give on a first start. (A WARN that .localhost names do not resolve is about the Docker
+# DNS of the host, not the image, and step 5 checks it on its own.)
+warns=$(docker logs "$emu" 2>&1 | grep -E '(^|[[:space:]])WARN([[:space:]]|$)' | grep -v 'does not resolve names under .localhost' || true)
+if [ -z "$warns" ]; then step_ok "start log: no WARN line"; else step_fail "start log: the emulator logged a WARN at start"; printf '%s\n' "$warns" | head -5; fi
+
+# the same with the two documented volumes, `-v azemu-ca:/home/azemu/.azemu` and `-v azemu-data:/data`: a new named volume
+# takes the owner and mode of the directory in the image (private, owned by the image's user), so it needs no extra setup
+if docker run -d --name "$vol_ct" -v "$vol_ca:/home/azemu/.azemu" -v "$vol_data:/data" -e AZEMU_DATA_DIR=/data "$emu_image" >/dev/null; then
+    ready=""
+    for _ in $(seq 1 40); do
+        ready=$(docker logs "$vol_ct" 2>/dev/null | grep -m1 '^azemu ready' || true)
+        [ -n "$ready" ] && break
+        [ "$(docker inspect -f '{{.State.Running}}' "$vol_ct")" = true ] || break
+        sleep 0.5
+    done
+    warns=$(docker logs "$vol_ct" 2>&1 | grep -E '(^|[[:space:]])WARN([[:space:]]|$)' | grep -v 'does not resolve names under .localhost' || true)
+    if [ -n "$ready" ] && [ -z "$warns" ]; then
+        step_ok "volumes: with a volume on /home/azemu/.azemu and one on /data the start log has no WARN line"
+    else
+        step_fail "volumes: not started, or it logged a WARN"
+        printf '%s\n' "$warns" | head -5
+    fi
+    docker rm -f "$vol_ct" >/dev/null 2>&1
+else
+    step_fail "volumes: cannot start the container with volumes"
+fi
 
 # 4. the client container runs its checks against it
 out=$(docker run --rm --network "$net" "$client_image" 2>&1); code=$?

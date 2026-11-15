@@ -19,15 +19,13 @@ pub fn is_newer(version: &str) -> bool {
     version.starts_with("20") && version > LAST_OLD_VERSION
 }
 
-/// `1.0`, or `YYYY-MM-DD` with an optional `-preview`, from 2022-11-01 on.
-fn valid_api_version(v: &str) -> bool {
-    if v == "1.0" {
-        return true;
-    }
-    let date = v.strip_suffix("-preview").unwrap_or(v);
-    let b = date.as_bytes();
-    let shape = b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() });
-    shape && date >= "2022-11-01"
+/// The versions the service takes (tried in November 2026). Any other value that looks like a version is "Unsupported API
+/// version" (`2022-11-01`, `2025-01-01`, `2.0`, `7.6`); text that is none is "Invalid API version". No version at all is taken.
+const API_VERSIONS: [&str; 6] = ["1.0", "2022-11-01-preview", "2023-10-01", "2023-11-01", "2024-09-01", "2026-04-01"];
+
+/// The versions whose list answers have no `etag` in the body (and what a request without a version gets).
+pub fn lists_have_body_etag(version: &str) -> bool {
+    !matches!(version, "" | "1.0" | "2022-11-01-preview")
 }
 
 fn has_credentials(req: &Request) -> bool {
@@ -48,11 +46,13 @@ pub fn precheck(req: &Request) -> Option<Response> {
         return Some(errors::unauthorized());
     }
     match req.query.get("api-version") {
-        None | Some("") => Some(errors::invalid_argument("api-version", "api-version: The api-version query parameter is required.", None)),
-        Some(v) if !valid_api_version(v) => {
-            Some(errors::invalid_argument("api-version", &format!("api-version: The api-version '{v}' is not supported."), None))
+        None | Some("") => None,
+        Some(v) if API_VERSIONS.contains(&v) => None,
+        Some(v) => {
+            let uri = format!("{}{}", req.ctx.endpoint.base_url(), req.path);
+            let looks_like_one = v.bytes().next().map(|b| b.is_ascii_digit()).unwrap_or(false);
+            Some(errors::unsupported_api_version(&uri, v, looks_like_one))
         }
-        Some(_) => None,
     }
 }
 
@@ -93,11 +93,11 @@ mod tests {
 
     #[test]
     fn api_versions() {
-        for v in ["1.0", "2023-10-01", "2023-11-01", "2024-09-01", "2026-04-01", "2025-01-01-preview"] {
-            assert!(valid_api_version(v), "{v}");
+        for v in ["1.0", "2022-11-01-preview", "2023-10-01", "2023-11-01", "2024-09-01", "2026-04-01"] {
+            assert!(API_VERSIONS.contains(&v), "{v}");
         }
-        for v in ["", "2.0", "latest", "2023-1-01", "2020-01-01"] {
-            assert!(!valid_api_version(v), "{v}");
+        for v in ["", "2.0", "latest", "2023-1-01", "2020-01-01", "2022-11-01", "2025-01-01", "2026-04-01-preview", "7.6"] {
+            assert!(!API_VERSIONS.contains(&v), "{v}");
         }
     }
 

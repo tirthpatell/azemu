@@ -167,7 +167,9 @@ async fn receive_deferred_of_an_unknown_sequence_number_is_message_not_found() {
             vec![("sequence-numbers", Value::Array(vec![Value::Long(99)])), ("receiver-settle-mode", Value::Uint(1))],
         )
         .await;
-    assert_eq!((reply.status, reply.condition.as_deref()), (404, Some("com.microsoft:message-not-found")));
+    // Azure answers 500 with this condition (checked in November 2026)
+    assert_eq!((reply.status, reply.condition.as_deref()), (500, Some("com.microsoft:message-not-found")));
+    assert!(reply.description.starts_with("Messages not found. One or more sequence numbers missing."), "{}", reply.description);
 }
 
 #[tokio::test]
@@ -334,7 +336,11 @@ async fn schedule_and_cancel_through_management_and_delivery_at_the_time() {
     assert_eq!(reply.status, 200);
     let reply =
         mg.call(&mut c, "com.microsoft:cancel-scheduled-message", vec![("sequence-numbers", Value::Array(vec![seqs[1].clone()]))]).await;
-    assert_eq!(reply.status, 404, "cancelling twice");
+    // Azure accepts a second cancel of a message that was scheduled, and refuses a number that never was
+    assert_eq!(reply.status, 200, "cancelling twice");
+    let reply =
+        mg.call(&mut c, "com.microsoft:cancel-scheduled-message", vec![("sequence-numbers", Value::Array(vec![Value::Long(9999)]))]).await;
+    assert_eq!((reply.status, reply.condition.as_deref()), (400, Some("amqp:not-allowed")));
 
     // peek shows it with state 2
     let reply = mg
@@ -430,7 +436,8 @@ async fn forwarding_chain_and_dead_letter_forwarding() {
     assert_eq!(body(&m), "poison");
     assert_eq!(app(&m, "DeadLetterReason"), Some(Value::str("r")));
     assert_eq!(ann(&m, "x-opt-deadletter-source"), Some(Value::str("dl-source")));
-    assert_eq!(ann(&m, "x-opt-enqueue-sequence-number"), Some(Value::Long(1)), "the first sequence number is kept");
+    // Azure sets x-opt-enqueue-sequence-number only on a message that came through a topic: a message from a queue has none
+    assert_eq!(ann(&m, "x-opt-enqueue-sequence-number"), None);
 }
 
 #[tokio::test]
@@ -440,10 +447,44 @@ async fn forwarding_loops_are_cut_off() {
     e.queue("b", |s| s.forward_to = Some("a".into()));
     let mut c = e.client().await;
     let s = sender(&mut c, "a").await;
-    match c.send_message_wait(s, &msg("x")).await {
-        Some(DeliveryState::Rejected { error: Some(err) }) => assert_eq!(err.condition, "amqp:resource-limit-exceeded"),
-        other => panic!("{other:?}"),
+    // Azure accepts the send; after four forwards the message is dead-lettered where it is, with this reason and no description
+    // (checked with a chain of seven queues in November 2026)
+    assert_eq!(c.send_message_wait(s, &msg("x")).await, Some(DeliveryState::Accepted));
+    let in_dlq = |name: &str| e.core(name, |c| c.counts().dead_letter);
+    assert_eq!((in_dlq("a"), in_dlq("b")), (1, 0));
+    assert_eq!((e.core("a", |c| c.counts().active), e.core("b", |c| c.counts().active)), (0, 0));
+    let r = receiver_rd(&mut c, "a/$DeadLetterQueue", 1).await;
+    let m = c.recv(r).await.message();
+    assert_eq!(app(&m, "DeadLetterReason"), Some(Value::str("Maximum transfer hop count is exceeded.")));
+    assert_eq!(app(&m, "DeadLetterErrorDescription"), None);
+}
+
+#[tokio::test]
+async fn a_forward_whose_target_was_deleted_leaves_the_messages_where_they_are() {
+    let e = env().await;
+    e.queue("src", |s| s.forward_to = Some("gone".into()));
+    let mut c = e.client().await;
+    let s = sender(&mut c, "src").await;
+    assert_eq!(c.send_message_wait(s, &msg("x")).await, Some(DeliveryState::Accepted));
+    assert_eq!(e.core("src", |c| c.counts().active), 1);
+}
+
+#[tokio::test]
+async fn a_chain_of_seven_queues_stops_in_the_fifth() {
+    let e = env().await;
+    for i in 1..=7 {
+        e.queue(&format!("c{i}"), move |s| {
+            if i < 7 {
+                s.forward_to = Some(format!("c{}", i + 1));
+            }
+        });
     }
+    let mut c = e.client().await;
+    let s = sender(&mut c, "c1").await;
+    assert_eq!(c.send_message_wait(s, &msg("x")).await, Some(DeliveryState::Accepted));
+    let dlq: Vec<usize> = (1..=7).map(|i| e.core(&format!("c{i}"), |c| c.counts().dead_letter)).collect();
+    assert_eq!(dlq, [0, 0, 0, 0, 1, 0, 0]);
+    assert_eq!(e.core("c7", |c| c.counts().active), 0);
 }
 
 #[tokio::test]

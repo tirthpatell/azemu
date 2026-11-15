@@ -82,7 +82,8 @@ DEFAULT_AUTH = {
     "dfs": "SharedKey {account}:replay",
     "azconfig": "HMAC-SHA256 Credential=replay&SignedHeaders=x-ms-date;host;x-ms-content-sha256&Signature=replay",
     "vault": "Bearer replay",
-    "eventgrid": "SharedAccessKey replay",
+    # a topic does not take the scheme `SharedAccessKey` (Azure answers 401); the recordings hold no key, so any signed-token form will do
+    "eventgrid": "SharedAccessSignature r=replay&e=9999999999&s=replay",
     "servicebus": "SharedAccessSignature sr=replay&sig=replay&se=9999999999&skn=replay",
     "management": "Bearer replay",
 }

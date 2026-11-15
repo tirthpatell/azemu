@@ -263,6 +263,14 @@ impl Client {
         for (k, v) in headers {
             req = req.header(HeaderName::from_bytes(k.as_bytes())?, HeaderValue::from_str(v)?);
         }
+        // A Shared Key request carries its date, as every client sends one (the storage services refuse one without).
+        let has = |name: &str| headers.iter().any(|(k, _)| k.eq_ignore_ascii_case(name));
+        let shared_key = headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("authorization") && v.trim_start().to_ascii_lowercase().starts_with("sharedkey"));
+        if shared_key && !has("x-ms-date") && !has("date") {
+            req = req.header("x-ms-date", crate::time::rfc1123(::time::OffsetDateTime::now_utc()));
+        }
         let req = req.body(Full::new(body.into()))?;
 
         if https {

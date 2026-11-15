@@ -232,9 +232,9 @@ def test_list_subscriptions_only_lists_those_of_the_topic(admin):
     assert [s.name for s in admin.list_subscriptions(t2)] == ["z"]
 
 
-def test_list_subscriptions_of_missing_topic_raises_resource_not_found(admin):
-    with pytest.raises(ResourceNotFoundError):
-        list(admin.list_subscriptions("no-such-topic"))
+def test_list_subscriptions_of_missing_topic_lists_nothing(admin):
+    # Azure answers the list of services (200) for a topic that is not there, which the SDK reads as an empty list
+    assert list(admin.list_subscriptions("no-such-topic")) == []
 
 
 @pytest.mark.parametrize(

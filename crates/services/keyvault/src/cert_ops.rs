@@ -48,18 +48,12 @@ impl KeyVaultService {
         let Some(op) = item.extra.operation.as_mut() else {
             return pending_not_found(name);
         };
-        if cancel {
-            op.cancellation_requested = true;
-            if op.status == "inProgress" {
-                op.status = "cancelled".into();
-            }
+        // The request stays `inProgress` with the flag set (an unknown issuer's request is finished by a merge, not by a
+        // cancel); asking again with `false` takes the flag back.
+        if body.contains_key("cancellation_requested") {
+            op.cancellation_requested = cancel;
         }
-        let cancelled = op.cancellation_requested;
-        let json = operation_json(&base, &display, op);
-        if cancelled && item.versions.is_empty() {
-            item.extra.stub_cancelled = true;
-        }
-        json_response(200, &json)
+        json_response(200, &operation_json(&base, &display, op))
     }
 
     pub fn delete_certificate_operation(&self, req: &Request, name: &str) -> Response {
@@ -73,13 +67,9 @@ impl KeyVaultService {
         let Some(op) = item.extra.operation.take() else {
             return pending_not_found(name);
         };
-        let json = operation_json(&base, &display, &op);
-        // a request that never produced a certificate stays as a certificate without a
-        // version (it can still be deleted, as the real service allows)
-        if item.versions.is_empty() && op.cancellation_requested {
-            item.extra.stub_cancelled = true;
-        }
-        json_response(200, &json)
+        // the answer is the request as it was; a request that never produced a certificate leaves a certificate without
+        // a version, which can still be read and deleted
+        json_response(200, &operation_json(&base, &display, &op))
     }
 
     /// `POST /certificates/{name}/pending/merge`: finish a pending request with a
@@ -199,12 +189,12 @@ impl KeyVaultService {
     }
 
     pub async fn restore_certificate(&self, req: &Request) -> Response {
-        let body = match body_object(req) {
+        let body = match required_body_object(req) {
             Ok(b) => b,
             Err(r) => return r,
         };
-        let text = match str_field(&body, "value") {
-            Ok(t) => t.to_string(),
+        let text = match backup::value_of(&body) {
+            Ok(t) => t,
             Err(r) => return r,
         };
         let payload = match backup::decode(Kind::Certificate, &text) {
@@ -213,14 +203,14 @@ impl KeyVaultService {
         };
         let parsed = tokio::task::spawn_blocking(move || parse_cert_backup(&payload)).await;
         let Ok(Some((name, policy, versions))) = parsed else {
-            return bad_parameter("The backup blob is not valid.");
+            return backup::corrupt();
         };
         let now = now_secs(req);
         let c = Ctx::of(req);
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now);
         let Some(last) = versions.last() else {
-            return bad_parameter("The backup blob is not valid.");
+            return backup::corrupt();
         };
         if vault.certs.exists(&name) || name_taken_by_other(vault, &name) {
             return restore_conflict(Kind::Certificate, &format!("{}/certificates/{name}/{}", c.base, last.0.version));

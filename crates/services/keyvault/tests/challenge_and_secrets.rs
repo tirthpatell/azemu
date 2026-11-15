@@ -220,10 +220,15 @@ async fn secret_soft_delete_recover_purge() {
     assert_eq!(kv.get("/secrets/s/versions").await.json()["value"].as_array().unwrap().len(), 2);
     assert_eq!(kv.get("/deletedsecrets").await.json()["value"].as_array().unwrap().len(), 0);
 
-    // purge only works on deleted secrets
+    // purge only works on deleted secrets, and recover only on deleted ones (tried against Azure in November 2026)
     let r = kv.call("DELETE", "/deletedsecrets/s", None).await;
-    assert_eq!(r.status, 404);
-    assert_eq!(r.json()["error"]["message"], "Deleted Secret not found: s");
+    assert_eq!(r.status, 400);
+    assert_eq!(code(&r), "MethodNotAllowed");
+    assert_eq!(r.json()["error"]["message"], "Secret must be deleted prior to being purged.");
+    let r = kv.call("POST", "/deletedsecrets/s/recover", None).await;
+    assert_eq!(r.status, 400);
+    assert_eq!(code(&r), "MethodNotAllowed");
+    assert_eq!(r.json()["error"]["message"], "Secret exists already: s");
     kv.call("DELETE", "/secrets/s", None).await;
     let r = kv.call("DELETE", "/deletedsecrets/s", None).await;
     assert_eq!(r.status, 204);

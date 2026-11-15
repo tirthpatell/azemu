@@ -18,25 +18,56 @@ fn cmp_ord<T: PartialOrd>(op: BinOp, a: T, b: T) -> Option<bool> {
     })
 }
 
-/// Comparison with C#-style promotion: integers and doubles compare as
-/// doubles when mixed; strings compare ordinally; booleans support only
-/// `=` and `<>`; incompatible types (for example a string and a number)
-/// are unknown, so neither `=` nor `<>` is true.
-pub(crate) fn compare(op: BinOp, l: &Value, r: &Value) -> Option<bool> {
-    match (l, r) {
+/// The name of a type in the error text of an operator that does not take it (Azure evaluates the language with the C# runtime, so
+/// the names are C#'s).
+fn type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Long(_) => "long",
+        Value::Double(_) => "double",
+        Value::Str(_) => "string",
+        Value::Timestamp(_) => "System.DateTime",
+    }
+}
+
+fn symbol(op: BinOp) -> &'static str {
+    match op {
+        BinOp::Eq => "==",
+        BinOp::Ne => "!=",
+        BinOp::Lt => "<",
+        BinOp::Le => "<=",
+        BinOp::Gt => ">",
+        BinOp::Ge => ">=",
+        BinOp::Add => "+",
+        BinOp::Sub => "-",
+        BinOp::Mul => "*",
+        BinOp::Div => "/",
+        BinOp::Rem => "%",
+        BinOp::And => "AND",
+        BinOp::Or => "OR",
+    }
+}
+
+fn mismatch(op: BinOp, l: &Value, r: &Value) -> EvalError {
+    EvalError::new(format!("Operator '{}' cannot be applied to operands of type '{}' and '{}'", symbol(op), type_name(l), type_name(r)))
+}
+
+/// Comparison with C#-style promotion: integers and doubles compare as doubles when mixed; `=` and `<>` take two values of
+/// one type (strings compare ordinally); `<`, `<=`, `>` and `>=` take numbers and times only. Anything else is an error, the one a
+/// message that is dead-lettered with the reason `FilterException` carries (Azure: `Operator '>' cannot be applied to operands of
+/// type 'string' and 'long'`).
+pub(crate) fn compare(op: BinOp, l: &Value, r: &Value) -> Result<Option<bool>, EvalError> {
+    Ok(match (l, r) {
         (Value::Long(a), Value::Long(b)) => cmp_ord(op, a, b),
         (Value::Long(a), Value::Double(b)) => cmp_ord(op, *a as f64, *b),
         (Value::Double(a), Value::Long(b)) => cmp_ord(op, *a, *b as f64),
         (Value::Double(a), Value::Double(b)) => cmp_ord(op, a, b),
-        (Value::Str(a), Value::Str(b)) => cmp_ord(op, a, b),
         (Value::Timestamp(a), Value::Timestamp(b)) => cmp_ord(op, a, b),
-        (Value::Bool(a), Value::Bool(b)) => match op {
-            BinOp::Eq => Some(a == b),
-            BinOp::Ne => Some(a != b),
-            _ => None,
-        },
-        _ => None,
-    }
+        (Value::Str(a), Value::Str(b)) if matches!(op, BinOp::Eq | BinOp::Ne) => cmp_ord(op, a, b),
+        (Value::Bool(a), Value::Bool(b)) if matches!(op, BinOp::Eq | BinOp::Ne) => Some((a == b) == (op == BinOp::Eq)),
+        _ => return Err(mismatch(op, l, r)),
+    })
 }
 
 fn concat_text(v: &Value) -> Option<String> {
@@ -70,7 +101,7 @@ pub(crate) fn arith(op: BinOp, l: &Value, r: &Value) -> Result<Val, EvalError> {
             BinOp::Add => Value::Long(a.wrapping_add(*b)),
             BinOp::Sub => Value::Long(a.wrapping_sub(*b)),
             BinOp::Mul => Value::Long(a.wrapping_mul(*b)),
-            _ if *b == 0 => return Err(EvalError::new("attempted to divide by zero")),
+            _ if *b == 0 => return Err(EvalError::new("Attempted to divide by zero.")),
             BinOp::Div => Value::Long(a.wrapping_div(*b)),
             _ => Value::Long(a.wrapping_rem(*b)),
         },
@@ -85,7 +116,7 @@ pub(crate) fn arith(op: BinOp, l: &Value, r: &Value) -> Result<Val, EvalError> {
         (Value::Timestamp(a), Value::Long(b)) if op == BinOp::Add => Value::Timestamp(a.wrapping_add(*b)),
         (Value::Timestamp(a), Value::Long(b)) if op == BinOp::Sub => Value::Timestamp(a.wrapping_sub(*b)),
         (Value::Long(a), Value::Timestamp(b)) if op == BinOp::Add => Value::Timestamp(a.wrapping_add(*b)),
-        _ => return Ok(None),
+        _ => return Err(mismatch(op, l, r)),
     };
     Ok(Some(v))
 }

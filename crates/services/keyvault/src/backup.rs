@@ -3,11 +3,11 @@
 //! prefixes real backups start with) followed by JSON, so a restore can tell a
 //! secret backup from a key backup and reject garbage.
 
-use azemu_core::Response;
-use serde_json::Value;
+use azemu_core::{json_error, Response};
+use serde_json::{Map, Value};
 
-use crate::common::{b64u, b64u_decode};
-use crate::errors::{bad_parameter, Kind};
+use crate::common::{b64u, b64u_decode, invalid_property};
+use crate::errors::Kind;
 
 fn marker(kind: Kind) -> &'static str {
     match kind {
@@ -26,9 +26,22 @@ pub fn encode(kind: Kind, payload: &Value) -> String {
     b64u(&bytes)
 }
 
+/// What a restore says to a `value` that is not a backup of this vault (tried in November 2026): the words are the error code.
+pub fn corrupt() -> Response {
+    json_error::response(400, "Malformed backup blob", "Backup blob is corrupt.")
+}
+
+/// The `value` of a restore request: text, and not empty.
+pub fn value_of(body: &Map<String, Value>) -> Result<String, Response> {
+    match body.get("value") {
+        Some(Value::String(s)) if !s.is_empty() => Ok(s.clone()),
+        _ => Err(invalid_property("")),
+    }
+}
+
 /// Parse the `value` of a restore request.
 pub fn decode(kind: Kind, text: &str) -> Result<Value, Response> {
-    let invalid = || bad_parameter("The backup blob is not valid.");
+    let invalid = corrupt;
     let bytes = b64u_decode(text).ok_or_else(invalid)?;
     let m = marker(kind);
     if bytes.first().copied() != Some(m.len() as u8) || bytes.get(1..1 + m.len()) != Some(m.as_bytes()) {

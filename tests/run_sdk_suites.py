@@ -33,7 +33,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUITES = ROOT / "tests" / "sdk-python"
 SPLIT_PER_FILE = {"servicebus", "eventhubs"}
 # Suites that need several services in one process: always run on the unified binary.
-NEEDS_UNIFIED = {"storage_events", "arm", "kafka", "persistence"}
+NEEDS_UNIFIED = {"storage_events", "arm", "kafka", "persistence", "seed"}
 # The variables that switch auto-creation on for a suite's emulator in the second pass (marker `autocreate`).
 AUTOCREATE_VARS = {
     "servicebus": ["AZEMU_SERVICEBUS_AUTOCREATE"],

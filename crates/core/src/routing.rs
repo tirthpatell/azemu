@@ -100,7 +100,13 @@ fn match_prefix<'a>(services: &'a [Arc<dyn Service>], path: &str, admin_only: bo
 /// Paths under this prefix are the emulator's own and are routed whatever the host is.
 pub(crate) const ADMIN_PREFIX: &str = "/_azemu/";
 
-/// Gateway routing: steps 1 to 4 of how a request finds its service (see the module comment).
+/// Is this one of the emulator's own paths: `/_azemu/...`, or `/_azemu` itself (the index)?
+pub(crate) fn is_admin_path(path: &str) -> bool {
+    let p = collapse_slashes(path);
+    p.starts_with(ADMIN_PREFIX) || p == ADMIN_PREFIX.trim_end_matches('/')
+}
+
+/// Gateway routing: steps 1 to 3 (3b is the last try) of how a request finds its service (see the module comment).
 /// `Err` carries the 404 message.
 pub(crate) fn route_gateway(services: &[Arc<dyn Service>], path: &str, authority: &str, port: u16) -> Result<Routed, String> {
     let whole = |s: &Arc<dyn Service>, account: String| Routed { service: s.clone(), account, path: path.to_string(), path_style: false };
@@ -127,6 +133,15 @@ pub(crate) fn route_gateway(services: &[Arc<dyn Service>], path: &str, authority
     // 3. the host names no service (localhost, an IP address, a name nobody mounted): the path
     if let Some(s) = match_prefix(services, path, false) {
         return Ok(whole(s, String::new()));
+    }
+    // 3b. still nothing: a service may take a path of a fixed shape at the root (clients that build their URLs from a
+    // host alone, such as the Entra token URL). Tried last, so it never changes where a request went before; the
+    // emulator's own `/_azemu/...` paths are never offered, so a mistyped admin path stays an error.
+    let collapsed = collapse_slashes(path);
+    if !collapsed.starts_with(ADMIN_PREFIX) {
+        if let Some(s) = services.iter().find(|s| s.claims_root_path(&collapsed)) {
+            return Ok(whole(s, String::new()));
+        }
     }
     Err(no_service_message(services, &host, path, port))
 }
@@ -193,6 +208,9 @@ fn no_service_message(services: &[Arc<dyn Service>], host: &str, path: &str, por
                 Mount::PathPrefix(p) => format!("http://localhost:{port}{p}"),
             });
         }
+        for f in s.root_path_forms() {
+            forms.push(format!("http://localhost:{port}{f}"));
+        }
         parts.push(format!("{} ({})", s.name(), forms.join(" or ")));
     }
     let mounted = if parts.is_empty() { "none".to_string() } else { parts.join("; ") };
@@ -215,6 +233,90 @@ fn no_service_message(services: &[Arc<dyn Service>], host: &str, path: &str, por
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A service with the given mounts that claims `/{tenant}/oauth2/token` at the root.
+    struct Stub {
+        name: &'static str,
+        mounts: Vec<Mount>,
+        claims: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Service for Stub {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn mounts(&self) -> Vec<Mount> {
+            self.mounts.clone()
+        }
+        fn claims_root_path(&self, path: &str) -> bool {
+            let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+            self.claims && matches!(segs.as_slice(), [_, "oauth2", "token"])
+        }
+        fn root_path_forms(&self) -> Vec<&'static str> {
+            if self.claims {
+                vec!["/{tenant}/oauth2/token"]
+            } else {
+                Vec::new()
+            }
+        }
+        async fn handle(&self, _req: crate::Request) -> crate::Response {
+            crate::resp::Resp::new(200u16).build()
+        }
+        fn reset(&self) {}
+    }
+
+    fn stubs() -> Vec<Arc<dyn Service>> {
+        vec![
+            Arc::new(Stub { name: "blob", mounts: vec![Mount::AccountHost("blob")], claims: false }),
+            Arc::new(Stub {
+                name: "idp",
+                mounts: vec![Mount::Host("login"), Mount::PathPrefix("/_azemu/idp"), Mount::PathPrefix("/metadata/idp")],
+                claims: true,
+            }),
+            Arc::new(Stub { name: "other", mounts: vec![Mount::PathPrefix("/other")], claims: false }),
+        ]
+    }
+
+    fn routed(path: &str, authority: &str) -> Option<String> {
+        route_gateway(&stubs(), path, authority, 4577).ok().map(|r| r.service.name().to_string())
+    }
+
+    #[test]
+    fn a_root_path_a_service_claims_goes_to_it_when_the_host_names_no_service() {
+        for host in
+            ["localhost:4577", "127.0.0.1:4577", "[::1]:4577", "azemu:4577", "azemu", "host.docker.internal:4577", "my.lan.name:4577"]
+        {
+            assert_eq!(routed("/tenant-1/oauth2/token", host).as_deref(), Some("idp"), "{host}");
+        }
+        // empty segments are ignored, as for the other mounts
+        assert_eq!(routed("//tenant-1//oauth2/token", "localhost").as_deref(), Some("idp"));
+        let r = route_gateway(&stubs(), "/t/oauth2/token", "localhost:4577", 4577).ok().unwrap();
+        assert_eq!((r.account.as_str(), r.path.as_str(), r.path_style), ("", "/t/oauth2/token", false));
+    }
+
+    #[test]
+    fn a_path_nobody_claims_still_answers_no_service_matched() {
+        for path in ["/", "/tenant-1/oauth2/other", "/tenant-1/oauth2/token/extra", "/oauth2/token", "/container/blob"] {
+            assert_eq!(routed(path, "localhost:4577"), None, "{path}");
+        }
+        let msg = route_gateway(&stubs(), "/x", "localhost", 4577).err().unwrap();
+        assert!(msg.contains("http://localhost:4577/{tenant}/oauth2/token"), "{msg}");
+    }
+
+    #[test]
+    fn a_host_that_names_a_service_and_the_admin_paths_are_not_affected() {
+        // `{account}.blob` and `login` name a service, whatever the path
+        assert_eq!(routed("/tenant-1/oauth2/token", "acct.blob.localhost:4577").as_deref(), Some("blob"));
+        assert_eq!(routed("/tenant-1/oauth2/token", "login.localhost:4577").as_deref(), Some("idp"));
+        assert_eq!(routed("/x/y", "acct.blob.localhost").as_deref(), Some("blob"));
+        // a PathPrefix mount wins over a root claim
+        assert_eq!(routed("/other/oauth2/token", "localhost").as_deref(), Some("other"));
+        assert_eq!(routed("/_azemu/idp/x", "localhost").as_deref(), Some("idp"));
+        // an unknown admin path is not claimed, even when its shape fits
+        assert_eq!(routed("/_azemu/oauth2/token", "localhost"), None);
+        assert_eq!(routed("//_azemu/oauth2/token", "localhost"), None);
+    }
 
     #[test]
     fn host_parsing() {

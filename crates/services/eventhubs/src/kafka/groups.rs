@@ -30,9 +30,10 @@ pub const MAX_GROUPS_PER_NAMESPACE: usize = 10_000;
 pub const MAX_OFFSETS_PER_GROUP: usize = 100_000;
 /// Member ids handed out and not yet used (JoinGroup v4+ asks the client to come back with its id).
 const MAX_PENDING_IDS: usize = 1_000;
-/// Kafka's `group.min.session.timeout.ms` and `group.max.session.timeout.ms`.
+/// Kafka's `group.min.session.timeout.ms` and `group.max.session.timeout.ms`. A real namespace refused 1 and 3 seconds, took 6, 30 and
+/// 300 seconds, and refused 450 seconds and more (November 2026): the upper bound is 5 minutes, as Microsoft's Kafka page says.
 pub const MIN_SESSION_TIMEOUT_MS: i32 = 6_000;
-pub const MAX_SESSION_TIMEOUT_MS: i32 = 1_800_000;
+pub const MAX_SESSION_TIMEOUT_MS: i32 = 300_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GState {

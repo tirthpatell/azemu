@@ -3,7 +3,7 @@
 # The release image of azemu: the one `azemu` binary (all services, Linux x86-64 or arm64 glibc, whichever the Docker
 # host is) in a small image with no shell and no package manager, running as a user that is not root.
 #
-#   docker build -t azemu:0.1.0 -t azemu:latest .
+#   docker build -t azemu:0.2.0 -t azemu:latest .
 #   docker run --rm -p 127.0.0.1:4577:4577 azemu:latest
 #
 # Build memory: a release build of the whole emulator is the heaviest thing this project does, and it runs inside the
@@ -31,6 +31,10 @@
 #   AZEMU_DATA_DIR=/data   keep state between runs. Mount a volume there: `-v azemu-data:/data -e AZEMU_DATA_DIR=/data`.
 #                          Without it state lives in memory and ends with the container.
 #   a volume on /home/azemu/.azemu keeps the certificate authority too, so clients trust it once, not at every start.
+#                          Without one the authority is new at every container start, and a client fetches ca.pem again
+#                          each run: `curl -s http://localhost:4577/_azemu/ca.pem -o ca.pem`.
+#                          Both directories are made here with mode 0700 (they hold the authority's key and saved keys),
+#                          and a new named volume takes that mode too, so azemu has nothing to warn about at first start.
 # The image runs as user 10001. A named Docker volume takes that user's ownership from the image, so it just works. A bind
 # mount (-v ./dir:/data) must be writable by uid 10001. `--user $(id -u)` works too: that user cannot write
 # /home/azemu/.azemu, so azemu says so in its log and keeps the certificate authority in a private temporary directory for
@@ -59,12 +63,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cargo build --release --locked -p azemu ${CARGO_FEATURES} \
  && install -D target/release/azemu /out/usr/local/bin/azemu \
  && mkdir -p /out/data /out/home/azemu/.azemu /out/licenses \
- && chown -R 10001:10001 /out/data /out/home/azemu
+ && chown -R 10001:10001 /out/data /out/home/azemu \
+ && chmod 0700 /out/data /out/home/azemu/.azemu
 COPY LICENSE-MIT LICENSE-APACHE NOTICE THIRD-PARTY-LICENSES.md /out/licenses/
 COPY LICENSES /out/licenses/LICENSES
 
 FROM ${RUNTIME_IMAGE}
-ARG VERSION=0.1.0
+ARG VERSION=0.2.0
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.title="azemu" \

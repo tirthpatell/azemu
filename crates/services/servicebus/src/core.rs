@@ -40,13 +40,19 @@ pub struct Incoming {
     /// Set when the message was forwarded: the sequence number of its first entity.
     pub enq_seq: Option<u64>,
     pub dead_letter_source: Option<String>,
+    /// A copy of a message that was scheduled and is now due: it arrives as an active message that still reports the
+    /// state `Scheduled`, as on Azure (`scheduled_ms` is the time it was due).
+    pub was_scheduled: bool,
 }
 
 impl Incoming {
     /// Build from a decoded message; `size` is the encoded size. Reads the scheduled enqueue time.
-    pub fn new(message: Message, size: usize) -> Incoming {
+    /// Application property names are not case sensitive on Azure: `Key` and `key` are one property (the first
+    /// spelling, the last value).
+    pub fn new(mut message: Message, size: usize) -> Incoming {
         let scheduled_ms = message.annotation(ANN_SCHEDULED_ENQUEUE_TIME).and_then(|v| v.as_i64());
-        Incoming { message, scheduled_ms, size, enq_seq: None, dead_letter_source: None }
+        merge_property_names(&mut message);
+        Incoming { message, scheduled_ms, size, enq_seq: None, dead_letter_source: None, was_scheduled: false }
     }
 }
 
@@ -120,6 +126,10 @@ struct Waiter {
 pub struct Core {
     /// Entity path: `queue` or `topic/Subscriptions/sub`.
     pub path: String,
+    /// The namespace the entity is in (error texts name it).
+    pub ns: String,
+    /// Sequence numbers of scheduled messages that were cancelled: cancelling one again is not an error.
+    cancelled_sched: std::collections::HashSet<u64>,
     pub settings: Settings,
     pub main: Store,
     pub dlq: Store,
@@ -169,6 +179,8 @@ impl Core {
     pub fn new(path: impl Into<String>, settings: Settings) -> Core {
         Core {
             path: path.into(),
+            ns: String::new(),
+            cancelled_sched: Default::default(),
             settings,
             main: Store::new(),
             dlq: Store::new(),
@@ -316,13 +328,7 @@ impl Core {
     /// and the size limit of one message.
     pub fn check_send_limits(&self, size: usize) -> Result<(), SbError> {
         match self.settings.status.as_str() {
-            "Disabled" | "SendDisabled" => {
-                return Err(SbError::new(
-                    crate::errors::ENTITY_DISABLED,
-                    400,
-                    format!("The messaging entity '{}' is disabled for sending.", self.path),
-                ));
-            }
+            "Disabled" | "SendDisabled" => return Err(SbError::entity_disabled(&self.ns, &self.path)),
             _ => {}
         }
         if size as u64 > self.settings.max_message_size_bytes() {
@@ -405,9 +411,7 @@ impl Core {
     fn check_session_id(&self, inc: &Incoming) -> Result<(), SbError> {
         let session_id = inc.message.properties.as_ref().and_then(|p| p.group_id.as_ref());
         if self.settings.requires_session && session_id.is_none() {
-            return Err(SbError::new(
-                crate::errors::ARGUMENT_ERROR,
-                400,
+            return Err(SbError::not_allowed(
                 "The SessionId was not set on a message, and it cannot be sent to the entity. Entities that have session support enabled can only receive messages that have the SessionId set to a valid value.",
             ));
         }
@@ -442,7 +446,8 @@ impl Core {
             state,
             message: Arc::new(message),
             enqueued_ms,
-            scheduled_ms: scheduled,
+            // a message that was scheduled keeps the time, and so the state `Scheduled`, after it arrived
+            scheduled_ms: scheduled.or(inc.was_scheduled.then(|| inc.scheduled_ms.unwrap_or(now))),
             ttl_ms,
             expires_ms: if scheduled.is_some() { None } else { ttl_ms.map(|t| enqueued_ms.saturating_add(t)) },
             delivery_count: 0,
@@ -558,6 +563,14 @@ impl Core {
 
     /// A lock expired or was abandoned: count the attempt, dead-letter when the limit is reached.
     fn unlock_failed(&mut self, sq: SubQueue, seq: u64) -> Option<Forward> {
+        if sq != SubQueue::Main {
+            // a dead-lettered message keeps the delivery count it had when it was dead-lettered, as on Azure
+            self.store_mut(sq).update(seq, |m| {
+                m.lock = None;
+                m.state = MsgState::Ready;
+            });
+            return None;
+        }
         let max = self.settings.max_delivery_count;
         let count = {
             let store = self.store_mut(sq);
@@ -568,7 +581,7 @@ impl Core {
                 m.delivery_count
             })?
         };
-        if sq == SubQueue::Main && max > 0 && count >= max {
+        if max > 0 && count >= max {
             let m = self.main.remove(seq)?;
             let desc = format!("Message could not be consumed after {count} delivery attempts.");
             return self.dead_letter_msg(m, Some("MaxDeliveryCountExceeded".into()), Some(desc), None, 0);
@@ -618,17 +631,24 @@ impl Core {
         _now: i64,
     ) -> Option<Forward> {
         apply_modifications(Arc::make_mut(&mut m.message), modify);
+        // without a reason (or description) the properties are not there at all, as on Azure
         let props = Arc::make_mut(&mut m.message).application_properties.get_or_insert_with(Vec::new);
-        set_prop(props, PROP_DEAD_LETTER_REASON, reason.map(Value::String).unwrap_or(Value::Null));
-        set_prop(props, PROP_DEAD_LETTER_DESCRIPTION, description.map(Value::String).unwrap_or(Value::Null));
+        if let Some(r) = reason {
+            set_prop(props, PROP_DEAD_LETTER_REASON, Value::String(r));
+        }
+        if let Some(d) = description {
+            set_prop(props, PROP_DEAD_LETTER_DESCRIPTION, Value::String(d));
+        }
         if let Some(target) = self.settings.forward_dead_lettered_to.clone() {
             return Some(Forward {
                 target,
                 incoming: Incoming {
                     size: m.size,
-                    enq_seq: Some(if m.enq_seq == 0 { m.seq } else { m.enq_seq }),
-                    dead_letter_source: Some(self.path.rsplit('/').next().unwrap_or(&self.path).to_string()),
+                    enq_seq: (m.enq_seq != 0).then_some(m.enq_seq),
+                    // the way Azure names the source of a message that a subscription dead-lettered
+                    dead_letter_source: Some(self.path.clone()),
                     scheduled_ms: None,
+                    was_scheduled: false,
                     message: Arc::unwrap_or_clone(m.message),
                 },
             });
@@ -652,6 +672,37 @@ impl Core {
         // live, an explicit dead-letter)
         self.wake(SubQueue::DeadLetter);
         None
+    }
+
+    /// Put a message that never reached the main queue in the dead-letter queue (a filter that failed, a forwarding chain
+    /// that was too long). `description` is left out when there is none.
+    pub fn dead_letter_incoming(&mut self, inc: Incoming, reason: &str, description: Option<&str>, now: i64) {
+        let mut message = inc.message;
+        strip_server_annotations(&mut message);
+        let props = message.application_properties.get_or_insert_with(Vec::new);
+        set_prop(props, PROP_DEAD_LETTER_REASON, Value::String(reason.to_string()));
+        if let Some(d) = description {
+            set_prop(props, PROP_DEAD_LETTER_DESCRIPTION, Value::String(d.to_string()));
+        }
+        let session_id = message.properties.as_ref().and_then(|p| p.group_id.clone());
+        let seq = self.dlq.alloc_seq();
+        self.dlq.insert(Msg {
+            seq,
+            enq_seq: inc.enq_seq.unwrap_or(0),
+            state: MsgState::Ready,
+            message: Arc::new(message),
+            enqueued_ms: now,
+            scheduled_ms: None,
+            ttl_ms: None,
+            expires_ms: None,
+            delivery_count: 0,
+            lock: None,
+            session_id,
+            size: inc.size,
+            dead_letter_source: None,
+            deferred: false,
+        });
+        self.wake(SubQueue::DeadLetter);
     }
 
     // ---- receiving -------------------------------------------------------------------------
@@ -752,6 +803,8 @@ impl Core {
                     m.lock = None;
                     m.deferred = true;
                     m.state = MsgState::Deferred;
+                    // the message was delivered and not completed: Azure counts it (a peek shows 1 at once)
+                    m.delivery_count += 1;
                 });
             }
             Outcome::DeadLetter { reason, description, modify } => {
@@ -819,7 +872,12 @@ impl Core {
             let seq = *s as u64;
             match self.main.get(seq) {
                 Some(m) if m.state == MsgState::Deferred => {}
-                _ => return Err(SbError::message_not_found(*s)),
+                Some(m) if m.deferred && m.state == MsgState::Locked => return Err(SbError::deferred_message_locked()),
+                Some(_) => return Err(SbError::message_not_deferred()),
+                // a number that was handed out once is a message that is gone (completed, say); one that was
+                // never handed out is not a message at all
+                None if *s >= 1 && seq < self.main.next_seq() => return Err(SbError::message_not_deferred()),
+                None => return Err(SbError::messages_not_found()),
             }
             let lock_ms = self.settings.lock_duration_ms;
             let delivered = match mode {
@@ -864,6 +922,10 @@ impl Core {
         self.tick_keeping_forwards(now);
         let mut total = 0usize;
         let mut out = Vec::new();
+        // Azure: a peek that starts at an active message stops before the first scheduled message after it; one that
+        // starts at a scheduled message goes on through everything (so a queue that holds only scheduled messages
+        // shows them)
+        let mut starts_active = None;
         for m in self
             .store(sq)
             .msgs
@@ -875,20 +937,47 @@ impl Core {
             if total >= max_bytes {
                 break;
             }
+            let scheduled = m.state == MsgState::Scheduled;
+            if *starts_active.get_or_insert(!scheduled) && scheduled {
+                break;
+            }
             total = total.saturating_add(m.size);
             out.push(m.clone());
         }
         out
     }
 
-    pub fn cancel_scheduled(&mut self, seq: u64) -> Result<(), SbError> {
-        match self.main.get(seq) {
-            Some(m) if m.state == MsgState::Scheduled => {
-                self.main.remove(seq);
-                Ok(())
-            }
-            _ => Err(SbError::message_not_found(seq as i64)),
+    /// Is `seq` the sequence number of a message that was scheduled: one that is waiting, one that has arrived and one that was
+    /// cancelled? Azure answers anything else with an error.
+    fn was_scheduled(&self, seq: i64) -> bool {
+        seq > 0
+            && (self.main.get(seq as u64).map(|m| m.scheduled_ms.is_some()).unwrap_or(false)
+                || self.cancelled_sched.contains(&(seq as u64)))
+    }
+
+    /// Check a `cancel-scheduled-message` request: Azure refuses the whole request when one number was never scheduled.
+    pub fn check_cancel(&self, seqs: &[i64]) -> Result<(), SbError> {
+        match seqs.iter().find(|s| !self.was_scheduled(**s)) {
+            Some(s) => Err(SbError::scheduled_message_unknown(*s)),
+            None => Ok(()),
         }
+    }
+
+    /// Cancel scheduled messages: all or none. A message that is not waiting any more (it arrived, or was cancelled before) is
+    /// left as it is and is no error.
+    pub fn cancel_scheduled(&mut self, seqs: &[i64]) -> Result<(), SbError> {
+        self.check_cancel(seqs)?;
+        for s in seqs {
+            let seq = *s as u64;
+            if self.main.get(seq).map(|m| m.state == MsgState::Scheduled).unwrap_or(false) {
+                self.main.remove(seq);
+            }
+            if self.cancelled_sched.len() >= 100_000 {
+                self.cancelled_sched.clear();
+            }
+            self.cancelled_sched.insert(seq);
+        }
+        Ok(())
     }
 
     // ---- sessions --------------------------------------------------------------------------

@@ -44,6 +44,21 @@ pub fn bad_parameter(message: &str) -> Response {
     json_error::response(400, "BadParameter", message)
 }
 
+/// 400 `MethodNotAllowed`: what a purge of an object that is not deleted, and a recover of one that is, get.
+pub fn method_not_allowed(message: &str) -> Response {
+    json_error::response(400, "MethodNotAllowed", message)
+}
+
+/// 400 for a purge of an object that is not deleted.
+pub fn not_deleted_for_purge(kind: Kind) -> Response {
+    method_not_allowed(&format!("{} must be deleted prior to being purged.", kind.title()))
+}
+
+/// 400 for a recover of an object that is not deleted.
+pub fn exists_already(kind: Kind, name: &str) -> Response {
+    method_not_allowed(&format!("{} exists already: {name}", kind.title()))
+}
+
 pub fn forbidden(message: &str, inner: &str) -> Response {
     json_error::response_with_inner(403, "Forbidden", message, inner)
 }

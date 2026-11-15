@@ -152,7 +152,7 @@ def test_connection_string_parse_keeps_host_and_port(emu):
     assert props.fully_qualified_namespace == sbutil.host(emu)
     assert props.endpoint == f"sb://{sbutil.host(emu)}/"
     assert props.shared_access_key_name == sbutil.KEY_NAME
-    assert props.shared_access_key == sbutil.KEY
+    assert props.shared_access_key == sbutil.key(emu)
     assert props.entity_path is None
 
 
@@ -186,6 +186,7 @@ def test_connection_string_entity_path_must_match_queue_name(emu, queue):
             client.get_queue_sender("some-other-queue")
 
 
+@pytest.mark.emulator_only
 def test_named_key_credential_with_use_tls_false(emu, queue):
     cred = AzureNamedKeyCredential(sbutil.KEY_NAME, sbutil.KEY)
     with ServiceBusClient(sbutil.host(emu), cred, use_tls=False, **sbutil.CLIENT_KW) as client:
@@ -193,6 +194,7 @@ def test_named_key_credential_with_use_tls_false(emu, queue):
         assert drain_bodies(client, queue) == ["m-0"]
 
 
+@pytest.mark.emulator_only
 def test_ip_address_endpoint_lands_in_namespace_default(emu, queue):
     # open.hostname is "127.0.0.1": an IP means namespace `default`, where the admin client created the queue
     cs = f"Endpoint=sb://127.0.0.1:{emu.port};SharedAccessKeyName=k;SharedAccessKey={sbutil.KEY};UseDevelopmentEmulator=true"
@@ -201,6 +203,7 @@ def test_ip_address_endpoint_lands_in_namespace_default(emu, queue):
         assert drain_bodies(client, queue) == sent
 
 
+@pytest.mark.emulator_only
 def test_any_shared_access_key_is_accepted(emu, queue):
     cs = f"Endpoint=sb://{sbutil.host(emu)};SharedAccessKeyName=whatever;SharedAccessKey=bm90YXJlYWxrZXk=;UseDevelopmentEmulator=true"
     with ServiceBusClient.from_connection_string(cs, **sbutil.CLIENT_KW) as client:
@@ -209,6 +212,7 @@ def test_any_shared_access_key_is_accepted(emu, queue):
 
 
 # -- namespaces ---------------------------------------------------------------------------------------
+@pytest.mark.emulator_only
 def test_namespace_comes_from_the_host_name_in_the_open_frame(emu, admin, queue):
     other_admin = sbutil.make_admin(emu, "other")
     other_admin.create_queue(queue)  # same queue name in namespace `other`
@@ -221,6 +225,7 @@ def test_namespace_comes_from_the_host_name_in_the_open_frame(emu, admin, queue)
         other_admin.close()
 
 
+@pytest.mark.emulator_only
 def test_messages_in_different_namespaces_do_not_mix(emu, queue):
     sbutil.make_admin(emu, "ns2").create_queue(queue)
     with sbutil.make_client(emu) as a, sbutil.make_client(emu, "ns2") as b:

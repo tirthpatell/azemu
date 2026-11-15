@@ -82,6 +82,9 @@ struct HostD {
     input_schema: InputSchema,
     published: u64,
     resource_id: Option<String>,
+    /// Added after the first files were written: a file without it has no keys.
+    #[serde(default)]
+    keys: Vec<String>,
     subs: Vec<SubD>,
     topics: Vec<TopicD>,
 }
@@ -251,6 +254,7 @@ impl Shared {
                 input_schema: h.input_schema,
                 published: h.published,
                 resource_id: h.resource_id.clone(),
+                keys: h.keys.clone(),
                 subs: vec![],
                 topics: vec![],
             };
@@ -305,6 +309,7 @@ impl Shared {
             let mut host = Host::new(&hd.name, hd.kind, hd.input_schema);
             host.published = hd.published;
             host.resource_id = hd.resource_id;
+            host.keys = hd.keys;
             let mut load_sub = |topic: Option<&str>, sd: SubD, saved: &mut Saved| -> io::Result<Sub> {
                 let cfg: SubscriptionConfig = serde_json::from_value(sd.cfg)
                     .map_err(|e| bad(&defs_path, format!("subscription {}: the configuration cannot be read: {e}", sd.name)))?;

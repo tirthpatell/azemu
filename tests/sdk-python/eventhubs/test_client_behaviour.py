@@ -21,6 +21,7 @@ from azure.eventhub import (
 from azure.eventhub._pyamqp.utils import generate_sas_token
 from azure.eventhub.exceptions import ConnectError, EventHubError
 
+import azure_eh
 import ehutil
 from ehutil import Collector, KEY, KEY_NAME, bodies, conn_str, host, make_consumer, make_producer, read_from_start, send_n
 
@@ -96,9 +97,14 @@ def test_consumer_with_entity_path_in_the_connection_string(emu, hub, producer, 
         assert bodies(col.wait_events(2)) == ["m-0", "m-1"]
 
 
-def test_hub_names_may_contain_dots_hyphens_and_underscores(emu, track):
-    name = f"my.hub_name-{ehutil.uniq('x')}"
-    ehutil.admin_create_hub(emu, name, partitions=1)
+def test_hub_names_may_contain_dots_hyphens_and_underscores(emu, track, request):
+    if emu.azure:
+        name = f"azemu.hub_name-{ehutil.uniq('x')}"
+        azure_eh.ensure_hub(1, name=name)
+        request.addfinalizer(lambda: azure_eh.delete_hub(name))
+    else:
+        name = f"my.hub_name-{ehutil.uniq('x')}"
+        ehutil.admin_create_hub(emu, name, partitions=1)
     p = track(make_producer(emu, name))
     send_n(p, 1, partition_id="0")
     assert bodies(read_from_start(emu, name, 1, partition_id="0")) == ["m-0"]
@@ -129,45 +135,54 @@ def credential_variants(emu, hub):
     }
 
 
-@pytest.mark.parametrize("kind", ["named-key", "sas", "shared-key", "token"])
+# The emulator accepts every token; Azure refuses the made-up JWT of FakeTokenCredential (it only proves the SDK's `$cbs` exchange).
+TOKEN = pytest.param("token", marks=pytest.mark.emulator_only)
+
+
+@pytest.mark.parametrize("kind", ["named-key", "sas", "shared-key", TOKEN])
 def test_producer_with_a_credential_object(emu, hub, track, kind):
     cred = credential_variants(emu, hub)[kind]
-    p = track(EventHubProducerClient(host(emu), hub, cred, use_tls=False, **ehutil.CLIENT_KW))
+    p = track(EventHubProducerClient(host(emu), hub, cred, **ehutil.dev_kw(emu), **ehutil.CLIENT_KW))
     assert p.get_partition_ids() == ["0", "1", "2", "3"]
     send_n(p, 2, partition_id="0")
     assert bodies(read_from_start(emu, hub, 2, partition_id="0")) == ["m-0", "m-1"]
 
 
-@pytest.mark.parametrize("kind", ["named-key", "sas", "token"])
+@pytest.mark.parametrize("kind", ["named-key", "sas", TOKEN])
 def test_consumer_with_a_credential_object(emu, hub, producer, track, kind):
     send_n(producer, 2, partition_id="1")
     cred = credential_variants(emu, hub)[kind]
-    c = EventHubConsumerClient(host(emu), hub, "$Default", cred, use_tls=False, **ehutil.CLIENT_KW)
+    c = EventHubConsumerClient(host(emu), hub, "$Default", cred, **ehutil.dev_kw(emu), **ehutil.CLIENT_KW)
     with Collector(c, partition_id="1", starting_position="-1", max_wait_time=1) as col:
         assert bodies(col.wait_events(2)) == ["m-0", "m-1"]
 
 
 def test_token_credential_is_asked_for_the_eventhubs_scope(emu, hub, track):
     cred = FakeTokenCredential()
-    p = track(EventHubProducerClient(host(emu), hub, cred, use_tls=False, **ehutil.CLIENT_KW))
-    p.get_partition_ids()
+    p = track(EventHubProducerClient(host(emu), hub, cred, **ehutil.dev_kw(emu), **ehutil.CLIENT_KW))
+    try:
+        p.get_partition_ids()
+    except ConnectError:
+        if not emu.azure:  # Azure refuses the made-up token after the SDK asked for it
+            raise
     assert cred.calls and all(scopes == ("https://eventhubs.azure.net//.default",) for scopes in cred.calls)
 
 
 def test_connection_string_with_a_shared_access_signature(emu, hub, track):
-    cs = f"Endpoint=sb://{host(emu)};SharedAccessSignature={sas_token(emu, hub)};UseDevelopmentEmulator=true;EntityPath={hub}"
+    cs = f"Endpoint=sb://{host(emu)};SharedAccessSignature={sas_token(emu, hub)}{ehutil.dev(emu)};EntityPath={hub}"
     p = track(EventHubProducerClient.from_connection_string(cs, **ehutil.CLIENT_KW))
     assert p.get_eventhub_properties()["eventhub_name"] == hub
 
 
+@pytest.mark.emulator_only  # the emulator accepts every key name and key; Azure checks them at `$cbs` (401 com.microsoft:auth-failed, InvalidSignature)
 def test_connection_string_key_names_other_than_root_manage_are_accepted(emu, hub, track):
-    cs = f"Endpoint=sb://{host(emu)};SharedAccessKeyName=send-only;SharedAccessKey={KEY};UseDevelopmentEmulator=true;EntityPath={hub}"
+    cs = f"Endpoint=sb://{host(emu)};SharedAccessKeyName=send-only;SharedAccessKey={KEY}{ehutil.dev(emu)};EntityPath={hub}"
     p = track(EventHubProducerClient.from_connection_string(cs, **ehutil.CLIENT_KW))
     assert p.get_partition_ids() == ["0", "1", "2", "3"]
 
 
 def test_endpoint_with_a_trailing_slash(emu, hub, track):
-    cs = f"Endpoint=sb://{host(emu)}/;SharedAccessKeyName={KEY_NAME};SharedAccessKey={KEY};UseDevelopmentEmulator=true;EntityPath={hub}"
+    cs = f"Endpoint=sb://{host(emu)}/;SharedAccessKeyName={KEY_NAME};SharedAccessKey={KEY}{ehutil.dev(emu)};EntityPath={hub}"
     p = track(EventHubProducerClient.from_connection_string(cs, **ehutil.CLIENT_KW))
     assert p.get_partition_ids() == ["0", "1", "2", "3"]
 
@@ -232,6 +247,7 @@ def dead_port() -> int:
 
 class _Dead:
     port = None
+    azure = False
 
     def __init__(self):
         self.port = dead_port()
@@ -286,8 +302,9 @@ def test_receive_with_connection_refused_reports_connect_error_to_on_error():
 def test_amqp_over_websocket(emu, hub, track):
     # Over WebSocket the SDK ignores the port of `Endpoint=` and dials 443 (80 with UseDevelopmentEmulator), so any other port has to
     # be given as `custom_endpoint_address`. More WebSocket cases are in test_websocket.py.
+    # (Azure: wss on port 443 of the namespace's own host name, nothing to point at)
+    custom = {} if emu.azure else {"custom_endpoint_address": f"http://{ehutil.host(emu, ehutil.NAMESPACE)}/"}
     p = track(EventHubProducerClient.from_connection_string(
-        conn_str(emu, hub), transport_type=TransportType.AmqpOverWebsocket,
-        custom_endpoint_address=f"http://{ehutil.host(emu, ehutil.NAMESPACE)}/",
-        retry_total=0, retry_backoff_factor=0.01, auth_timeout=5))
+        conn_str(emu, hub), transport_type=TransportType.AmqpOverWebsocket, **custom,
+        retry_total=0, retry_backoff_factor=0.01, auth_timeout=30 if emu.azure else 5))
     assert p.get_partition_ids() == ["0", "1", "2", "3"]

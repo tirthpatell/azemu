@@ -31,6 +31,16 @@ fn ahead_of_container(from: u64, c: &Container) -> CosmosError {
     ))
 }
 
+/// The position a latest-version read starts from: the `etag` of an earlier answer (`"<lsn>"`; zero, a negative number or
+/// nothing is the start). Anything that is not a whole number is a 400 (checked against Azure in November 2026).
+fn position(t: &str) -> R<i64> {
+    let t = t.trim().trim_matches('"');
+    if t.is_empty() {
+        return Ok(0);
+    }
+    t.parse::<i64>().map_err(|_| CosmosError::bad_request("Change feed token format is invalid"))
+}
+
 pub fn read(cx: &Cx, c: &mut Container) -> R<Out> {
     let sel = Selector::from_headers(cx, c)?;
     let mut from: u64 = 0;
@@ -38,19 +48,17 @@ pub fn read(cx: &Cx, c: &mut Container) -> R<Out> {
     match cx.header("if-none-match") {
         Some("*") => from = c.lsn,
         Some(t) => {
-            from = parse_lsn(t).ok_or_else(|| CosmosError::bad_request("The change feed continuation is not valid."))?;
-            if from > c.lsn {
-                return Err(ahead_of_container(from, c));
+            let n = position(t)?;
+            if n > c.lsn as i64 {
+                // a position that is ahead of the container: nothing new, and the same position again
+                return Ok(Out::feed_not_modified(format!("\"{n}\"")).lsn(c.lsn).charge(1.0));
             }
+            from = n.max(0) as u64;
         }
         None => {
+            // an If-Modified-Since that is not a date is ignored (the feed starts at the beginning)
             if let Some(s) = cx.header("if-modified-since") {
-                // a date that cannot be read is an error, not "from the beginning"
-                since = Some(
-                    time::parse_rfc1123(s)
-                        .map(|t| t.unix_timestamp())
-                        .ok_or_else(|| CosmosError::bad_request("The If-Modified-Since header is not a valid date."))?,
-                );
+                since = time::parse_rfc1123(s).map(|t| t.unix_timestamp());
             }
         }
     }

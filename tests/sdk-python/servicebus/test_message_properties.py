@@ -210,10 +210,10 @@ def test_many_application_properties_round_trip(sb, queue):
     assert {k.decode(): v for k, v in m.application_properties.items()} == props
 
 
-def test_application_property_keys_are_case_sensitive(sb, queue):
-    m = roundtrip(sb, queue, ServiceBusMessage("b", application_properties={"Key": 1, "key": 2}))
-    assert m.application_properties[b"Key"] == 1
-    assert m.application_properties[b"key"] == 2
+def test_application_property_keys_are_not_case_sensitive(sb, queue):
+    # Key, key and KEY are one property: the first spelling with the last value (checked in November 2026)
+    m = roundtrip(sb, queue, ServiceBusMessage("b", application_properties={"Key": 1, "key": 2, "KEY": 3, "other": "x"}))
+    assert {k.decode(): v for k, v in m.application_properties.items()} == {"Key": 3, "other": b"x"}
 
 
 def test_no_application_properties_gives_empty(sb, queue):

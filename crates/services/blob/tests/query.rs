@@ -165,42 +165,91 @@ async fn queries_with_a_header_row_where_and_projection() {
     let r =
         q(&env, "/cnt/b.csv", "SELECT name, price * 2 AS double FROM BlobStorage WHERE id > 1", &format!("{input}{json_out}"), &[]).await;
     assert_eq!(avro(&r.body).data(), b"{\"name\":\"banana\",\"double\":0.5}\n{\"name\":\"cherry, red\",\"double\":8}\n");
-    let r = q(&env, "/cnt/b.csv", "SELECT COUNT(*), SUM(price) FROM BlobStorage", input, &[]).await;
-    assert_eq!(avro(&r.body).data(), b"3,4.75\n");
+    let r = q(&env, "/cnt/b.csv", "SELECT SUM(CAST(price AS FLOAT)) FROM BlobStorage", input, &[]).await;
+    assert_eq!(avro(&r.body).data(), b"4.75\n");
 }
 
 #[tokio::test]
 async fn errors_in_the_stream_and_in_the_request() {
     let env = start_with_csv().await;
-    // a bad expression: 200 and a fatal ParseError in the stream
+    // a bad expression: 400 before any data, with the expression in the message (Azure, November 2026)
     let r = q(&env, "/cnt/b.csv", "SELECT FROM", "", &[]).await;
-    assert_eq!(r.status, 200);
-    let a = avro(&r.body);
-    assert_eq!(a.errors(), vec![(true, "ParseError".to_string(), 0)]);
-    assert!(a.data().is_empty());
-    // a column that is not in the header row: fatal
+    assert_eq!((r.status, code(&r).as_str()), (400, "ErrorProcessingQueryExpression"));
+    assert!(r.text().contains("<Message>Syntax error in query: SELECT FROM\n"), "{}", r.text());
+    assert_eq!(r.header("content-type"), Some("application/xml"));
+    // a column that is not in the header row, or any name when there is no header row: 400 as well
     let input = "<InputSerialization><Format><Type>delimited</Type><DelimitedTextConfiguration><HasHeaders>true</HasHeaders></DelimitedTextConfiguration></Format></InputSerialization>";
-    let a = avro(&q(&env, "/cnt/b.csv", "SELECT nope FROM BlobStorage", input, &[]).await.body);
-    assert_eq!(a.errors()[0].1, "InvalidColumnName");
-    // a body that is not the request: 400 with the code of the element
+    let r = q(&env, "/cnt/b.csv", "SELECT nope FROM BlobStorage", input, &[]).await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "ErrorProcessingQueryExpression"));
+    assert!(r.text().contains("<Message>Column name(s) does not exist in the header row.\n"), "{}", r.text());
+    let r = q(&env, "/cnt/b.csv", "SELECT id, _9 FROM BlobStorage", input, &[]).await;
+    assert!(r.text().contains("<Message>Invalid column ordinal(s).\n"), "{}", r.text());
+    let r = q(&env, "/cnt/b.csv", "SELECT name FROM BlobStorage", "", &[]).await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "ErrorProcessingQueryExpression"));
+    assert!(r.text().contains("Column names can be used only if &apos;hasHeader&apos; is set"), "{}", r.text());
+    let r = q(&env, "/cnt/b.csv", "SELECT * FROM Wrong", "", &[]).await;
+    assert!(r.text().contains("Record paths are not valid for queries over CSV-formatted input."), "{}", r.text());
+    // a body that is not the request: InvalidXmlDocument for a missing element (also an empty Expression)
     let r = env.send("POST", "/cnt/b.csv?comp=query", &[], "<QueryRequest><Expression>x</Expression></QueryRequest>").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "MissingRequiredXmlNode"));
-    assert!(r.text().contains("<XmlNodeName>QueryType</XmlNodeName>"), "{}", r.text());
+    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidXmlDocument"));
+    let r = q(&env, "/cnt/b.csv", "", "", &[]).await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidXmlDocument"));
+    // any QueryType is read as SQL
     let r = env
-        .send("POST", "/cnt/b.csv?comp=query", &[], "<QueryRequest><QueryType>NOSQL</QueryType><Expression>x</Expression></QueryRequest>")
+        .send(
+            "POST",
+            "/cnt/b.csv?comp=query",
+            &[],
+            "<QueryRequest><QueryType>NOSQL</QueryType><Expression>SELECT * FROM BlobStorage</Expression></QueryRequest>",
+        )
         .await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidXmlNodeValue"));
+    assert_eq!(r.status, 200);
     let r = env.send("POST", "/cnt/b.csv?comp=query", &[], "not xml").await;
     assert_eq!((r.status, code(&r).as_str()), (400, "InvalidXmlDocument"));
-    // formats that are not built say so
+    // Parquet input: Azure reads it; here a blob that is not Parquet is refused as Azure does, a real file is not built
     let parquet = "<InputSerialization><Format><Type>parquet</Type><ParquetTextConfiguration> </ParquetTextConfiguration></Format></InputSerialization>";
     let r = q(&env, "/cnt/b.csv", "select * from blobstorage where id < 1;", parquet, &[]).await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "ErrorProcessingQueryExpression"));
+    assert!(r.text().contains("Invalid parquet file. Corrupt footer."), "{}", r.text());
+    assert_eq!(env.put_blob("cnt", "p.parquet", "PAR1 anything PAR1").await.status, 201);
+    let r = q(&env, "/cnt/p.parquet", "select * from blobstorage", parquet, &[]).await;
     assert_eq!((r.status, code(&r).as_str()), (501, "NotImplemented"));
     assert!(r.text().contains("parquet"));
     let arrow = "<OutputSerialization><Format><Type>arrow</Type><ArrowConfiguration><Schema><Field><Type>decimal</Type><Name>abc</Name><Precision>4</Precision><Scale>2</Scale></Field></Schema></ArrowConfiguration></Format></OutputSerialization>";
     let r = q(&env, "/cnt/b.csv", "SELECT _2 from BlobStorage WHERE _1 > 250", arrow, &[]).await;
     assert_eq!((r.status, code(&r).as_str()), (501, "NotImplemented"));
     assert!(r.text().contains("arrow"));
+}
+
+/// What is wrong in the data, not in the expression, stays in the stream: `200` and a fatal error at position 0 (Azure, November 2026).
+#[tokio::test]
+async fn errors_in_the_data_are_in_the_stream() {
+    let env = start().await;
+    env.create_container("cnt").await;
+    assert_eq!(env.put_blob("cnt", "bad.json", "{\"a\":1}\n{bad\n{\"a\":3}\n").await.status, 201);
+    let json = "<InputSerialization><Format><Type>json</Type></Format></InputSerialization>";
+    let r = q(&env, "/cnt/bad.json", "SELECT * FROM BlobStorage[*]", json, &[]).await;
+    assert_eq!(r.status, 200);
+    let a = avro(&r.body);
+    assert_eq!(a.data(), b"{\"a\":1}\n");
+    assert_eq!(a.errors(), vec![(true, "ParseError".to_string(), 0)]);
+    // the byte in the text counts from the start of the blob (the bad line starts at byte 8)
+    assert!(
+        matches!(&a.msgs[1], Msg::Error { description, .. } if description == "Unexpected token 'bad' at [byte: 9]. Expecting token '\"'. ")
+    );
+    // an unclosed quote in delimited text
+    assert_eq!(env.put_blob("cnt", "q.csv", "x,y\n\"unclosed,2\n3,4\n").await.status, 201);
+    let a = avro(&q(&env, "/cnt/q.csv", "SELECT * FROM BlobStorage", "", &[]).await.body);
+    assert_eq!(a.data(), b"x,y\n");
+    assert_eq!(a.errors(), vec![(true, "ParseError".to_string(), 0)]);
+    // a row that cannot be read as a number is a row error, the query goes on
+    assert_eq!(env.put_blob("cnt", "n.csv", "30\nx\n7\n").await.status, 201);
+    let a = avro(&q(&env, "/cnt/n.csv", "SELECT _1 + 1 FROM BlobStorage", "", &[]).await.body);
+    assert_eq!(a.data(), b"31\n8\n");
+    assert_eq!(a.errors(), vec![(false, "InvalidTypeConversion".to_string(), 3)]);
+    // division by zero ends the query
+    let a = avro(&q(&env, "/cnt/n.csv", "SELECT 1/0 FROM BlobStorage", "", &[]).await.body);
+    assert_eq!(a.errors(), vec![(true, "ClientError".to_string(), 0)]);
 }
 
 #[tokio::test]
@@ -232,7 +281,8 @@ async fn the_blob_is_found_checked_and_refused_like_a_read() {
     // other blob types and an archived blob
     assert_eq!(env.send("PUT", "/cnt/app", &[("x-ms-blob-type", "AppendBlob")], "").await.status, 201);
     let r = q(&env, "/cnt/app", "SELECT * FROM BlobStorage", "", &[]).await;
-    assert_eq!((r.status, code(&r).as_str()), (409, "InvalidBlobType"));
+    // Azure: 400 with the code as the message, also for a page blob
+    assert_eq!((r.status, code(&r).as_str()), (400, "QueryBlobContentsNotSupportedForPageBlobsOrAppendBlobs"));
     assert_eq!(env.send("PUT", "/cnt/b.csv?comp=tier", &[("x-ms-access-tier", "Archive")], "").await.status, 200);
     let r = q(&env, "/cnt/b.csv", "SELECT * FROM BlobStorage", "", &[]).await;
     assert_eq!((r.status, code(&r).as_str()), (409, "BlobArchived"));
@@ -327,7 +377,8 @@ async fn a_blob_of_many_blocks_is_read_across_them() {
 
 #[tokio::test]
 async fn a_big_result_comes_in_records_of_bounded_size() {
-    let env = start().await;
+    let small = QueryLimits { data_chunk_bytes: 256 * 1024, ..QueryLimits::default() };
+    let env = start_with(BlobService::with_query_limits(small)).await;
     env.create_container("cnt").await;
     let rows: String = (0..150_000).map(|i| format!("{i},value-{i}\n")).collect();
     assert!(rows.len() > 2_000_000);
@@ -351,6 +402,19 @@ async fn a_big_result_comes_in_records_of_bounded_size() {
     }
     assert!(progress > 5);
     assert_eq!(a.msgs.last(), Some(&Msg::End(rows.len() as i64)));
+}
+
+/// Azure sent a result of 1,020,000 bytes as one data record, one progress message and `end` (November 2026).
+#[tokio::test]
+async fn a_result_of_a_million_bytes_is_one_record() {
+    let env = start().await;
+    env.create_container("cnt").await;
+    let rows: String = (0..20_000).map(|i| format!("row{i:06},{}\n", "x".repeat(40))).collect();
+    assert_eq!(rows.len(), 1_020_000);
+    assert_eq!(env.put_blob("cnt", "big", &rows).await.status, 201);
+    let a = avro(&q(&env, "/cnt/big", "SELECT * FROM BlobStorage", "", &[]).await.body);
+    let n = rows.len() as i64;
+    assert_eq!(a.msgs, vec![Msg::Data(rows.into_bytes()), Msg::Progress(n, n), Msg::End(n)]);
 }
 
 #[tokio::test]
@@ -413,7 +477,7 @@ async fn lake() -> (TestServer, String, String) {
 }
 
 #[tokio::test]
-async fn a_data_lake_file_can_be_queried_through_both_endpoints() {
+async fn a_data_lake_file_is_queried_through_the_blob_endpoint_only() {
     let (srv, dfs, blob) = lake().await;
     let s = |m: &'static str, u: String, b: String| {
         let srv = &srv;
@@ -429,15 +493,8 @@ async fn a_data_lake_file_can_be_queried_through_both_endpoints() {
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.header("x-ms-resource-type"), Some("file"));
     assert_eq!(avro(&r.body).data(), b"b\n");
-    // the dfs endpoint
+    // the dfs host has no query: it reads a POST as a lease and wants `x-ms-lease-action` (Azure, November 2026)
     let r = s("POST", format!("{dfs}/fsq/dir/f.csv?comp=query"), body("SELECT * FROM BlobStorage", "")).await;
-    assert_eq!(r.status, 200, "{}", r.text());
-    assert_eq!(avro(&r.body).data(), b"a,1\nb,2\n");
-    // errors on the dfs endpoint are JSON
-    let r = s("POST", format!("{dfs}/fsq/dir/nope.csv?comp=query"), body("SELECT * FROM BlobStorage", "")).await;
-    assert_eq!(r.status, 404);
-    assert_eq!(code(&r), "PathNotFound");
-    let r = s("POST", format!("{dfs}/fsq/dir/f.csv?comp=query"), "nope".into()).await;
-    assert_eq!(r.status, 400);
-    assert!(r.text().trim_start().starts_with('{'), "{}", r.text());
+    assert_eq!((r.status, code(&r).as_str()), (400, "MissingRequiredHeader"), "{}", r.text());
+    assert!(r.text().contains("\"HeaderName\":\"x-ms-lease-action\""), "{}", r.text());
 }

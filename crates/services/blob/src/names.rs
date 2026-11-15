@@ -13,13 +13,16 @@
 //!   two before they send the request, so no client could address such a name again). This is checked in hierarchical containers
 //!   only, where the segments are directories.
 //!
-//! In a hierarchical container (Data Lake) a blob also needs its parents to be directories: writing `a.txt/child` when `a.txt` is a
-//! file is `409 PathConflict`, the code that the Data Lake error table describes with "the specified path, or an element of the
-//! path, exists and its resource type is invalid for this operation" (the Blob endpoint's own answer for this case is not in
-//! any recording; the Data Lake code is a guess for it).
+//! In a hierarchical container (Data Lake) a blob also needs its parents to be directories, and a directory cannot be replaced by
+//! a blob. What the Blob endpoint of a real account answers (checked in November 2026): Put Blob or Copy Blob below a file is
+//! `404 BlobNotFound`; Put Block and Put Block List below a file are `409 OperationNotAllowedInCurrentState`; Put Blob, Put Block
+//! and Copy Blob onto a directory are `409 OperationNotAllowedInCurrentState`, Put Block List onto a directory is
+//! `400 OperationNotSupportedOnDirectory`; a name of 62 segments is `409 PathIsTooDeep`. The Data Lake endpoint says
+//! `409 PathConflict` where its own table does (`dfs/errors.rs`); that code never comes from the Blob endpoint.
 
-use crate::dfs::model::{dir_attrs_of, is_dir, live, path_conflict};
+use crate::dfs::model::{dir_attrs_of, is_dir, live};
 use crate::errors::{err, ApiError};
+use crate::ops::Op;
 use crate::state::Container;
 
 /// Most characters in a name.
@@ -48,7 +51,7 @@ pub fn check(name: &str, hierarchical: bool) -> Result<(), ApiError> {
     let segments = name.split('/').count();
     if hierarchical {
         if segments > MAX_SEGMENTS_HIERARCHICAL {
-            return Err(bad("a path in a hierarchical namespace has at most 61 segments below the container."));
+            return Err(err("PathIsTooDeep"));
         }
         if name.split('/').any(|s| s == "." || s == "..") {
             return Err(bad("a path segment cannot be '.' or '..'."));
@@ -60,23 +63,27 @@ pub fn check(name: &str, hierarchical: bool) -> Result<(), ApiError> {
 }
 
 /// A write through the Blob endpoint into a hierarchical container: every parent has to be a directory (or absent: the Data Lake
-/// side makes it), and a directory cannot be replaced by a blob. `creates` is false for staging a block, which does not replace
-/// anything yet.
-pub fn check_parents(c: &Container, name: &str, creates: bool) -> Result<(), ApiError> {
+/// side makes it), and a directory cannot be replaced by a blob or get blocks. The answers are Azure's, see the top of this page.
+pub fn check_parents(c: &Container, name: &str, op: Op) -> Result<(), ApiError> {
+    let blocks = matches!(op, Op::PutBlock | Op::PutBlockFromUrl | Op::PutBlockList);
     let mut end = 0;
     for part in name.split('/') {
         end += part.len();
         if end < name.len() {
             if let Some(b) = live(c, &name[..end]) {
                 if !is_dir(b) {
-                    return Err(path_conflict());
+                    return Err(if blocks { err("OperationNotAllowedInCurrentState") } else { err("BlobNotFound") });
                 }
             }
             end += 1;
         }
     }
-    if creates && dir_attrs_of(c, name).is_some() {
-        return Err(path_conflict());
+    if dir_attrs_of(c, name).is_some() {
+        return Err(if op == Op::PutBlockList {
+            err("OperationNotSupportedOnDirectory")
+        } else {
+            err("OperationNotAllowedInCurrentState")
+        });
     }
     Ok(())
 }

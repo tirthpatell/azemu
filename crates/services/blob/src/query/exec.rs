@@ -26,7 +26,8 @@ pub struct Limits {
     pub max_blob_bytes: u64,
     /// A record (a line of CSV, a JSON document) larger than this ends the query with a fatal error.
     pub max_record_bytes: usize,
-    /// Result data goes out in records of at most this many bytes, with a progress message after each.
+    /// Result data goes out in records of at most this many bytes, with a progress message after each. Azure sent a result of
+    /// 1,020,000 bytes as one record (checked in November 2026); larger results were not tried, so the size is a choice.
     pub data_chunk_bytes: usize,
     /// The whole answer may be this large; past it the query ends with a fatal error.
     pub max_answer_bytes: usize,
@@ -80,7 +81,7 @@ impl Default for Limits {
         Limits {
             max_blob_bytes: 256 * 1024 * 1024,
             max_record_bytes: 4 * 1024 * 1024,
-            data_chunk_bytes: 256 * 1024,
+            data_chunk_bytes: 4 * 1024 * 1024,
             max_answer_bytes: 128 * 1024 * 1024,
             time_budget: Duration::from_secs(30),
             max_errors: 1000,
@@ -164,6 +165,25 @@ impl Sink<'_> {
             return Err(Fatal::new("ResultTooLarge", format!("The result is larger than {} bytes.", self.max_answer), scanned));
         }
         Ok(())
+    }
+
+    /// A query that selects nothing from the start (an empty blob, `LIMIT 0`): Azure sends only the `end` message.
+    fn finish_empty(mut self) {
+        let t = self.total as i64;
+        self.w.write(&Message::End { total_bytes: t });
+        let _ = self.push();
+    }
+
+    /// An aggregate: an empty data record, the errors, a progress message for the finished scan, then the one result
+    /// record and `end` (Azure's order, checked in November 2026).
+    fn finish_aggregate(mut self, last: &[u8]) {
+        self.w.write(&Message::Data(&[]));
+        self.flush_errors();
+        let t = self.total as i64;
+        self.w.write(&Message::Progress { bytes_scanned: t, total_bytes: t });
+        self.w.write(&Message::Data(last));
+        self.w.write(&Message::End { total_bytes: t });
+        let _ = self.push();
     }
 
     /// The header line of the output is a data record of its own (as in the recorded answers).
@@ -253,6 +273,8 @@ struct Runner<'a> {
     cols: Columns,
     now: Ts,
     names: Vec<String>,
+    /// A select item that is a number written in the query is written back as it was typed (`2.0`, `1.50`).
+    literals: Vec<Option<Value>>,
     accs: Vec<(Acc, Option<&'a Expr>)>,
     emitted: u64,
     wrote_header: bool,
@@ -330,7 +352,9 @@ impl<'a> Runner<'a> {
                 }
                 let _ = i;
             }
-            return Ok(false);
+            // LIMIT counts the rows that are added up, not the result row (`COUNT(*) ... LIMIT 1` is 1 on Azure)
+            self.emitted += 1;
+            return Ok(self.sel.limit.map(|l| self.emitted >= l).unwrap_or(false));
         }
         let out = match &self.sel.projection {
             Projection::Star => match &row {
@@ -344,10 +368,23 @@ impl<'a> Runner<'a> {
             Projection::List(items) => {
                 let mut values = Vec::with_capacity(items.len());
                 for (i, it) in items.iter().enumerate() {
+                    if let Some(Some(v)) = self.literals.get(i) {
+                        values.push(v.clone());
+                        continue;
+                    }
                     match eval(&it.expr, &ctx) {
                         Ok(v) => values.push(v),
                         Err(e) => {
+                            // the writer has already put the items before the one that failed on the line, each followed by
+                            // the column separator, and no record separator (Azure, delimited output, also before a fatal error)
+                            if let OutputFormat::Delimited(c) = &self.plan.output {
+                                for v in &values {
+                                    output::csv_field(c, &v.to_text(), &mut sink.data);
+                                    sink.data.extend_from_slice(&c.column);
+                                }
+                            }
                             self.failed(e, i, position, sink)?;
+                            sink.drain(scanned)?;
                             return Ok(false);
                         }
                     }
@@ -391,14 +428,27 @@ pub fn run_streaming(plan: &Plan, pieces: Vec<Piece>, limits: &Limits, cancel: &
         max_errors: limits.max_errors,
         reported: 0,
     };
-    let fatal = match &plan.select {
-        Err(e) => Some(Fatal::new("ParseError", format!("{} (position {})", e.message, e.pos), 0)),
-        Ok(sel) => scan(plan, sel, &mut stream, &mut sink, limits, &budget).err(),
-    };
-    sink.finish(fatal);
+    // nothing to read, or nothing to return: only `end` (Azure sends no data and no progress message here)
+    if sink.total == 0 || plan.select.limit == Some(0) {
+        sink.finish_empty();
+        return;
+    }
+    match scan(plan, &plan.select, &mut stream, &mut sink, limits, &budget) {
+        Ok(Some(last)) => sink.finish_aggregate(&last),
+        Ok(None) => sink.finish(None),
+        Err(f) => sink.finish(Some(f)),
+    }
 }
 
-fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, limits: &Limits, budget: &Budget) -> Result<(), Fatal> {
+/// Read the blob and run the query. `Some(bytes)` is the one record of an aggregate, not yet sent.
+fn scan(
+    plan: &Plan,
+    sel: &Select,
+    stream: &mut Stream,
+    sink: &mut Sink<'_>,
+    limits: &Limits,
+    budget: &Budget,
+) -> Result<Option<Vec<u8>>, Fatal> {
     let mut r = Runner {
         sel,
         plan,
@@ -406,12 +456,14 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
         cols: Columns::default(),
         now: Ts::utc_now(),
         names: Vec::new(),
+        literals: Vec::new(),
         accs: Vec::new(),
         emitted: 0,
         wrote_header: false,
         scratch: Vec::new(),
     };
-    let read_err = |e: super::input::ReadError| Fatal::new(e.name, e.message, e.position);
+    // a data error is reported at position 0 (Azure, for JSON and for delimited text); the others at the record
+    let read_err = |e: super::input::ReadError| Fatal::new(e.name, e.message, if e.name == "ParseError" { 0 } else { e.position });
     // every record counts as work (more for a big one), so the time limit and the cancellation are looked at between records
     // as well as inside them (`Budget` is also used by every expression evaluated)
     let mut last = stream.offset();
@@ -436,6 +488,13 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
     // the output column names are known now for a select list
     if let Projection::List(items) = &sel.projection {
         r.names = items.iter().enumerate().map(|(i, it)| column_name(i, it, &r.cols)).collect();
+        r.literals = items
+            .iter()
+            .map(|it| match &it.expr {
+                Expr::Lit(Value::Float(_)) => Some(Value::Raw(it.source.trim().to_string())),
+                _ => None,
+            })
+            .collect();
         if sel.aggregate {
             r.accs = items
                 .iter()
@@ -448,8 +507,19 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
     }
     // a header line is written even when no row follows, when its names are known
     if let OutputFormat::Delimited(c) = &plan.output {
+        // a select list with an expression that has no alias writes no header row at all (Azure)
         let known = match (&sel.projection, sel.aggregate) {
-            (Projection::List(_), _) => Some(r.names.clone()),
+            // without a header row in the input there are no column names to write either
+            (Projection::List(items), false)
+                if items.iter().all(|i| i.alias.is_some() || matches!(i.expr, Expr::Ref(_)))
+                    && !matches!(&plan.input, InputFormat::Delimited(d) if !d.headers) =>
+            {
+                Some(r.names.clone())
+            }
+            (Projection::List(_), _) => {
+                r.wrote_header = true;
+                None
+            }
             (Projection::Star, _) if matches!(plan.input, InputFormat::Delimited(_)) && !r.cols.names.is_empty() => {
                 Some(r.cols.names.clone())
             }
@@ -466,6 +536,8 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
     }
 
     match &plan.input {
+        // refused before the scan starts (`check_data`)
+        InputFormat::Parquet => {}
         InputFormat::Delimited(c) => {
             let mut done = false;
             while !done {
@@ -479,7 +551,7 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
             while !done {
                 let Some((pos, bytes)) = next_json_record(stream, record, limits.max_record_bytes).map_err(read_err)? else { break };
                 tick(stream.offset())?;
-                let value = json::parse(&bytes).map_err(|m| Fatal::new("ParseError", m, pos))?;
+                let value = json::parse_at(&bytes, pos as usize).map_err(|m| Fatal::new("ParseError", m, 0))?;
                 for v in path_rows(value, &sel.from) {
                     if r.row(Row::Json(v), pos, sink, stream.offset())? {
                         done = true;
@@ -491,10 +563,21 @@ fn scan(plan: &Plan, sel: &Select, stream: &mut Stream, sink: &mut Sink<'_>, lim
     }
     if sel.aggregate {
         let values: Vec<Value> = r.accs.iter().map(|(a, _)| a.result()).collect();
-        let names = r.names.clone();
-        r.emit(OutRow::Fields { names, values }, sink, stream.total())?;
+        let mut last = Vec::new();
+        match &plan.output {
+            // a NULL result (SUM of no rows) is an empty record, without the record separator, in delimited output
+            OutputFormat::Delimited(c) => {
+                if values.iter().any(|v| !v.is_nullish()) {
+                    output::csv_row(c, &OutRow::Fields { names: r.names.clone(), values }, &mut last)
+                }
+            }
+            OutputFormat::Json { record } => output::json_row(record, &OutRow::Fields { names: r.names.clone(), values }, &mut last),
+        }
+        // the data not yet sent (none for an aggregate) goes out before the result
+        sink.drain(stream.total())?;
+        return Ok(Some(last));
     }
-    Ok(())
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -736,7 +819,10 @@ pub mod tests {
     fn an_empty_blob_and_a_query_without_results_still_have_the_closing_messages() {
         let (msgs, data) = query("SELECT * FROM BlobStorage", "", "", b"");
         assert!(data.is_empty());
-        assert_eq!(msgs, vec![Msg::Data(vec![]), Msg::Progress(0, 0), Msg::End(0)]);
+        // Azure sends only `end` for an empty blob (no data, no progress) and for LIMIT 0
+        assert_eq!(msgs, vec![Msg::End(0)]);
+        let (msgs, _) = query("SELECT * FROM BlobStorage LIMIT 0", "", "", b"a\n");
+        assert_eq!(msgs, vec![Msg::End(2)]);
         let (msgs, _) = query("SELECT * FROM BlobStorage WHERE _1 = 'zzz'", "", "", b"a\n");
         assert_eq!(msgs, vec![Msg::Data(vec![]), Msg::Progress(2, 2), Msg::End(2)]);
     }

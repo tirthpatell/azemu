@@ -1,7 +1,6 @@
-//! ORDER BY and documents that lack the sort property. Azure serves ORDER BY from the index:
-//! under the default policy (`/*`) such documents are left out; with the path indexed
-//! explicitly, or with a composite index (needed for several fields), they come back, and
-//! undefined sorts before null. Source: Microsoft Learn, "Indexing policies".
+//! ORDER BY and documents that lack the sort property. Azure serves ORDER BY from the index and returns those documents
+//! whatever the policy (checked on a real account in November 2026): undefined sorts before null, so they come first when
+//! ascending and last when descending. A path that the policy leaves out of the index cannot be sorted by.
 
 mod common;
 
@@ -37,11 +36,52 @@ async fn ids(h: &H, q: &str) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn default_policy_leaves_out_documents_without_the_property() {
+async fn default_policy_returns_them_first_ascending_and_last_descending() {
     let h = start().await;
     container(&h, None).await;
-    assert_eq!(ids(&h, "SELECT VALUE c.id FROM c ORDER BY c.n").await, ["null", "false", "true", "one", "two", "str"]);
-    assert_eq!(ids(&h, "SELECT VALUE c.id FROM c ORDER BY c.n DESC").await, ["str", "two", "one", "true", "false", "null"]);
+    assert_eq!(ids(&h, "SELECT VALUE c.id FROM c ORDER BY c.n").await, ["undef", "null", "false", "true", "one", "two", "str"]);
+    assert_eq!(ids(&h, "SELECT VALUE c.id FROM c ORDER BY c.n DESC").await, ["str", "two", "one", "true", "false", "null", "undef"]);
+}
+
+async fn order_error(h: &H, q: &str) -> String {
+    let r = h.query("d", "c", &[("x-ms-documentdb-partitionkey", "[\"p\"]")], json!({"query": q})).await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    r.text()
+}
+
+#[tokio::test]
+async fn a_path_the_policy_leaves_out_of_the_index_cannot_be_sorted_by() {
+    let h = start().await;
+    container(
+        &h,
+        Some(
+            json!({"indexingMode": "consistent", "includedPaths": [{"path": "/n/?"}, {"path": "/o/?"}], "excludedPaths": [{"path": "/*"}]}),
+        ),
+    )
+    .await;
+    assert!(order_error(&h, "SELECT VALUE c.id FROM c ORDER BY c.other")
+        .await
+        .contains("The index path corresponding to the specified order-by item is excluded."));
+    // `/o/?` indexes `o` and not what is below it; the root is never indexed; `id` always is
+    assert!(order_error(&h, "SELECT VALUE c.id FROM c ORDER BY c.o.x").await.contains("is excluded."));
+    assert!(order_error(&h, "SELECT VALUE c.id FROM c ORDER BY c").await.contains("is excluded."));
+    assert_eq!(ids(&h, "SELECT VALUE c.id FROM c ORDER BY c.id DESC").await.len(), 7);
+    // no indexing at all
+    let h2 = start().await;
+    container(&h2, Some(json!({"indexingMode": "none", "automatic": false}))).await;
+    assert!(order_error(&h2, "SELECT VALUE c.id FROM c ORDER BY c.n").await.contains("indexing mode 'none'"));
+}
+
+#[tokio::test]
+async fn order_by_takes_a_document_path_only() {
+    let h = start().await;
+    container(&h, None).await;
+    let text = order_error(&h, "SELECT VALUE c.id FROM c ORDER BY c.n + 1").await;
+    assert!(text.contains("2206") && text.contains("could not be mapped to a document path"), "{text}");
+    assert!(order_error(&h, "SELECT VALUE c.id FROM c ORDER BY LOWER(c.id)").await.contains("2206"));
+    assert!(order_error(&h, "SELECT c.id FROM c JOIN a IN c.arr ORDER BY a")
+        .await
+        .contains("Order-by over correlated collections is not supported."));
 }
 
 #[tokio::test]

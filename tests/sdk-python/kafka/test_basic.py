@@ -69,7 +69,10 @@ def test_null_key_and_null_value_and_empty_value(emu, topic1, track):
 
 
 def test_large_batches_keep_order(emu, topic1, track):
-    p = track(producer(plain(emu), **{"linger.ms": 50, "batch.num.messages": 500}))
+    # one request in flight: Kafka only promises the order of requests that are sent one after the other (Azure, which handles several
+    # requests of one connection at the same time, stored 3000 records as 500-record batches in a different order with the default of
+    # many requests in flight)
+    p = track(producer(plain(emu), **{"linger.ms": 50, "batch.num.messages": 500, "max.in.flight.requests.per.connection": 1}))
     items = [f"msg-{i:05d}".encode() * 10 for i in range(3000)]
     sent = produce_all(p, topic1, items)
     assert [m.offset() for m in sent] == list(range(3000))
@@ -79,6 +82,7 @@ def test_large_batches_keep_order(emu, topic1, track):
     assert [m.value() for m in got] == items
 
 
+@pytest.mark.azure_differs("by design: the Standard tier refuses a compressed batch with UNSUPPORTED_FOR_MESSAGE_FORMAT; Microsoft documents compression for Premium and Dedicated, and the emulator stands for the service, so it accepts gzip")
 def test_gzip_compression(emu, topic1, track):
     p = track(producer(plain(emu), **{"compression.type": "gzip", "linger.ms": 20}))
     items = [(b"k", b"compress me " * 200 + str(i).encode()) for i in range(50)]
@@ -121,6 +125,7 @@ def test_two_idempotent_producers_have_separate_sequences(emu, topic1, track):
     assert [m.value() for m in consume(c, 4)] == [b"a1", b"a2", b"b1", b"a3"]
 
 
+@pytest.mark.azure_differs("kept: Azure resets the connection when a produce request is over about 1 MiB (the client reports a timeout); the emulator answers MESSAGE_TOO_LARGE, which is easier to act on")
 def test_a_message_over_the_event_size_limit_is_refused(emu, topic1, track):
     # the broker limit is 1 MiB (Event Hubs Standard); raise the client limits so the broker answers
     p = track(producer(plain(emu), **{"message.max.bytes": 5_000_000, "message.timeout.ms": 8000}))
@@ -136,6 +141,23 @@ def test_produce_to_a_missing_partition_fails(emu, topic1, track):
     p.produce(topic1, value=b"x", partition=9, on_delivery=lambda e, m: errors.append(e))
     p.flush(10)
     assert errors and errors[0] is not None
+
+
+def test_record_timestamp_is_the_time_the_event_was_stored(emu, topic1, track):
+    # a record that came in through Kafka is LogAppendTime on a real namespace (November 2026); the producer's own time is dropped
+    import time
+
+    from confluent_kafka import TIMESTAMP_LOG_APPEND_TIME
+
+    p = track(producer(plain(emu)))
+    p.produce(topic1, value=b"t", partition=0, timestamp=1_600_000_000_000)  # the producer's own time, in 2020
+    assert p.flush(15) == 0
+    c = track(consumer(plain(emu), kutil.uniq("g")))
+    c.subscribe([topic1])
+    (m,) = consume(c, 1)
+    kind, ms = m.timestamp()
+    assert abs(ms - time.time() * 1000) < 60_000  # the time the event was stored, in the same minute
+    assert kind == TIMESTAMP_LOG_APPEND_TIME
 
 
 def test_transactions_are_not_available(emu, topic1, track):

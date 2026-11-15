@@ -422,25 +422,9 @@ func TestAClientThatTrustsNothingCannotUseTLS(t *testing.T) {
 	}
 }
 
-// By default the emulator does not create an event hub because a Kafka client names a topic (as Event Hubs does not).
-func TestMissingTopicsAreNotCreatedByDefaultEvenWhenTheClientAllowsIt(t *testing.T) {
-	missing := uniq("fgo-missing")
-	p := newClient(t, kgo.AllowAutoTopicCreation(), kgo.RecordPartitioner(kgo.ManualPartitioner()), kgo.RecordRetries(0), kgo.UnknownTopicRetries(0))
-	res := p.ProduceSync(ctxT(t, 20*time.Second), &kgo.Record{Topic: missing, Partition: 0, Value: []byte("x")})
-	if res.FirstErr() == nil || hubExists(t, "default", missing) {
-		t.Fatalf("expected an error and no hub: %v", res.FirstErr())
-	}
-}
-
-// Auto-creation is a convenience Azure does not have: this test starts an emulator of its own with AZEMU_EVENTHUBS_AUTOCREATE=1.
-func TestMissingTopicsAreCreatedWhenAutoCreationIsOn(t *testing.T) {
-	e, err := emu.StartEnv([]string{"AZEMU_EVENTHUBS_AUTOCREATE=1"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	old := emu.E
-	emu.E = e
-	t.Cleanup(func() { emu.E = old; e.Stop() })
+// Event Hubs makes the event hub when a producer names a topic that does not exist and the request allows it (checked against a real
+// namespace in November 2026): one partition. AZEMU_EVENTHUBS_AUTOCREATE, which is about AMQP, does not switch this.
+func TestMissingTopicsAreCreatedWhenTheClientAllowsIt(t *testing.T) {
 	name := uniq("fgo-auto")
 	p := newClient(t, kgo.AllowAutoTopicCreation(), kgo.RecordPartitioner(kgo.ManualPartitioner()))
 	produce(t, p, &kgo.Record{Topic: name, Partition: 0, Value: []byte("first")})

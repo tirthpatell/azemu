@@ -58,6 +58,9 @@ impl QueueService {
             Ok(r) => r,
             Err(u) => return unrouted(req, u),
         };
+        if let Some(v) = storage::credentials::refused_version(req) {
+            return errors::invalid_version(&req.ctx, v);
+        }
         // The lock is taken and released inside this function, never across an .await.
         let mut state = self.state.lock();
         if let Err(resp) = authorize(&state, &self.accounts, req, &routed) {
@@ -160,10 +163,12 @@ impl Service for QueueService {
         } else {
             self.dispatch(&req)
         };
-        if req.method != Method::OPTIONS && req.header("origin").is_some() {
+        // the common headers first: `Access-Control-Expose-Headers` names the ones the answer has
+        resp = storage::finish(resp, &req, SERVER);
+        if req.method != Method::OPTIONS {
             storage::cors::apply(&mut resp, &req, &props::cors_rules(&self.state.lock(), &req.account));
         }
-        storage::finish(resp, &req, SERVER)
+        resp
     }
 
     fn reset(&self) {

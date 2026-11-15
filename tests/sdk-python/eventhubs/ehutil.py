@@ -19,16 +19,28 @@ from urllib.parse import urlparse
 
 from azure.eventhub import EventData, EventHubConsumerClient, EventHubProducerClient
 
+import azure_eh
+
+# True when the suite runs against a real namespace (AZEMU_AZURE=1, see azure_eh.py and tests/sdk-python/README.md).
+AZURE = azure_eh.enabled()
+
 NAMESPACE = "myns"
 KEY_NAME = "RootManageSharedAccessKey"
 KEY = "c2VjcmV0c2VjcmV0c2VjcmV0"  # base64-looking; the emulator accepts every credential
+if AZURE:
+    _parts = dict(p.split("=", 1) for p in azure_eh.conn_str_base().split(";") if "=" in p)
+    KEY_NAME, KEY = _parts["SharedAccessKeyName"], _parts["SharedAccessKey"]
 DEFAULT_GROUP = "$Default"
 MARKER = b"__azemu_ready_marker__"
 
 # Keep a broken service from hanging a test: one retry with a tiny backoff (the SDK default would sleep 0.8 s per retry).
 CLIENT_KW = dict(retry_total=1, retry_backoff_factor=0.05, retry_backoff_max=0.2, auth_timeout=10)
+if AZURE:  # a real service answers in tens of milliseconds, not microseconds, and its token exchange is slower
+    CLIENT_KW = dict(retry_total=1, retry_backoff_factor=0.3, retry_backoff_max=1.0, auth_timeout=30)
 
-# How long a "collect N events" wait may take before the test fails.
+# How long a "collect N events" wait may take before the test fails. Every wait of a test is multiplied by SCALE on Azure, where a
+# round trip takes tens of milliseconds and the first link of a connection a few hundred.
+SCALE = 4.0 if AZURE else 1.0
 WAIT = 8.0
 
 
@@ -38,12 +50,17 @@ def uniq(prefix: str = "hub") -> str:
 
 # -- connection strings -------------------------------------------------------------------------------------------
 def host(emu, namespace: str = NAMESPACE) -> str:
-    """`<namespace>.eventhub.localhost:<port>` (what goes after `Endpoint=sb://`)."""
+    """`<namespace>.eventhub.localhost:<port>` (what goes after `Endpoint=sb://`); the namespace's own host name on Azure."""
+    if emu.azure:
+        return azure_eh.fqdn()
     return urlparse(emu.url("eventhub", namespace)).netloc
 
 
 def conn_str(emu, hub: str | None = None, namespace: str = NAMESPACE, *, key_name: str = KEY_NAME, key: str = KEY,
              emulator: bool = True) -> str:
+    if emu.azure:
+        s = azure_eh.conn_str_base()
+        return s + (f";EntityPath={hub}" if hub else "")
     s = f"Endpoint=sb://{host(emu, namespace)};SharedAccessKeyName={key_name};SharedAccessKey={key}"
     if emulator:
         s += ";UseDevelopmentEmulator=true"
@@ -52,12 +69,23 @@ def conn_str(emu, hub: str | None = None, namespace: str = NAMESPACE, *, key_nam
     return s
 
 
+def dev(emu) -> str:
+    """`;UseDevelopmentEmulator=true` for a connection string built by hand (plain AMQP to the emulator); nothing against Azure."""
+    return "" if emu.azure else ";UseDevelopmentEmulator=true"
+
+
+def dev_kw(emu) -> dict:
+    """`use_tls=False` for a client made from a host name and a credential (the emulator speaks plain AMQP); nothing on Azure."""
+    return {} if emu.azure else {"use_tls": False}
+
+
 # -- the one place that knows the emulator's admin API ----------------------------------------------------------------
 HUB_ADMIN_ROUTE = "/_azemu/eventhubs/{namespace}/hubs/{hub}"  # PUT, JSON {"partitionCount": N, "consumerGroups": [...]}
 
 
 def admin_create_hub(emu, hub: str, partitions: int = 4, groups=(), namespace: str = NAMESPACE) -> None:
     """Create an event hub with a chosen partition count (and consumer groups) through the emulator's admin API."""
+    assert not emu.azure, "against Azure use pool_hub(): hubs are shared and made through Resource Manager"
     path = HUB_ADMIN_ROUTE.format(namespace=namespace, hub=hub)
     body = json.dumps({"partitionCount": partitions, "consumerGroups": list(groups)}).encode()
     req = urllib.request.Request(emu.gateway + path, data=body, method="PUT", headers={"Content-Type": "application/json"})
@@ -65,6 +93,72 @@ def admin_create_hub(emu, hub: str, partitions: int = 4, groups=(), namespace: s
         urllib.request.urlopen(req, timeout=10).read()
     except urllib.error.HTTPError as e:  # surface the body: it says what the emulator did not like
         raise AssertionError(f"admin create hub failed: {e.code} {e.read()[:300]!r}") from None
+
+
+# -- shared hubs on Azure ---------------------------------------------------------------------------------------------------
+# A namespace holds at most 10 hubs, so on Azure every test works in the one hub that has the partition count it asks for, and
+# nothing is reset. To look empty to the test, `record_baseline` notes where every partition ends when the test starts, and the
+# collectors turn "read from the start" ("-1") into "read after that point" (`start_kwargs`).
+_BASELINES = {}  # hub -> {partition id: last enqueued sequence number, -1 for an empty partition}
+
+
+def record_baseline(emu, hub: str) -> dict:
+    from concurrent.futures import ThreadPoolExecutor
+
+    c = make_producer(emu, hub)
+    try:
+        ids = c.get_partition_ids()
+        with ThreadPoolExecutor(max_workers=len(ids)) as pool:  # every management call opens its own connection: ask in parallel
+            props = list(pool.map(c.get_partition_properties, ids))
+        base = {pid: (-1 if p["is_empty"] else p["last_enqueued_sequence_number"]) for pid, p in zip(ids, props)}
+    finally:
+        c.close()
+    _BASELINES[hub] = base
+    return base
+
+
+def baseline_of(hub: str, partition_id: str) -> int:
+    """Last sequence number the partition had when the test started (-1: it was empty). 0-based counting starts after it."""
+    return _BASELINES.get(hub, {}).get(partition_id, -1)
+
+
+def pool_hub(emu, partitions: int, groups=()) -> str:
+    name = azure_eh.ensure_hub(partitions)
+    for g in groups:
+        azure_eh.ensure_group(name, g)
+    record_baseline(emu, name)
+    return name
+
+
+def start_kwargs(hub, kw: dict) -> dict:
+    """Against Azure turn every "-1" start position (one for all partitions, or one in a per-partition dict) into "after the
+    baseline of the test's hub"; otherwise return `kw` as it is."""
+    pos = kw.get("starting_position")
+    if not AZURE or hub not in _BASELINES:
+        return kw
+    base = _BASELINES[hub]
+    if pos != "-1" and not (isinstance(pos, dict) and ("-1" in pos.values() or set(base) - set(pos))):
+        return kw
+    kw = dict(kw)
+    pid = kw.get("partition_id")
+    incl = kw.get("starting_position_inclusive", False)
+    if pid is not None and not isinstance(pos, dict):
+        b = base.get(pid, -1)
+        if b >= 0:
+            kw["starting_position"] = b
+            kw["starting_position_inclusive"] = False
+        return kw
+    if not isinstance(pos, dict):
+        pos = {p: "-1" for p in base}
+    new_pos, new_incl = {}, {}
+    for p in base:
+        v = pos.get(p, "-1")  # a partition missing from the dict starts at "-1" (SDK)
+        flag = incl.get(p, False) if isinstance(incl, dict) else incl
+        if v == "-1" and base[p] >= 0:
+            v, flag = base[p], False
+        new_pos[p], new_incl[p] = v, flag
+    kw["starting_position"], kw["starting_position_inclusive"] = new_pos, new_incl
+    return kw
 
 
 # -- clients ------------------------------------------------------------------------------------------------------------
@@ -163,6 +257,7 @@ async def async_send_n(producer, n: int, prefix: str = "m", *, partition_id=None
 
 def wait_until(fn, timeout: float = 5.0, interval: float = 0.1, what: str = "condition"):
     """Poll `fn` until it returns something truthy (returned) or fail after `timeout` seconds."""
+    timeout *= SCALE
     deadline = time.monotonic() + timeout
     last = None
     while time.monotonic() < deadline:
@@ -253,6 +348,7 @@ class Collector:
     def start(self):
         kw = dict(on_error=self._on_error, on_partition_initialize=self._on_init, on_partition_close=self._on_close)
         kw.update(self._kwargs)
+        kw = start_kwargs(self.client.eventhub_name, kw)
         fn = self.client.receive_batch if self.batch else self.client.receive
         cb = self._on_batch if self.batch else self._on_event
 
@@ -297,6 +393,7 @@ class Collector:
             return len(self.items)
 
     def wait_events(self, n: int, timeout: float = WAIT, what: str = "events") -> list:
+        timeout *= SCALE
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if self.count() >= n:
@@ -314,7 +411,7 @@ class Collector:
 
     def settle(self, seconds: float = 0.6) -> None:
         """Give extra events a moment to show up (used before asserting that NO more arrive)."""
-        time.sleep(seconds)
+        time.sleep(seconds * (2 if AZURE else 1))
 
     def wait_initialized(self, n: int = 1, timeout: float = WAIT):
         return self.wait_until(lambda c: len(c.initialized) >= n, timeout, f"{n} partition(s) initialized")
@@ -327,6 +424,7 @@ class Collector:
         every 0.3 s until a marker has come back from every one. Markers never show up in `events`.
         """
         pending = set(partition_ids)
+        timeout *= SCALE
         deadline = time.monotonic() + timeout
         while pending and time.monotonic() < deadline:
             seen = {pid for pid, _ in list(self.markers)}
@@ -403,6 +501,36 @@ def partition_sizes(emu, hub, partition_ids) -> dict:
     return out
 
 
+def raw_management_reply(client, partition_id=None) -> dict:
+    """The `$management` READ reply for an event hub (or one partition) as it comes off the wire, keys and values as the service sent them.
+
+    The SDK picks a few keys out of the reply; this keeps the whole map ({b"key": value}) so a test can look at the rest of it.
+    """
+    from azure.eventhub._constants import MGMT_OPERATION, MGMT_PARTITION_OPERATION
+
+    transport = client._amqp_transport
+    original = transport.mgmt_client_request
+    seen = {}
+
+    def spy(mgmt_client, mgmt_msg, **kw):
+        res = original(mgmt_client, mgmt_msg, **kw)
+        seen["reply"] = res[2]
+        return res
+
+    props = {"name": client.eventhub_name}
+    if partition_id is not None:
+        props["partition"] = partition_id
+    transport.mgmt_client_request = spy
+    try:
+        client._management_request(
+            transport.build_message(application_properties=props),
+            op_type=MGMT_OPERATION if partition_id is None else MGMT_PARTITION_OPERATION,
+        )
+    finally:
+        transport.mgmt_client_request = original
+    return seen["reply"].value
+
+
 # -- the same for asyncio -----------------------------------------------------------------------------------------------
 class AsyncCollector:
     """Runs `await client.receive_batch(...)` (or `receive`) as a task and records what arrives. All callbacks are coroutines."""
@@ -453,6 +581,7 @@ class AsyncCollector:
     def start(self):
         kw = dict(on_error=self._on_error, on_partition_initialize=self._on_init, on_partition_close=self._on_close)
         kw.update(self._kwargs)
+        kw = start_kwargs(self.client.eventhub_name, kw)
         fn = self.client.receive_batch if self.batch else self.client.receive
         cb = self._on_batch if self.batch else self._on_event
 
@@ -490,6 +619,7 @@ class AsyncCollector:
         return dict(out)
 
     async def wait_events(self, n: int, timeout: float = WAIT) -> list:
+        timeout *= SCALE
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if len(self.items) >= n:
@@ -504,6 +634,7 @@ class AsyncCollector:
 
     async def wait_live(self, producer, partition_ids, timeout: float = 10.0):
         pending = set(partition_ids)
+        timeout *= SCALE
         deadline = time.monotonic() + timeout
         while pending and time.monotonic() < deadline:
             pending -= {pid for pid, _ in self.markers}

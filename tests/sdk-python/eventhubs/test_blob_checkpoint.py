@@ -42,6 +42,8 @@ pytestmark = pytest.mark.needs_blob
 class Stack:
     """The few things ehutil needs from the `emu` fixture (`port`, `gateway`, `url`) plus the storage connection string."""
 
+    azure = False
+
     def __init__(self, eh_port: int, blob_port: int):
         self.port = eh_port
         self.blob_port = blob_port
@@ -91,8 +93,23 @@ def _services(health) -> set:
     return names
 
 
+class AzureStack:
+    """The real namespace and the real storage account (AZEMU_AZURE=1): what `Stack` offers, from the AZ_* variables."""
+
+    azure = True
+    port = 0
+    ca_file = None
+    storage_conn_str = None
+
+    def __init__(self):
+        self.storage_conn_str = os.environ["AZ_STORAGE_CONN_STR"]
+
+
 @pytest.fixture(scope="module")
 def stack():
+    if ehutil.AZURE:
+        yield AzureStack()
+        return
     override = os.environ.get("AZEMU_EH_STACK")
     if override:
         eh, blob = (int(x) for x in override.split(","))
@@ -134,6 +151,8 @@ def store(stack):
 @pytest.fixture
 def eh_hub(stack):
     def make(partitions=4, groups=()):
+        if stack.azure:
+            return ehutil.pool_hub(stack, partitions, groups)
         name = ehutil.uniq()
         ehutil.admin_create_hub(stack, name, partitions, groups)
         return name

@@ -217,7 +217,8 @@ pub fn tags_match(tags: &[(String, String)], wanted: &[(String, String)]) -> boo
 }
 
 /// `$select`: comma separated field names, kept in the order of `allowed`.
-/// `Ok(None)` when absent. `Err(name)` for a field that does not exist.
+/// `Ok(None)` when absent. A field that does not exist is left out, as the service does (`$select=bogus` gives items
+/// with no fields at all); it never fails.
 pub fn parse_select<'a>(values: impl Iterator<Item = &'a str>, allowed: &[&'static str]) -> Result<Option<Vec<&'static str>>, String> {
     let mut wanted: Vec<String> = Vec::new();
     let mut seen_any = false;
@@ -232,11 +233,6 @@ pub fn parse_select<'a>(values: impl Iterator<Item = &'a str>, allowed: &[&'stat
     }
     if !seen_any || wanted.is_empty() {
         return Ok(None);
-    }
-    for w in &wanted {
-        if !allowed.contains(&w.as_str()) {
-            return Err(w.clone());
-        }
     }
     Ok(Some(allowed.iter().copied().filter(|a| wanted.iter().any(|w| w == a)).collect()))
 }
@@ -366,6 +362,7 @@ mod tests {
         assert_eq!(parse_select(["value,key"].into_iter(), F), Ok(Some(vec!["key", "value"])));
         assert_eq!(parse_select(["KEY"].into_iter(), F), Ok(Some(vec!["key"])));
         assert_eq!(parse_select(std::iter::empty(), F), Ok(None));
-        assert_eq!(parse_select(["key,bogus"].into_iter(), F), Err("bogus".to_string()));
+        assert_eq!(parse_select(["key,bogus"].into_iter(), F), Ok(Some(vec!["key"])));
+        assert_eq!(parse_select(["bogus"].into_iter(), F), Ok(Some(vec![])));
     }
 }

@@ -212,25 +212,26 @@ class KafkaTest {
         }
     }
 
-    // By default (as on Event Hubs) a Kafka client that names a topic nobody created creates nothing, although the Java consumer and
-    // producer ask for auto-creation; the tests of auto-creation itself are in KafkaAutoCreateTest, which starts the emulator with
-    // AZEMU_EVENTHUBS_AUTOCREATE=1.
-    @Test void producer_toAMissingTopic_failsByDefault_andCreatesNoEventHub() throws Exception {
+    // Event Hubs makes the event hub when a producer or a consumer that allows it (the Java ones do) names a topic nobody created: one
+    // partition, 7 days (checked with librdkafka against a real namespace, November 2026). AZEMU_EVENTHUBS_AUTOCREATE is about AMQP.
+    @Test void producer_toAMissingTopic_createsTheEventHub_withOnePartitionAndSevenDays() throws Exception {
         String t = topic();
-        try (KafkaProducer<String, String> p = producer(plain(), Map.of("max.block.ms", "5000", "request.timeout.ms", "5000", "delivery.timeout.ms", "10000", "retries", "0"))) {
-            assertThrows(Exception.class, () -> p.send(new ProducerRecord<>(t, "k", "v")).get(20, TimeUnit.SECONDS));
+        try (KafkaProducer<String, String> p = producer(plain(), Map.of("max.block.ms", "20000"))) {
+            assertEquals(0, p.send(new ProducerRecord<>(t, "k", "v")).get(30, TimeUnit.SECONDS).offset());
         }
-        assertNull(hubInfo("default", t));
+        String info = hubInfo("default", t);
+        assertNotNull(info);
+        assertTrue(info.contains("\"partitionCount\":1") && info.contains("\"retentionSeconds\":604800"), info);
     }
 
-    @Test void consumer_subscribingToAMissingTopic_createsNothingByDefault() throws Exception {
+    @Test void consumer_subscribingToAMissingTopic_createsIt_becauseTheJavaConsumerAllowsAutoCreation() throws Exception {
         String t = topic();
         try (KafkaConsumer<String, String> c = consumer(plain(), Emu.dashed("g"))) {
             c.subscribe(List.of(t));
-            long end = System.currentTimeMillis() + 4_000;
-            while (System.currentTimeMillis() < end) c.poll(Duration.ofMillis(300));
+            long end = System.currentTimeMillis() + 20_000;
+            while (hubInfo("default", t) == null && System.currentTimeMillis() < end) c.poll(Duration.ofMillis(300));
+            assertNotNull(hubInfo("default", t));
         }
-        assertNull(hubInfo("default", t));
     }
 
     @Test void messageOverTheLimit_isRefused() throws Exception {
@@ -296,7 +297,8 @@ class KafkaTest {
             assertEquals(3, c.endOffsets(List.of(tp)).get(tp));
             Map<TopicPartition, OffsetAndTimestamp> byTime = c.offsetsForTimes(Map.of(tp, System.currentTimeMillis() - 60_000));
             assertEquals(0, byTime.get(tp).offset());
-            assertNull(c.offsetsForTimes(Map.of(tp, System.currentTimeMillis() + 3_600_000)).get(tp));
+            // a time after the last event gives the end offset (a real namespace, November 2026), not null as in Apache Kafka
+            assertEquals(3, c.offsetsForTimes(Map.of(tp, System.currentTimeMillis() + 3_600_000)).get(tp).offset());
         }
     }
 
@@ -360,7 +362,7 @@ class KafkaTest {
             assertTrue(a.listTopics().names().get(20, TimeUnit.SECONDS).contains(t));
             TopicDescription d = a.describeTopics(List.of(t)).allTopicNames().get(20, TimeUnit.SECONDS).get(t);
             assertEquals(3, d.partitions().size());
-            assertEquals(1, d.partitions().get(0).replicas().size());
+            assertEquals(0, d.partitions().get(0).replicas().size()); // Azure lists none
             ConfigResource res = new ConfigResource(ConfigResource.Type.TOPIC, t);
             Config cfg = a.describeConfigs(List.of(res)).all().get(20, TimeUnit.SECONDS).get(res);
             assertEquals("7200000", cfg.get("retention.ms").value());

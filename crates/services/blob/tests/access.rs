@@ -7,8 +7,9 @@ use azemu_blob::BlobService;
 use azemu_core::testing::TestServer;
 use azemu_core::Service;
 
+/// The signature is 32 bytes of base64, as Azure wants; the account is not the development account, so it is not compared.
 fn sas(extra: &str) -> String {
-    format!("sv=2021-08-06&sig=ignored&{extra}")
+    format!("sv=2021-08-06&sig={}&{extra}", "A".repeat(43) + "=")
 }
 
 #[tokio::test]
@@ -75,7 +76,7 @@ async fn sas_permissions_expiry_and_scope() {
     assert_eq!(code(&e.anon("GET", &format!("/cnt/b?{q}"), &[], "").await), "AuthorizationProtocolMismatch");
     // ip range
     let q = sas("sr=b&sp=r&sip=203.0.113.7&se=2099-01-01T00:00:00Z");
-    assert_eq!(code(&e.anon("GET", &format!("/cnt/b?{q}"), &[], "").await), "AuthorizationSourceIPMismatch");
+    assert_eq!(code(&e.anon("GET", &format!("/cnt/b?{q}"), &[], "").await), "AuthorizationFailure");
     let q = sas("sr=b&sp=r&sip=127.0.0.0-127.255.255.255&se=2099-01-01T00:00:00Z");
     assert_eq!(e.anon("GET", &format!("/cnt/b?{q}"), &[], "").await.status, 200);
     // account SAS: services, resource types, permissions
@@ -172,8 +173,17 @@ async fn an_anonymous_create_or_upload_is_401_even_when_the_container_does_not_e
         assert_eq!((r.status, code(&r).as_str()), (401, "NoAuthenticationInformation"), "{method} {path}");
     }
     assert_eq!(e.send("GET", "/fresh?restype=container", &[], "").await.status, 404, "nothing was created");
+    // a container that does not exist is told like a private one (checked against Azure in November 2026)
     let r = e.anon("GET", "/fresh/blob", &[], "").await;
+    assert_eq!((r.status, code(&r).as_str()), (401, "NoAuthenticationInformation"));
+    assert!(r.header("www-authenticate").is_some());
+    assert_eq!(e.anon("GET", "/fresh?restype=container", &[], "").await.status, 401);
+    assert_eq!(e.anon("GET", "/fresh?restype=container&comp=list", &[], "").await.status, 401);
+    // an x-ms-version from before Entra ID could sign in answers 404, so that nothing is told about what exists
+    let r = e.anon("GET", "/fresh/blob", &[("x-ms-version", "2019-07-07")], "").await;
     assert_eq!((r.status, code(&r).as_str()), (404, "ResourceNotFound"));
+    let r = e.anon("GET", "/fresh/blob", &[("x-ms-version", "2019-12-12")], "").await;
+    assert_eq!(r.status, 401);
 }
 
 /// An account that does not allow public access: an anonymous read is 409 PublicAccessNotPermitted, a private container
@@ -245,14 +255,16 @@ async fn a_copy_source_in_an_account_without_public_access_is_409() {
     assert!(r.text().contains("<CopySourceStatusCode>409</CopySourceStatusCode>"), "{}", r.text());
 }
 
-/// An Authorization header that no scheme can be read from is 400 InvalidAuthenticationInfo with the text of the recordings
-/// (`test_common_blob.pyTestStorageCommonBlobtest_access_token_refresh_after_retry` and `..._test_token_credential`):
-/// "Authentication information is not given in the correct format. Check the value of Authorization header."
+/// An Authorization header with one word only, or a `Bearer` with no token, is 400 InvalidAuthenticationInfo with the text
+/// of the recordings (`test_common_blob.pyTestStorageCommonBlobtest_access_token_refresh_after_retry` and
+/// `..._test_token_credential`): "Authentication information is not given in the correct format. Check the value of
+/// Authorization header." A scheme Azure does not know (`Basic x`) is 403 AuthenticationFailed (tried in November 2026), and
+/// a Shared Key header whose signature is not base64 is 400 too.
 #[tokio::test]
 async fn a_malformed_authorization_header_is_400_invalid_authentication_info() {
     let e = start().await;
     e.create_container("cnt").await;
-    for value in ["Basic dXNlcjpwYXNz", "garbage", "Bearer", "Bearer   ", "Token abc"] {
+    for value in ["garbage", "Bearer", "Bearer   ", "SharedKey acct", "SharedKey acct:", "SharedKey :c2ln", "SharedKey acct:replay"] {
         let r = e.anon("GET", "/cnt?restype=container", &[("Authorization", value)], "").await;
         assert_eq!((r.status, code(&r).as_str()), (400, "InvalidAuthenticationInfo"), "{value:?}");
         assert!(
@@ -260,6 +272,10 @@ async fn a_malformed_authorization_header_is_400_invalid_authentication_info() {
             "{value:?}: {}",
             r.text()
         );
+    }
+    for value in ["Basic dXNlcjpwYXNz", "Token abc"] {
+        let r = e.anon("GET", "/cnt?restype=container", &[("Authorization", value)], "").await;
+        assert_eq!((r.status, code(&r).as_str()), (403, "AuthenticationFailed"), "{value:?}");
     }
     // the readable ones, and an empty header (the same as none)
     assert_eq!(e.anon("GET", "/cnt?restype=container", &[("Authorization", "Bearer eyJ0.abc.def")], "").await.status, 200);

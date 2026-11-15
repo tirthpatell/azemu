@@ -4,10 +4,12 @@
 #
 # The active steps build azemu from a release tag with `cargo install --git` (about 3 minutes the first time, then cached). Two faster
 # ways are in the commented alternatives at the end: the release archive, and the container image.
+#
+# This is for a Linux runner. On a macOS runner the Azure crates ask the Keychain and do not read SSL_CERT_FILE: docs/rust.md, "macOS".
 name: test
 on: [push, pull_request]
 env:
-  AZEMU_TAG: v0.1.0
+  AZEMU_TAG: v0.2.0
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -37,7 +39,7 @@ jobs:
 #
 #      - name: Install azemu from the release archive
 #        run: |
-#          version=0.1.0
+#          version=0.2.0
 #          base=https://github.com/tirthpatell/azemu/releases/download/v$version
 #          curl -fsSLO "$base/azemu-$version-x86_64-unknown-linux-gnu.tar.gz"
 #          curl -fsSLO "$base/SHA256SUMS"
@@ -50,7 +52,7 @@ jobs:
 #
 #    services:
 #      azemu:
-#        image: ghcr.io/tirthpatell/azemu:0.1.0
+#        image: ghcr.io/tirthpatell/azemu:0.2.0
 #        ports:
 #          - 4577:4577
 #    steps:

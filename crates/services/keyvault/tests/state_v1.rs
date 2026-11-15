@@ -97,8 +97,16 @@ async fn version_1_files_still_load() {
     let versions = ok(&kv, "GET", "/secrets/db-password/versions", None).await;
     assert_eq!(versions["value"].as_array().unwrap().len(), 2);
     let deleted = ok(&kv, "GET", "/deletedsecrets", None).await;
-    assert_eq!(deleted["value"].as_array().unwrap().len(), 1);
-    assert!(deleted["value"][0]["id"].as_str().unwrap().contains("deleted-one"));
+    // The deleted secret is purged 90 days after the fixture was written (`scheduledPurgeDate` 1802348627, 11 February 2027),
+    // as it should be: until then it is listed, afterwards it is gone. The test must not depend on the day it runs.
+    let listed = deleted["value"].as_array().unwrap();
+    if unix_now() < 1_802_348_627 {
+        assert_eq!(listed.len(), 1, "{deleted}");
+        assert!(listed[0]["id"].as_str().unwrap().contains("deleted-one"));
+        assert_eq!(listed[0]["scheduledPurgeDate"], 1_802_348_627i64);
+    } else {
+        assert!(listed.is_empty(), "{deleted}");
+    }
     // keys keep their public parts and still sign with the private part
     let ec = ok(&kv, "GET", "/keys/ec", None).await;
     assert_eq!((ec["key"]["kty"].as_str(), ec["key"]["crv"].as_str()), (Some("EC"), Some("P-256")));
@@ -121,4 +129,8 @@ async fn version_1_files_still_load() {
     let r = kv.call_at(&kv.vault_base("other"), "GET", "/secrets/s", None).await;
     assert_eq!(r.json()["value"], "in the other vault");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }

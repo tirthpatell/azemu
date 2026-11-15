@@ -12,11 +12,12 @@
 //!   is the base64 SHA-256 of the key bytes (specification text: "Must be provided if the x-ms-encryption-key header is
 //!   provided"). A request that sends a key without the other two is `400 MissingRequiredHeader`, a bad value is
 //!   `400 InvalidHeaderValue` naming the header, a hash that is not the hash of the key is `400 InvalidHeaderValue` with
-//!   `HeaderName x-ms-encryption-key` (a report of the real service's answer to a wrongly encoded hash; no recording).
+//!   `HeaderName x-ms-encryption-key-sha256` and the hash as `HeaderValue` (checked against Azure in November 2026).
 //! - A blob written with a key and read or written without one is `409 BlobUsesCustomerSpecifiedEncryption` (recorded).
-//! - The same blob with another key: the same error code and status. The real answer is not documented in the specification
-//!   or in the recordings; this is the only CPK error code the SDKs know.
-//! - A key sent for a blob that was not written with one is accepted (the real service refuses; not checked).
+//! - The same blob with another key: `409 BlobCustomerSpecifiedEncryptionMismatch`; a key sent for a blob that was not
+//!   written with one: `409 BlobDoesNotUseCustomerSpecifiedEncryption` (both checked against Azure in November 2026).
+//! - Without the key header the answer is `BlobUsesCustomerSpecifiedEncryption` whatever the hash says (the hash of the right
+//!   key alone was not tried); a write that sends the hash and no key is accepted, and the blob has no key (checked against Azure).
 
 use azemu_core::Request;
 use base64::engine::general_purpose::STANDARD;
@@ -55,18 +56,9 @@ pub fn validate(req: &Request) -> Result<(), ApiError> {
             .filter(|b| b.len() == 32)
             .ok_or_else(|| ApiError::new("InvalidHeaderValue").detail("HeaderName", key_h))?;
         if STANDARD.encode(Sha256::digest(&bytes)) != sha.trim() {
-            return Err(ApiError::new("InvalidHeaderValue")
-                .detail("HeaderName", key_h)
-                .msg("The value for one of the HTTP headers is not in the correct format: the hash does not match the encryption key."));
+            // Azure names the hash header and sends its value back (checked in November 2026); the key is never echoed
+            return Err(ApiError::invalid_header(sha_h, sha));
         }
-    }
-    Ok(())
-}
-
-/// A write that carries a hash needs the key too (the data cannot be encrypted without it).
-pub fn require_key_with_hash(req: &Request) -> Result<(), ApiError> {
-    if hdr(req, "x-ms-encryption-key-sha256").is_some() && hdr(req, "x-ms-encryption-key").is_none() {
-        return Err(ApiError::missing_header("x-ms-encryption-key"));
     }
     Ok(())
 }
@@ -133,7 +125,7 @@ mod tests {
         assert_eq!(e.code, "InvalidHeaderValue");
         let e2 = code(with(&key, &pair(&[8u8; 32]).1, "AES256"));
         assert_eq!(e2.code, "InvalidHeaderValue");
-        assert!(e2.details.iter().any(|(k, v)| k == "HeaderName" && v == "x-ms-encryption-key"));
+        assert!(e2.details.iter().any(|(k, v)| k == "HeaderName" && v == "x-ms-encryption-key-sha256"));
         // the key is not echoed back
         assert!(!format!("{:?}", e2.details).contains(&key));
         // the source set of a copy is checked the same way

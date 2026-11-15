@@ -46,6 +46,8 @@ pub fn read(cx: &Cx, account: &str, _acct: &Account) -> Out {
         "enableMultipleWriteLocations": false,
         "continuousBackupEnabled": false,
         "enableNRegionSynchronousCommit": false,
+        "disableCrossRegionalHedging": false,
+        "enablePerPartitionFailoverBehavior": false,
         "userReplicationPolicy": {
             "asyncReplication": false,
             "minReplicaSetSize": 1,
@@ -56,16 +58,5 @@ pub fn read(cx: &Cx, account: &str, _acct: &Account) -> Out {
         "readPolicy": { "primaryReadCoefficient": 1, "secondaryReadCoefficient": 1 },
         "queryEngineConfiguration": qec.to_string()
     });
-    let mut v = v;
-    if let Some(o) = v.as_object_mut() {
-        o.insert(
-            "consistencyPolicy".into(),
-            json!({
-                "defaultConsistencyLevel": "Session",
-                "maxStalenessPrefix": 100,
-                "maxIntervalInSeconds": 5
-            }),
-        );
-    }
     Out::json(200, v).header("x-ms-max-media-storage-usage-mb", "10240").header("x-ms-media-storage-usage-mb", "0")
 }

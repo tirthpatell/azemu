@@ -28,6 +28,9 @@ pub struct Cx<'a> {
 /// First byte of a Cosmos binary JSON buffer. No UTF-8 text starts with it, so one byte tells the formats apart.
 const BINARY_JSON_PREAMBLE: u8 = 0x80;
 
+/// What Azure says to a document body that is not JSON.
+const PAYLOAD_INVALID: &str = "The request payload is invalid. Ensure to provide a valid request payload.";
+
 /// What a client that sends binary JSON is told. azemu reads and writes text JSON only (answers are always text,
 /// whatever `x-ms-cosmos-supported-serialization-formats` says; the SDKs tell the two apart by the first byte).
 const BINARY_JSON_REFUSED: &str = "The request payload is Cosmos binary JSON, which the azemu emulator does not support (Microsoft's Linux emulator has the same limit). \
@@ -93,7 +96,7 @@ impl<'a> Cx<'a> {
 
     fn parse_body_now(&self) -> R<Value> {
         if self.req.body.is_empty() {
-            return Err(CosmosError::bad_request("The request payload is invalid: the body is empty."));
+            return Err(CosmosError::bad_request("One of the specified inputs is invalid"));
         }
         if self.req.body.first() == Some(&BINARY_JSON_PREAMBLE) {
             return Err(CosmosError::bad_request(BINARY_JSON_REFUSED));
@@ -103,15 +106,21 @@ impl<'a> Cx<'a> {
             if e.to_string().starts_with("recursion limit exceeded") {
                 crate::limits::nesting_error()
             } else {
-                CosmosError::bad_request("The request payload is not valid JSON.")
+                CosmosError::bad_request(PAYLOAD_INVALID)
             }
         })
     }
 
+    /// The body as an object, for the resources that are not documents: Azure answers "One of the specified inputs is
+    /// invalid" to a body that is not JSON, not an object or empty.
     pub fn body_object(&self) -> R<serde_json::Map<String, Value>> {
-        match self.body_json()? {
-            Value::Object(m) => Ok(m),
-            _ => Err(CosmosError::bad_request("The request body must be a JSON object.")),
+        match self.body_json() {
+            Ok(Value::Object(m)) => Ok(m),
+            Ok(_) => Err(CosmosError::bad_request("One of the specified inputs is invalid")),
+            Err(e) if e.status == 400 && e.message == PAYLOAD_INVALID => {
+                Err(CosmosError::bad_request("One of the specified inputs is invalid"))
+            }
+            Err(e) => Err(e),
         }
     }
 
@@ -147,6 +156,8 @@ pub struct Out {
     pub doc_charge: Option<(bool, bool)>,
     /// A body that is not JSON (the HybridRow answer of a batch) and its content type; replaces `body`.
     pub raw: Option<(Vec<u8>, &'static str)>,
+    /// No `x-ms-request-charge` header (the list of partition key ranges has none on Azure).
+    pub no_charge: bool,
 }
 
 impl Out {
@@ -161,7 +172,13 @@ impl Out {
             content_path: None,
             doc_charge: None,
             raw: None,
+            no_charge: false,
         }
+    }
+
+    pub fn without_charge(mut self) -> Out {
+        self.no_charge = true;
+        self
     }
 
     /// An answer whose body is bytes, not JSON.
@@ -231,10 +248,12 @@ pub fn query_charge(docs: usize, out: usize) -> f64 {
     (c * 100.0).round() / 100.0
 }
 
-fn common(mut r: Resp, cx: &Cx, charge: f64) -> Resp {
+fn common(mut r: Resp, cx: &Cx, charge: Option<f64>) -> Resp {
+    if let Some(charge) = charge {
+        r = r.header("x-ms-request-charge", format!("{charge:.2}"));
+    }
     r = r
         .header("x-ms-activity-id", &cx.activity)
-        .header("x-ms-request-charge", format!("{charge:.2}"))
         .header("x-ms-schemaversion", "1.18")
         .header("x-ms-serviceversion", " version=2.14.0")
         .header("x-ms-gatewayversion", "version=2.14.0")
@@ -281,11 +300,11 @@ pub fn finish(cx: &Cx, result: R<Out>) -> Response {
                 }
             }
             let mut r = Resp::new(out.status);
-            r = common(r, cx, charge);
+            r = common(r, cx, if out.no_charge { None } else { Some(charge) });
             if let Some(l) = out.lsn {
                 r = r
                     .header("lsn", l)
-                    .header("x-ms-session-token", format!("0:1#{l}"))
+                    .header("x-ms-session-token", format!("0:-1#{l}"))
                     .header("x-ms-global-committed-lsn", l)
                     .header("x-ms-item-lsn", l);
             }
@@ -308,7 +327,7 @@ pub fn finish(cx: &Cx, result: R<Out>) -> Response {
         }
         Err(e) => {
             let mut r = Resp::new(e.status);
-            r = common(r, cx, 1.0);
+            r = common(r, cx, Some(1.0));
             if let Some(s) = e.substatus {
                 r = r.header("x-ms-substatus", s);
             }

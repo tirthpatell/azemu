@@ -148,10 +148,15 @@ describe('items', () => {
   });
   it('ids and partition keys with special characters (space, slash is refused, unicode, percent, plus, quote)', async () => {
     const { container } = await newContainer();
-    for (const id of ['with space', 'unicode-é日本', 'pct%25', 'plus+x', "quote'q", 'a,b;c=d']) {
+    for (const id of ['with space', 'unicode-é日本', '100% sure', 'plus+x', "quote'q", 'a,b;c=d']) {
       await container.items.create({ id, pk: id });
       assert.equal((await container.item(id, id).read()).resource.id, id, id);
     }
+    // an id that is a percent escape ("%25" is "%") is created, but Azure decodes it a second time before it checks the
+    // signature, so a read by id is a 401 (checked against Azure in November 2026)
+    await container.items.create({ id: 'pct%25', pk: 'p' });
+    const refused = await rejection(() => container.item('pct%25', 'p').read());
+    assert.equal(refused.code, 401);
     // the SDK validates the id itself before sending
     const e = await rejection(() => container.items.create({ id: 'a/b', pk: 'p' }));
     assert.match(e.message, /illegal|invalid/i);

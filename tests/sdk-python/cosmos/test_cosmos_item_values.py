@@ -1,6 +1,7 @@
 """What goes in comes out: JSON value fidelity."""
 
 import pytest
+from azure.cosmos.exceptions import CosmosHttpResponseError
 
 from cosmosutil import run
 
@@ -121,9 +122,22 @@ def test_many_properties(container):
 
 
 def test_id_with_spaces_and_unicode_can_be_read(container):
-    for i in ("with space", "café", "中文", "percent%20sign", "a.b-c_d"):
+    for i in ("with space", "café", "中文", "a.b-c_d"):
         container.create_item({"id": i, "pk": "x"})
         assert container.read_item(i, "x")["id"] == i
+
+
+def test_id_with_a_percent_escape_is_created_but_cannot_be_read_by_id(container):
+    # Azure decodes the escape in the request path a second time before it checks the signature (checked in November 2026)
+    container.create_item({"id": "percent%20sign", "pk": "x"})
+    with pytest.raises(CosmosHttpResponseError) as e:
+        container.read_item("percent%20sign", "x")
+    assert e.value.status_code == 401
+    assert "Server used the following payload to sign" in str(e.value)
+    # a percent sign that is not an escape is no problem
+    container.create_item({"id": "100% sure", "pk": "x"})
+    assert container.read_item("100% sure", "x")["id"] == "100% sure"
+    assert [d["id"] for d in run(container, "SELECT c.id FROM c WHERE c.id = 'percent%20sign'")] == ["percent%20sign"]
 
 
 def test_id_is_case_sensitive(container):

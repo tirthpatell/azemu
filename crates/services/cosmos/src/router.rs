@@ -61,7 +61,15 @@ pub fn dispatch(state: &mut State, cx: &Cx) -> R<Out> {
             // in `x-ms-alt-content-path` and its resource id in `x-ms-content-path`.
             let owner = owner_of(acct, d, method, rest);
             let out = db_scope(cx, acct, d, method, rest)?;
+            // making or deleting a container names the database in `x-ms-alt-content-path` and sends no `x-ms-content-path`
+            let alt_only =
+                matches!((method, rest), ("DELETE", ["colls", _])) || (method == "POST" && rest == ["colls"] && !query::is_query(cx));
             Ok(match owner {
+                Some((alt, _)) if alt_only => {
+                    let mut out = out;
+                    out.alt_path = Some(alt);
+                    out
+                }
                 Some((alt, rid)) => out.paths(alt, rid),
                 None => out,
             })
@@ -131,15 +139,33 @@ fn db_scope(cx: &Cx, acct: &mut Account, d: &str, method: &str, rest: &[&str]) -
                 users::with_permissions(acct.db(d)?, u, |s| s.list(cx))
             } else {
                 let up = cx.flag("x-ms-documentdb-is-upsert");
-                users::with_permissions(acct.db(d)?, u, |s| s.create(cx, up))
+                users::with_permissions(acct.db(d)?, u, |s| {
+                    users::check_one_per_resource(s, cx, None, up)?;
+                    s.create(cx, up)
+                })
             }
         }
         ("GET", ["users", u, "permissions", p]) => users::with_permissions(acct.db(d)?, u, |s| s.read(p)),
-        ("PUT", ["users", u, "permissions", p]) => users::with_permissions(acct.db(d)?, u, |s| s.replace(cx, p)),
+        ("PUT", ["users", u, "permissions", p]) => users::with_permissions(acct.db(d)?, u, |s| {
+            let own = s.name_of(p);
+            users::check_one_per_resource(s, cx, own.as_deref(), false)?;
+            s.replace(cx, p)
+        }),
         ("DELETE", ["users", u, "permissions", p]) => users::with_permissions(acct.db(d)?, u, |s| s.delete(p)),
 
         (_, ["colls", cname, tail @ ..]) => coll_scope(cx, acct, d, cname, method, tail),
         _ => Err(not_built(cx)),
+    }
+}
+
+/// A read of documents, which checks the session token it carries: a point read, a list, a change feed, a query.
+fn reads_documents(cx: &Cx, method: &str, rest: &[&str]) -> bool {
+    match (method, rest) {
+        ("GET", ["docs"] | ["docs", _]) => true,
+        ("POST", ["docs"]) => {
+            !cx.flag("x-ms-cosmos-is-batch-request") && !cx.flag("x-ms-cosmos-is-query-plan-request") && query::is_query(cx)
+        }
+        _ => false,
     }
 }
 
@@ -149,6 +175,9 @@ fn coll_scope(cx: &Cx, acct: &mut Account, d: &str, cname: &str, method: &str, r
     let db_name = db.meta.id.clone();
     let c = db.container(cname)?;
     let db_rid = loc.db_rid.clone();
+    if reads_documents(cx, method, rest) {
+        crate::validate::session_not_ahead(cx, c.lsn)?;
+    }
     match (method, rest) {
         ("GET", ["docs"]) => documents::list(cx, c),
         ("POST", ["docs"]) => {

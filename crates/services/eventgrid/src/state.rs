@@ -200,11 +200,23 @@ pub struct Host {
     pub published: u64,
     /// Event sources only: the resource id events carry as `topic` / `source`.
     pub resource_id: Option<String>,
+    /// Custom topics only: the access keys a classic publish is checked against (`key1`, `key2` of the ARM topic, or what the
+    /// admin API or the config file gave). Empty: the topic has no key the emulator knows and takes any.
+    pub keys: Vec<String>,
 }
 
 impl Host {
     pub fn new(name: &str, kind: TopicKind, input_schema: InputSchema) -> Host {
-        Host { name: name.to_string(), kind, input_schema, subs: BTreeMap::new(), topics: BTreeMap::new(), published: 0, resource_id: None }
+        Host {
+            name: name.to_string(),
+            kind,
+            input_schema,
+            subs: BTreeMap::new(),
+            topics: BTreeMap::new(),
+            published: 0,
+            resource_id: None,
+            keys: Vec::new(),
+        }
     }
 }
 

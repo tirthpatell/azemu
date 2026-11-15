@@ -7,7 +7,7 @@
 integration-tests:
   image: python:3.12-slim
   services:
-    - name: ghcr.io/tirthpatell/azemu:0.1.0
+    - name: ghcr.io/tirthpatell/azemu:0.2.0
       alias: azemu
   variables:
     AZEMU_TLS_NAME: azemu       # a certificate for https://azemu:...

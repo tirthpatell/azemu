@@ -55,6 +55,16 @@ pub fn json_response(status: u16, v: &Value) -> Response {
     Resp::new(status).json(v).build()
 }
 
+/// What the service says when a property of a body is missing or has a value it cannot take (`name` is empty for most
+/// of them): the text of the real service, tried in November 2026.
+pub fn invalid_property_text(name: &str) -> String {
+    format!("Property {name} has invalid value\r\n")
+}
+
+pub fn invalid_property(name: &str) -> Response {
+    bad_parameter(&invalid_property_text(name))
+}
+
 /// The request body as a JSON object. An empty body is an empty object.
 pub fn body_object(req: &Request) -> Result<Map<String, Value>, Response> {
     if req.body.iter().all(|b| b.is_ascii_whitespace()) {
@@ -62,9 +72,16 @@ pub fn body_object(req: &Request) -> Result<Map<String, Value>, Response> {
     }
     match serde_json::from_slice::<Value>(&req.body) {
         Ok(Value::Object(m)) => Ok(m),
-        Ok(_) => Err(bad_parameter("The request body must be a JSON object.")),
-        Err(_) => Err(bad_parameter("The request body is not valid JSON.")),
+        Ok(_) | Err(_) => Err(invalid_property("")),
     }
+}
+
+/// Like [`body_object`] for a request that cannot do without a body (set a secret, restore a backup).
+pub fn required_body_object(req: &Request) -> Result<Map<String, Value>, Response> {
+    if req.body.iter().all(|b| b.is_ascii_whitespace()) {
+        return Err(bad_parameter("Request body not specified"));
+    }
+    body_object(req)
 }
 
 /// Attributes of one version of a secret, key or certificate.
@@ -142,7 +159,7 @@ pub fn parse_attr_patch(body: &Map<String, Value>) -> Result<AttrPatch, Response
     let m = match a {
         Value::Null => return Ok(AttrPatch::default()),
         Value::Object(m) => m,
-        _ => return Err(bad_parameter("The 'attributes' field must be an object.")),
+        _ => return Err(invalid_property("attributes")),
     };
     let enabled = match m.get("enabled") {
         None | Some(Value::Null) => None,
@@ -193,12 +210,6 @@ pub fn opt_str_field<'a>(body: &'a Map<String, Value>, name: &str) -> Result<Opt
         Some(Value::Null) | None => Ok(None),
         Some(_) => Err(bad_parameter(&format!("The parameter '{name}' must be a string."))),
     }
-}
-
-/// Base64url field, decoded.
-pub fn b64_field(body: &Map<String, Value>, name: &str) -> Result<Vec<u8>, Response> {
-    let s = str_field(body, name)?;
-    b64u_decode(s).ok_or_else(|| bad_parameter(&format!("The parameter '{name}' is not valid base64url.")))
 }
 
 pub fn now_secs(req: &Request) -> i64 {

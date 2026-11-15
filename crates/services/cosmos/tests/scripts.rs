@@ -272,7 +272,8 @@ async fn array_parameter_sample_and_script_logging() {
     let r = h.exec_with("d", "c", "log", "p", json!([["a", "b", {"x": 1}]]), &[("x-ms-documentdb-script-enable-logging", "true")]).await;
     assert_eq!(r.status, 200, "{}", r.text());
     let log = r.header("x-ms-documentdb-script-log-results").unwrap_or_default();
-    assert_eq!(log, "a%0Ab%0A%7B%22x%22%3A1%7D", "console output is percent-encoded, one line per call");
+    // Azure (checked in November 2026): console.log writes its first argument as text and the calls run together
+    assert_eq!(log, "ab%5Bobject%20Object%5D", "console output is percent-encoded, the calls have nothing between them");
     // not asked for: no header
     let r = h.exec("d", "c", "log", "p", json!([["a"]])).await;
     assert!(r.header("x-ms-documentdb-script-log-results").is_none());
@@ -538,13 +539,14 @@ async fn user_defined_function_sample_in_select_where_and_order_by() {
         .await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["Documents"].as_array().unwrap().len(), 3);
+    // a function is not called when an argument is undefined: no row, no error (Azure, checked in November 2026)
     let r = h.query("d", "c", &hdr, json!({"query": "SELECT VALUE udf.Tax(t.missing) FROM t"})).await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("Exception = no input"), "{}", r.text());
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["Documents"], json!([]));
     // an unknown function is a 400 before anything runs
     let r = h.query("d", "c", &hdr, json!({"query": "SELECT VALUE udf.Nope(t.income) FROM t"})).await;
     assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("udf.Nope"), "{}", r.text());
+    assert!(r.text().contains("Nope"), "{}", r.text());
     // the query plan request accepts it
     let r = h
         .req(
@@ -559,6 +561,12 @@ async fn user_defined_function_sample_in_select_where_and_order_by() {
         )
         .await;
     assert_eq!(r.status, 200, "{}", r.text());
+}
+
+/// A chain or a query call that ends with no callback appends its result, as JSON text, to the response body, so the body is a
+/// JSON string holding the result (Azure, checked in November 2026).
+fn appended(r: &TestResponse) -> Value {
+    serde_json::from_str(r.json().as_str().unwrap_or_else(|| panic!("the body is not a string: {}", r.text()))).unwrap()
 }
 
 async fn run_body(h: &H, body: &str) -> TestResponse {
@@ -581,14 +589,14 @@ async fn javascript_query_api_filter_map_chain_sort_pluck_flatten_unwind() {
         let k = d["pk"].clone();
         assert_eq!(h.doc("d", "c", &k, d).await.status, 201);
     }
-    // no callback: the result is written to the response body
+    // no callback: the result is appended, as JSON text, to the response body
     let r = run_body(&h, "function () { __.filter(function (d) { return d.n >= 2; }); }").await;
     assert_eq!(r.status, 200, "{}", r.text());
-    let mut ids: Vec<String> = r.json().as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect();
+    let mut ids: Vec<String> = appended(&r).as_array().unwrap().iter().map(|d| d["id"].as_str().unwrap().to_string()).collect();
     ids.sort();
     assert_eq!(ids, ["a", "c"], "only the partition of the request is seen");
     let r = run_body(&h, "function () { __.map(function (d) { return {id: d.id, msg: d.message}; }); }").await;
-    assert_eq!(r.json().as_array().unwrap().len(), 3);
+    assert_eq!(appended(&r).as_array().unwrap().len(), 3);
     // the cheat sheet of the Learn page: chain, filter, sortBy, pluck, flatten, value
     let r = run_body(
         &h,
@@ -602,17 +610,31 @@ async fn javascript_query_api_filter_map_chain_sort_pluck_flatten_unwind() {
     }"#,
     )
     .await;
-    assert_eq!(r.json(), json!(["z", "x", "y"]), "{}", r.text());
+    // Azure's `flatten()` with no argument leaves the arrays nested; `flatten(true)` flattens one level
+    assert_eq!(appended(&r), json!([["z"], ["x", "y"]]), "{}", r.text());
+    let r = run_body(
+        &h,
+        r#"function () {
+        __.chain()
+          .filter(function (doc) { return doc.Tags && Array.isArray(doc.Tags); })
+          .sortBy(function (doc) { return doc.n; })
+          .pluck("Tags")
+          .flatten(true)
+          .value();
+    }"#,
+    )
+    .await;
+    assert_eq!(appended(&r), json!(["z", "x", "y"]), "{}", r.text());
     let r = run_body(
         &h,
         "function () { __.chain().sortByDescending(function (d) { return d.n; }).map(function (d) { return d.id; }).value(); }",
     )
     .await;
-    assert_eq!(r.json(), json!(["a", "c", "b"]));
+    assert_eq!(appended(&r), json!(["a", "c", "b"]));
     let r = run_body(&h, "function () { __.chain().filter(function (d) { return d.pets; }).unwind(function (d) { return d.pets; }, function (d, pet) { return d.id + ':' + pet.name; }).value(); }").await;
-    assert_eq!(r.json(), json!(["a:rex", "a:tom"]));
+    assert_eq!(appended(&r), json!(["a:rex", "a:tom"]));
     let r = run_body(&h, "function () { __.chain().filter(function (d) { return d.pets && d.pets.length; }).unwind(function (d) { return d.pets; }).map(function (t) { return t[0].id + t[1].name; }).value(); }").await;
-    assert_eq!(r.json(), json!(["arex", "atom"]), "unwind makes [document, item] tuples: {}", r.text());
+    assert_eq!(appended(&r), json!(["arex", "atom"]), "unwind makes [document, item] tuples: {}", r.text());
     let r = run_body(&h, "function () { __.chain().pluck('Tags').flatten(true).value(function (e, feed, o) { getContext().getResponse().setBody({n: feed.length, more: o.continuation}); }); }").await;
     assert_eq!(
         r.json(),

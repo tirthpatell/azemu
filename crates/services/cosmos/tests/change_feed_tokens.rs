@@ -51,28 +51,40 @@ async fn a_change_feed_page_stops_at_four_megabytes_whatever_the_item_count() {
     assert!(pages >= 2);
 }
 
+// Azure, checked in November 2026: a date it cannot read is ignored (the feed starts at the beginning), a position that is
+// ahead of the container is a 304 that gives the position back, and a position that is not a number is a 400.
 #[tokio::test]
-async fn bad_dates_and_positions_are_errors_not_a_silent_restart() {
+async fn a_bad_date_is_ignored_a_position_ahead_is_a_304_and_a_position_that_is_no_number_is_a_400() {
     let h = setup().await;
     h.doc("d", "c", &json!("p"), &json!({"id": "a", "pk": "p"})).await;
-    // a date that cannot be read
     let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-Modified-Since", "yesterday-ish")], "").await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("If-Modified-Since"));
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.json()["Documents"].as_array().unwrap().len(), 1);
     let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-Modified-Since", "Thu, 01 Jan 1970 00:00:00 GMT")], "").await;
     assert_eq!(r.status, 200);
-    // a position the container has not reached: another container's token, or one from before a restart
+    // a position the container has not reached
     let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-None-Match", "\"9999\"")], "").await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("ahead of this container"), "{}", r.text());
+    assert_eq!(r.status, 304, "{}", r.text());
+    assert_eq!(r.header("etag"), Some("\"9999\""));
+    assert_eq!(r.header("x-ms-item-count"), Some("0"));
+    assert!(r.text().is_empty());
+    // zero and a negative number start at the beginning
+    for from in ["\"0\"", "\"-1\"", "\"\""] {
+        let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-None-Match", from)], "").await;
+        assert_eq!(r.status, 200, "{from}");
+    }
+    // the all versions and deletes mode still refuses a position ahead of its history (not checked against Azure: the test account lacks the mode)
     let mut full = FULL.to_vec();
     full.push(("If-None-Match", "\"9999\""));
     h.req("GET", "dbs/d/colls/c/docs", &[FULL[0], FULL[1], ("If-None-Match", "*")], "").await; // starts the history
     let r = h.req("GET", "dbs/d/colls/c/docs", &full, "").await;
     assert_eq!(r.status, 400, "{}", r.text());
     // not a number
-    let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-None-Match", "\"abc\"")], "").await;
-    assert_eq!(r.status, 400);
+    for bad in ["\"abc\"", "abc", "\"1.5\"", "\"99999999999999999999\""] {
+        let r = h.req("GET", "dbs/d/colls/c/docs", &[INCREMENTAL, ("If-None-Match", bad)], "").await;
+        assert_eq!(r.status, 400, "{bad}");
+        assert!(r.text().contains("Change feed token format is invalid"), "{}", r.text());
+    }
 }
 
 #[tokio::test]
@@ -129,8 +141,9 @@ async fn a_token_of_a_deleted_container_does_not_read_the_old_rows_of_a_new_one(
             json!({"query": "SELECT VALUE c.id FROM c"}),
         )
         .await;
-    assert_eq!(r.status, 200);
-    assert_eq!(r.json()["Documents"], json!(["new2", "new3"]), "the kept rows of the deleted container must not be served");
+    // Azure answers 400 to the token of a deleted container (checked in November 2026)
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(r.text().contains("continuation token specified in the request is malformed"), "{}", r.text());
 }
 
 #[tokio::test]

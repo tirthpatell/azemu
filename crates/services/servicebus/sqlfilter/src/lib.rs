@@ -12,10 +12,12 @@
 //!   (`AND` and `OR` short-circuit, so `FALSE AND <error>` is `FALSE`).
 //!   A filter matches only when it evaluates to `TRUE`.
 //! * **Types.** Follow C# promotion: `Long` with `Double` compares and
-//!   computes as `Double`; strings compare ordinally; booleans support only
-//!   `=` and `<>`; incompatible types (string vs number, ...) make a
-//!   comparison unknown, so both `=` and `<>` are false. A non-boolean
-//!   operand of `AND`/`OR`/`NOT` is unknown. Integer arithmetic wraps;
+//!   computes as `Double`; `=` and `<>` take two values of one type (strings
+//!   compare ordinally); `<`, `<=`, `>` and `>=` take numbers and times, not
+//!   strings and not booleans. Anything else (a string against a number, ...) is
+//!   an evaluation error, as on Azure (checked in November 2026):
+//!   `Operator '>' cannot be applied to operands of type 'string' and 'long'`.
+//!   A non-boolean operand of `AND`/`OR`/`NOT` is unknown. Integer arithmetic wraps;
 //!   integer `/` or `%` by zero is an evaluation error; `+` concatenates
 //!   when either side is a string. `Timestamp - Timestamp` yields a `Long`
 //!   (milliseconds) and `Timestamp +/- Long` adds milliseconds, standing in
@@ -25,11 +27,13 @@
 //!   evaluation error otherwise (the docs: a nonexistent system property is
 //!   an error). `IS [NOT] NULL` and `EXISTS` never fail.
 //! * **Errors.** A filter that fails to evaluate does not match; an action
-//!   that fails changes nothing (see [`Action::try_apply`]).
-//! * **Top-level filter.** Must be boolean-shaped: a bare number, string,
-//!   `NULL` or arithmetic expression is rejected at parse time; a bare
-//!   property, parameter or `TRUE`/`FALSE` is allowed and matches only when
-//!   it is the boolean `TRUE`. `1=1` is the usual always-true filter.
+//!   that fails changes nothing (see [`Action::try_apply`]). The caller decides
+//!   what that means: Service Bus dead-letters the message (`FilterException`,
+//!   `RuleActionException`).
+//! * **Top-level filter.** Must be a predicate: a bare number, string,
+//!   `NULL`, arithmetic expression, property, parameter or `TRUE`/`FALSE` is
+//!   rejected at parse time (Azure refuses them). `1=1` is the usual
+//!   always-true filter. `==` is not an operator.
 //! * **Names.** Property names are case-insensitive in Service Bus; this
 //!   crate passes the name as written and the [`Properties`] implementor
 //!   does the lookup. Function names and keywords are case-insensitive.
@@ -41,9 +45,9 @@
 //!   character is an evaluation error. `IN` treats unknown list items as
 //!   not matching.
 //! * **Actions.** Statements are `SET prop = expr` and `REMOVE prop`,
-//!   separated by `;` (optional between statements), and `SET a = 1, b = 2`
-//!   / `REMOVE a, b` / `SET a = 1, SET b = 2` lists are accepted. Later
-//!   statements see earlier ones. `REMOVE sys.x` is a parse error. Setting
+//!   separated by `;` (optional between statements); a comma between
+//!   statements is refused, as on Azure. Later statements see earlier ones.
+//!   `REMOVE sys.x` is taken and changes nothing. Setting
 //!   an unknown value stores `Value::Null`. `SET` converts a string to a
 //!   timestamp (ISO 8601) when the existing property is a timestamp, and an
 //!   integer to a double when the existing property is a double.
@@ -66,6 +70,7 @@ mod time;
 mod value;
 
 pub use error::{EvalError, ParseError};
+pub use eval::KNOWN_SYS;
 pub use value::{MapProperties, Params, Properties, PropertiesMut, Scope, Value};
 
 /// Maximum length of a filter or action string (Service Bus quota: 1,024).
@@ -103,6 +108,13 @@ impl Filter {
     pub fn sql(&self) -> &str {
         &self.sql
     }
+
+    /// The parameters (names without `@`) the filter uses, and the names of the system properties it reads, in order of appearance.
+    pub fn uses(&self) -> (Vec<String>, Vec<String>) {
+        let (mut params, mut props) = (Vec::new(), Vec::new());
+        self.expr.collect(&mut params, &mut props);
+        (params, props.into_iter().filter(|p| p.scope == Scope::Sys).map(|p| p.name).collect())
+    }
 }
 
 /// A parsed SQL rule action.
@@ -132,5 +144,24 @@ impl Action {
 
     pub fn sql(&self) -> &str {
         &self.sql
+    }
+
+    /// The parameters (names without `@`) the action uses, and the names of the system properties it reads or sets (the second list holds
+    /// the ones it sets).
+    pub fn uses(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let (mut params, mut props) = (Vec::new(), Vec::new());
+        let mut set = Vec::new();
+        for st in &self.stmts {
+            match st {
+                ast::Stmt::Set { target, expr } => {
+                    if target.scope == Scope::Sys {
+                        set.push(target.name.clone());
+                    }
+                    expr.collect(&mut params, &mut props);
+                }
+                ast::Stmt::Remove(_) => {}
+            }
+        }
+        (params, props.into_iter().filter(|p| p.scope == Scope::Sys).map(|p| p.name).collect(), set)
     }
 }

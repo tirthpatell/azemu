@@ -400,6 +400,12 @@ impl Conn {
         self.peer_max_frame = open.max_frame_size.max(MIN_MAX_FRAME_SIZE);
         self.peer_idle = open.idle_timeout.filter(|t| *t > 0).map(|t| Duration::from_millis(t as u64).max(MIN_PEER_IDLE));
         self.handler.on_open(&open)?;
+        if let Some(o) = self.handler.open_settings() {
+            let mut cfg = (*self.cfg).clone();
+            cfg.max_frame_size = o.max_frame_size;
+            cfg.idle_timeout = o.idle_timeout;
+            self.cfg = Arc::new(cfg);
+        }
         let reply = Open {
             container_id: self.cfg.container_id.clone(),
             hostname: None,

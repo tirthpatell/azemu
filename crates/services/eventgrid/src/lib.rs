@@ -13,6 +13,7 @@ mod admin_subs;
 mod auth;
 mod config;
 mod destination;
+mod eg_schema;
 mod errors;
 mod events;
 mod filter;

@@ -190,21 +190,57 @@ fn shared_key_known_answers_host_and_path_style() {
     check_sk(SK, SK_AUTH);
 }
 
+const NOW_DATE: (&str, &str) = ("x-ms-date", "Fri, 27 Mar 2026 01:00:51 GMT");
+
 #[test]
-fn shared_key_placeholders_and_wrong_account_are_not_checked() {
+fn shared_key_form_is_checked_for_every_account_and_the_mac_only_for_the_dev_account() {
     let accounts = StorageAccounts::new();
-    let r = req("GET", "/c", "", &[("authorization", "SharedKey devstoreaccount1:replay")], false);
-    assert_eq!(verify_shared_key(&r, StorageService::Blob, &accounts), Check::Skipped(Skip::Placeholder));
-    let r = req("GET", "/c", "", &[("authorization", "SharedKey devstoreaccount1:Sanitized")], false);
-    assert_eq!(verify_shared_key(&r, StorageService::Blob, &accounts), Check::Skipped(Skip::Placeholder));
-    // 32 bytes of base64 that do not match
+    let with = |account: &str, sig: &str| {
+        let mut r = req("GET", "/c", "", &[("authorization", &format!("SharedKey {account}:{sig}")), NOW_DATE], false);
+        r.account = account.into();
+        r
+    };
+    // not base64 (a placeholder as recorded traffic carries it), empty, no account: 400 whatever the account
+    for account in ["devstoreaccount1", "other"] {
+        for sig in ["replay", "Sanitized", "", "!!not-base64!!", "abc", "this is not a valid signature", &B64.encode([7u8; 32])[..43]] {
+            assert_eq!(verify_shared_key(&with(account, sig), StorageService::Blob, &accounts), Check::BadFormat, "{account} {sig}");
+        }
+    }
+    assert_eq!(verify_shared_key(&with("", "AAAA"), StorageService::Blob, &accounts), Check::BadFormat);
+    let no_colon = req("GET", "/c", "", &[("authorization", "SharedKey devstoreaccount1"), NOW_DATE], false);
+    assert_eq!(verify_shared_key(&no_colon, StorageService::Blob, &accounts), Check::BadFormat);
+    // base64 of 32 bytes that do not match, or of another size: the MAC detail, only for the dev account
+    for bad in [B64.encode([7u8; 32]), B64.encode([7u8; 16]), B64.encode([7u8; 64])] {
+        let c = verify_shared_key(&with("devstoreaccount1", &bad), StorageService::Blob, &accounts);
+        assert!(matches!(&c, Check::Invalid(d) if d.contains("is not the same as any computed signature")), "{c:?}");
+        assert_eq!(verify_shared_key(&with("other", &bad), StorageService::Blob, &accounts), Check::Skipped(Skip::UnknownAccount));
+    }
+}
+
+#[test]
+fn shared_key_date_is_checked_for_every_account() {
+    let accounts = StorageAccounts::new();
     let bad = B64.encode([7u8; 32]);
-    let r = req("GET", "/c", "", &[("authorization", &format!("SharedKey devstoreaccount1:{bad}"))], false);
-    assert!(matches!(verify_shared_key(&r, StorageService::Blob, &accounts), Check::Invalid(_)));
-    // another account: key is invented by azemu, anything goes
-    let mut r = req("GET", "/c", "", &[("authorization", &format!("SharedKey other:{bad}"))], false);
-    r.account = "other".into();
-    assert_eq!(verify_shared_key(&r, StorageService::Blob, &accounts), Check::Skipped(Skip::UnknownAccount));
+    let at = |date: &[(&str, &str)], account: &str| {
+        let mut h = vec![("authorization", format!("SharedKey {account}:{bad}"))];
+        h.extend(date.iter().map(|(k, v)| (*k, v.to_string())));
+        let h: Vec<(&str, &str)> = h.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        let mut r = req("GET", "/c", "", &h, false);
+        r.account = account.into();
+        r.ctx.time = OffsetDateTime::from_unix_timestamp(1_795_000_000).unwrap(); // 2026-11-18
+        r
+    };
+    let old = at(&[("x-ms-date", "Fri, 27 Mar 2026 01:00:51 GMT")], "other");
+    assert_eq!(
+        verify_shared_key(&old, StorageService::Blob, &accounts),
+        Check::Invalid("Request date header too old: 'Fri, 27 Mar 2026 01:00:51 GMT'".into())
+    );
+    assert_eq!(
+        verify_shared_key_table(&old, &accounts),
+        Check::Invalid("Request date header too old: 'Fri, 27 Mar 2026 01:00:51 GMT'".into())
+    );
+    let none = at(&[], "devstoreaccount1");
+    assert_eq!(verify_shared_key(&none, StorageService::Queue, &accounts), Check::Invalid("Request date header not specified".into()));
 }
 
 struct Sas {
@@ -367,18 +403,18 @@ fn sas_for_another_container_is_rejected() {
 fn newer_version_than_any_known_is_checked_with_the_newest_layout_and_refused() {
     let accounts = StorageAccounts::new();
     let sig = B64.encode([9u8; 32]);
-    let q = format!("sv=2031-01-01&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&sig, NON_ALPHANUMERIC));
+    let q = format!("sv=2027-06-06&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&sig, NON_ALPHANUMERIC));
     let r = req("GET", "/c/b", &q, &[], false);
     let t = SasTarget::Blob { container: "c", blob: Some("b") };
     match verify_sas(&r, StorageService::Blob, &accounts, &t) {
-        Check::Invalid(d) => assert!(d.contains("sv=2031-01-01") && d.contains("AZEMU_LOOSE_AUTH"), "{d}"),
+        Check::Invalid(d) => assert!(d.contains("sv=2027-06-06") && d.contains("AZEMU_LOOSE_AUTH"), "{d}"),
         other => panic!("a wrong signature with a too new sv must be refused, got {other:?}"),
     }
     // the same SAS with a correct signature for the newest layout is accepted, whatever the sv
     let key = B64.decode(accounts.key(ACCT, 1)).unwrap();
-    let sts = format!("r\n\n2030-01-01T00:00:00Z\n/blob/{ACCT}/c/b\n\n\n\n2031-01-01\nb\n\n\n\n\n\n\n");
+    let sts = format!("r\n\n2030-01-01T00:00:00Z\n/blob/{ACCT}/c/b\n\n\n\n2027-06-06\nb\n\n\n\n\n\n\n");
     let good = B64.encode(hmac_sha256(&key, sts.as_bytes()));
-    let q = format!("sv=2031-01-01&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&good, NON_ALPHANUMERIC));
+    let q = format!("sv=2027-06-06&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&good, NON_ALPHANUMERIC));
     let r = req("GET", "/c/b", &q, &[], false);
     assert_eq!(verify_sas(&r, StorageService::Blob, &accounts, &t), Check::Valid);
     // the Go SDK's version is known: a wrong signature is refused without the too-new note
@@ -388,10 +424,37 @@ fn newer_version_than_any_known_is_checked_with_the_newest_layout_and_refused() 
         Check::Invalid(d) => assert!(!d.contains("AZEMU_LOOSE_AUTH"), "{d}"),
         other => panic!("{other:?}"),
     }
-    // an unknown account is never checked, nor is a placeholder
-    let q = "sv=2023-11-03&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig=Sanitized";
-    let r = req("GET", "/c/b", q, &[], false);
-    assert_eq!(verify_sas(&r, StorageService::Blob, &accounts, &t), Check::Skipped(Skip::Placeholder));
+    // the form of the signature and of `sv` is checked for every account; the MAC only for the dev account
+    for (sig, detail) in [
+        ("Sanitized", "Signature fields not well formed."),
+        ("", "sig is mandatory. Cannot be empty"),
+        ("Zm9v", "Signature size is invalid"),
+    ] {
+        let q = format!("sv=2023-11-03&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={sig}");
+        let mut r = req("GET", "/c/b", &q, &[], false);
+        assert_eq!(verify_sas(&r, StorageService::Blob, &accounts, &t), Check::Invalid(detail.into()), "{sig}");
+        r.account = "other".into();
+        assert_eq!(verify_sas(&r, StorageService::Blob, &accounts, &t), Check::Invalid(detail.into()), "{sig} other");
+    }
+    for sv in ["2099-01-01", "1999-01-01", "banana", "2012-02-11"] {
+        let q = format!("sv={sv}&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&sig, NON_ALPHANUMERIC));
+        let r = req("GET", "/c/b", &q, &[], false);
+        assert_eq!(
+            verify_sas(&r, StorageService::Blob, &accounts, &t),
+            Check::Invalid("SAS field 'sv' is not well formed.".into()),
+            "{sv}"
+        );
+        let r = req("GET", "/q/messages", &q, &[], false);
+        let c = verify_sas(&r, StorageService::Queue, &accounts, &SasTarget::Queue { queue: Some("q") });
+        assert_eq!(
+            c,
+            Check::Invalid("sv is either not in the correct format or is not equal or later than version 2012-02-12".into()),
+            "{sv}"
+        );
+    }
+    let q = format!("sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&sig, NON_ALPHANUMERIC));
+    let r = req("GET", "/c/b", &q, &[], false);
+    assert_eq!(verify_sas(&r, StorageService::Blob, &accounts, &t), Check::Invalid("sv is mandatory. Cannot be empty".into()));
     let q = format!("sv=2023-11-03&sr=b&sp=r&se=2030-01-01T00:00:00Z&sig={}", utf8_percent_encode(&sig, NON_ALPHANUMERIC));
     let mut r = req("GET", "/c/b", &q, &[], false);
     r.account = "other".into();

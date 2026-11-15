@@ -46,7 +46,9 @@ pub fn etag_of(ms: i64) -> String {
 
 /// .NET `TimeSpan.ToString()`: `25.00:00:00`, `00:05:00`.
 pub fn timespan_text(ms: i64) -> String {
-    let ms = ms.max(0);
+    if ms < 0 {
+        return format!("-{}", timespan_text(ms.saturating_neg()));
+    }
     let days = ms / 86_400_000;
     let rem = ms % 86_400_000;
     let (h, m, s, f) = (rem / 3_600_000, (rem % 3_600_000) / 60_000, (rem % 60_000) / 1000, rem % 1000);

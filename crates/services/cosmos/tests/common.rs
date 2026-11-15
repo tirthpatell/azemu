@@ -81,6 +81,10 @@ impl H {
     }
 
     pub async fn query(&self, db: &str, coll: &str, extra: &[(&str, &str)], q: Value) -> TestResponse {
+        self.query_in(db, coll, extra, q).await
+    }
+
+    pub async fn query_in(&self, db: &str, coll: &str, extra: &[(&str, &str)], q: Value) -> TestResponse {
         let mut h = vec![("content-type", "application/query+json"), ("x-ms-documentdb-isquery", "True")];
         h.extend_from_slice(extra);
         self.req("POST", &format!("dbs/{db}/colls/{coll}/docs"), &h, &q.to_string()).await

@@ -241,11 +241,12 @@ async fn purge_deleted_secret_removes_it_for_good() {
 }
 
 #[tokio::test]
-async fn purge_of_a_secret_that_is_not_deleted_is_404() {
+async fn purge_of_a_secret_that_is_not_deleted_is_400() {
+    // tried against Azure in November 2026: 400 MethodNotAllowed, "Secret must be deleted prior to being purged."
     let c = secrets(&vault());
     set(&c, "live", "x").await;
     let e = c.purge_deleted_secret("live", None).await.unwrap_err();
-    assert_eq!(status(&e), Some(StatusCode::NotFound));
+    assert_eq!(status(&e), Some(StatusCode::BadRequest));
 }
 
 #[tokio::test]

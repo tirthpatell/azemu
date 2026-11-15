@@ -44,7 +44,13 @@ namespace `default`).
 
 Every SASL mechanism and every credential is accepted. `$cbs` accepts `put-token` (SAS and JWT) with
 `status-code` 202 `Accepted`; any other `$cbs` operation answers 501. The emulator does not check tokens,
-rights or expiry. HTTP: any `Authorization` header is accepted; none gets 401.
+rights or expiry. It does check the entity the token is for (the `name` of the request, an address such as
+`sb://host/queue`, `.../queue/$DeadLetterQueue` or `.../topic/Subscriptions/sub`): a queue or topic that does not exist, or a
+subscription whose topic does not exist, is answered `status-code` 404 with `error-condition` `amqp:not-found` and the text of the not-found error, and the client never
+gets as far as attaching a link. This is what a Standard namespace does (checked in November 2026); the Python SDK shows
+it as `ServiceBusAuthenticationError` ("amqp:client-error") on send, peek and schedule and on receive, and the Java SDK as an entity-not-found error. A subscription that
+is missing under a topic that exists gets its token, and the attach is refused with `amqp:not-found`
+(`MessagingEntityNotFoundError`). With auto-creation on, every token is accepted (the attach makes the entity). HTTP: any `Authorization` header is accepted; none gets 401.
 
 ## Entities
 
@@ -54,7 +60,8 @@ administration clients), through a config file, or, only when you ask for it, by
 - **Defaults as on Azure.** Nothing comes into being by being named. A sender, a receiver or a management call
   on a queue, topic or subscription nobody created fails with `amqp:not-found` and the message real Service Bus uses
   ("The messaging entity 'sb://...' could not be found. To know more visit https://aka.ms/sbResourceMgrExceptions.
-  TrackingId:..."); the Python, JavaScript, .NET, Java and Go clients show it as their "entity not found" error.
+  TrackingId:..."), on the `$cbs` token for a queue or topic and on the attach for a subscription (see "Auth"); what each SDK
+  shows differs (the Python SDK says authentication error for a queue or topic, entity not found for a subscription).
   Create entities first, as a team does against Azure: with the administration client of the SDK
   (`ServiceBusAdministrationClient.create_queue(name)` and the same in the other languages), with the config file
   below, or with ARM (Terraform `azurerm_servicebus_queue`).
@@ -92,16 +99,16 @@ administration clients), through a config file, or, only when you ask for it, by
 | Area | Behaviour |
 |---|---|
 | Send | single message and the batch format `0x80013700`; every section is preserved; a batch is validated as a whole before anything is stored |
-| Properties | message-id (a message sent without one gets a GUID, 32 hex digits, when it is stored; the JavaScript SDK cannot settle a message that has none), group-id (session), correlation-id, to, reply-to, reply-to-group-id, subject, content-type, ttl, application properties, annotations (`x-opt-partition-key`, ...). Set on delivery: `x-opt-enqueued-time`, `x-opt-sequence-number`, `x-opt-locked-until`, `x-opt-enqueue-sequence-number` (forwarded), `x-opt-deadletter-source`, header delivery-count (0 on first delivery), creation-time, absolute-expiry-time; the delivery tag is the lock token (GUID bytes) |
+| Properties | application property names are not case sensitive (`Key` and `key` are one property: the first spelling, the last value); message-id (a message sent without one gets a GUID, 32 hex digits, when it is stored; the JavaScript SDK cannot settle a message that has none), group-id (session), correlation-id, to, reply-to, reply-to-group-id, subject, content-type, ttl, application properties, annotations (`x-opt-partition-key`, ...). Set on delivery: `x-opt-enqueued-time`, `x-opt-sequence-number`, `x-opt-locked-until`, `x-opt-enqueue-sequence-number` (forwarded), `x-opt-deadletter-source`, header delivery-count (0 on first delivery), creation-time, absolute-expiry-time; the delivery tag is the lock token (GUID bytes) |
 | Receive modes | peek-lock (rcv-settle-mode second: unsettled disposition from the client is answered by a settled disposition that echoes the applied outcome: accepted, modified, rejected-without-error for a dead-letter; a failure is `rejected` with `com.microsoft:message-lock-lost` / `session-lock-lost`) and receive-and-delete (pre-settled) |
-| Settlement | complete = accepted; abandon = `modified` without `undeliverable-here` (the delivery count goes up whatever `delivery-failed` says: Python sends it as true, the JavaScript and Go SDKs leave it out or send false); defer = `modified{undeliverable-here}`; dead-letter = `rejected` with `com.microsoft:dead-letter`, reason/description from `info`; released = unlock without counting. The `message_annotations` of abandon and defer, and every `info` entry of a dead-letter other than the reason and the description, are written to the application properties of the message (`propertiesToModify` of the SDKs). By lock token over `$management` `update-disposition` (`completed`, `abandoned`, `defered`, `suspended`) |
+| Settlement | complete = accepted; abandon = `modified` without `undeliverable-here` (the delivery count goes up whatever `delivery-failed` says: Python sends it as true, the JavaScript and Go SDKs leave it out or send false); defer = `modified{undeliverable-here}` (the message counts as delivered once more, a peek shows it at once); dead-letter = `rejected` with `com.microsoft:dead-letter`, reason/description from `info`; released = unlock without counting. The `message_annotations` of abandon and defer, and every `info` entry of a dead-letter other than the reason and the description, are written to the application properties of the message (`propertiesToModify` of the SDKs). By lock token over `$management` `update-disposition` (`completed`, `abandoned`, `defered`, `suspended`) |
 | Locks | `LockDuration`, expiry returns the message with delivery count + 1; at `MaxDeliveryCount` it goes to the DLQ with `MaxDeliveryCountExceeded`; `renew-lock` |
-| TTL | entity default is a ceiling for the message TTL; expiry is lazy (applied by a 100 ms background tick and by every operation), dead-lettered with `TTLExpiredException` when `DeadLetteringOnMessageExpiration`; a locked message does not expire |
-| DLQ | `q/$DeadLetterQueue`, `t/Subscriptions/s/$DeadLetterQueue`; `$Transfer/$DeadLetterQueue` addresses are accepted (always empty) |
+| TTL | a message with a time to live of zero is refused (`com.microsoft:argument-out-of-range`); entity default is a ceiling for the message TTL; expiry is lazy (applied by a 100 ms background tick and by every operation), dead-lettered with `TTLExpiredException` when `DeadLetteringOnMessageExpiration`; a locked message does not expire |
+| DLQ | `q/$DeadLetterQueue`, `t/Subscriptions/s/$DeadLetterQueue`; `$Transfer/$DeadLetterQueue` addresses are accepted (always empty). A dead letter without a reason has no `DeadLetterReason` and no description. Abandoning a message in the dead-letter queue does not change its delivery count. A subscription's dead letter that is forwarded names its source `topic/Subscriptions/sub` |
 | Sessions | session queues/subscriptions, specific session or next available (waits up to `com.microsoft:timeout`, default 65 s, then detaches with `com.microsoft:timeout`), a wait for the next available session ends when its link, session or connection ends (it never locks a session for a receiver that is gone, and the receiver is bound to the session it got), session lock with renewal, state get/set, session listing, ordering by sequence number (an abandoned message keeps its place), `session-cannot-be-locked` for a held session; closing a session receiver releases the session and its locked messages without counting a delivery; a settlement, `update-disposition`, `get-session-state`, `set-session-state` or `renew-session-lock` after the session lock ran out fails with `com.microsoft:session-lock-lost` (not `message-lock-lost`); session state is limited to 256 KB; scheduled messages of a topic count against the topic's `MaxSizeInMegabytes` |
-| Topics | copy to each subscription; rules: SQL filters (`azemu-servicebus-sql`), correlation, true, false; actions `SET`/`REMOVE`; a rule without action ORs into one copy, each matching rule with an action gives its own copy |
-| Forwarding | `ForwardTo`, `ForwardDeadLettered MessagesTo` for queues and subscriptions, chains up to 4 hops (more is `amqp:resource-limit-exceeded`) |
-| Scheduling | `x-opt-scheduled-enqueue-time` on a send, `schedule-message`, `cancel-scheduled-message`; topic sends are scheduled at the topic and fan out when due |
+| Topics | copy to each subscription; rules: SQL filters (`azemu-servicebus-sql`), correlation, true, false; actions `SET`/`REMOVE`; a rule without action ORs into one copy, each matching rule with an action gives its own copy. A filter or action that cannot be evaluated (a string compared with a number, `Operator '>' cannot be applied to operands of type 'string' and 'long'`) dead-letters the message in the subscription (reason `FilterException` or `RuleActionException`), or drops it when `DeadLetteringOnFilterEvaluationExceptions` is off; a missing property is no match and no error |
+| Forwarding | `ForwardTo`, `ForwardDeadLetteredMessagesTo` for queues and subscriptions; the target (a queue or a topic) has to exist when the value is set (400). A chain moves a message at most 4 times: the queue that would forward it a fifth time dead-letters it (reason `Maximum transfer hop count is exceeded.`, no description) and the send is accepted. If the target is deleted later, new messages stay in the source. A receiver cannot be attached to an entity that forwards (`amqp:not-allowed`, "Cannot create a message receiver on an entity with auto-forwarding enabled"), nor to the dead-letter queue of one that forwards its dead letters. A message that came through a topic carries the topic's sequence number in `x-opt-enqueue-sequence-number`; any other message has no such annotation. All checked against Azure in November 2026 |
+| Scheduling | `x-opt-scheduled-enqueue-time` on a send, `schedule-message`, `cancel-scheduled-message`; topic sends are scheduled at the topic and fan out when due. A message that was scheduled in the future keeps the state `Scheduled` (`x-opt-message-state` 2) after it arrived, to a receiver and to a peek; one scheduled in the past is active. A peek that starts at an active message stops before the first scheduled message after it, one that starts at a scheduled message goes on through everything. Cancelling a sequence number that was scheduled twice, or whose message arrived, is no error; one that never was is `amqp:not-allowed` (400) for the whole request. A scheduled duplicate is dropped and still uses up a sequence number, which is answered |
 | Duplicate detection | by message-id inside `DuplicateDetectionHistoryTimeWindow`; a duplicate is accepted and dropped |
 | Limits | `MaxMessageSizeInKilobytes` (256 default; `amqp:link:message-size-exceeded` and the link's max-message-size), `MaxSizeInMegabytes` (`amqp:resource-limit-exceeded`, counts main + DLQ bytes), disabled entities (`com.microsoft:entity-disabled`) |
 | Credit | link credit and the session window are respected; competing receivers get a message exactly once; drain works |
@@ -126,7 +133,7 @@ accept messages up to 16 MiB (`$management`) and 1 MiB (`$cbs`).
 `@azure/core-amqp`: rule description `0x0000013700000004`, empty action `0x...05`, SQL action `0x...06`; filters are one
 digit shorter: SQL `0x0000001370000006`, true `...07`, false `...08`, correlation `...09`. The `$Default` rule is answered as a true
 filter. The correlation filter always has its `properties` map (the JavaScript SDK throws on null). SQL parameters have no place in
-the answer. Tested with the JavaScript SDK (`tests/sdk-js`, `servicebus_rules`) and `crates/services/servicebus/tests/rules_js.rs`; the Python SDK does not use these calls.
+the answer. Tested with the JavaScript SDK (`tests/sdk-js`, `servicebus_rules`) and `crates/services/servicebus/tests/rules_js.rs`; the Python SDK does not use these calls. Checked against Azure with the JavaScript SDK in November 2026 (see "Checked against Azure").
 
 ## Known differences from Azure Service Bus and from Microsoft's emulator
 
@@ -135,13 +142,22 @@ the answer. Tested with the JavaScript SDK (`tests/sdk-js`, `servicebus_rules`) 
 - No authentication or authorization; no rights, no SAS expiry checks.
 - A settlement or session call after the session lock ran out fails with `com.microsoft:session-lock-lost`. That is inferred from the strings in the .NET and Java SDKs and from
   Microsoft Learn ("the session lock has expired"); the real service's exact answer is not recorded.
-- Rule-evaluation exceptions never dead-letter (the message simply does not match).
+- Rule texts: the text of a SQL syntax error follows Azure's layout (`There was an error parsing the SQL expression. [Token line=1, column=3, Token in error= =, Additional details= syntax error, unexpected EQ]`), but only `EQ`, `EOF` and `IDENTIFIER` are named as Azure names them and the "expecting ..." list is not given. The type of a number property in a `FilterException` text is `long` (Azure says `int` for a property sent as an AMQP int).
+- Forwarding set by an update: Azure kept `ForwardTo` in the description but forwarded nothing for the 63 seconds that were watched; the emulator forwards from the next message on (not understood, so not copied).
+- Cancelling a scheduled message that is due within about 15 seconds: Azure delivers it although the call succeeded (a race inside the service); the emulator's cancel always works.
+- Expired messages: Azure counts them as active until something touches the entity; the emulator applies the expiry on a 100 ms tick.
+- A peek returns at most 250 messages; Azure answered 93 of 300 and the rule behind 93 is not known.
+- `SizeInBytes`: every message is charged 1,024 bytes besides its content (it keeps a small request from filling the memory); Azure showed 1,016 bytes for four messages of 100 bytes. `AccessedAt` stays `0001-01-01`.
+- The largest session state: the emulator takes 262,144 bytes; Azure refused that (and took 100,000), the limit in between was not found.
+- Entity names: `a/b` is a valid queue name on Azure and is not here (the path is read as two segments); a name over 260 characters is an XML 400 here and an HTML 400 on Azure.
+- The administration API with a topic updated by the Python SDK on Azure answers a second copy of some elements (a defect of the service); the emulator answers normally.
+- Limits only the Standard tier has are not enforced: a `MaxMessageSizeInKilobytes` other than 256 (Premium takes 1,024 to 102,400) and a `MaxSizeInMegabytes` over 5,120 (Premium takes up to 81,920). `AZEMU_SERVICEBUS_TIER=standard` refuses them.
 - Sequence numbers are per sub-queue counters starting at 1 (no partition bits); a dead-lettered message
   gets a new sequence number in the DLQ.
 - Transactions: see the section below. A transaction may touch several entities with or without a send-via link (Azure's rule for
   that is not checked: the Java SDK does it without a via link); the error for an operation limit of 100 and the time out
   error conditions are the AMQP ones (`amqp:resource-limit-exceeded`, `amqp:transaction:timeout`), Azure's own text is not known.
-- `AutoDeleteOnIdle` is stored but nothing is deleted. Partitioning flags are stored, entities are not partitioned.
+- `AutoDeleteOnIdle` is stored but nothing is deleted (Azure deletes an idle entity: a queue with `PT5M` was gone after about six minutes). The emulator does not record when an entity was last used, so it would need that first. Partitioning flags are stored, entities are not partitioned.
 - Settlement in receiver settle mode `second` completes in one step (the emulator's settled disposition follows the
   client's unsettled one): the Python SDK's sender never sends the extra settling disposition.
 - A scheduled message in a topic is stored at the topic and fans out when due; it is visible in no subscription's peek before that.
@@ -227,14 +243,24 @@ Behaviour worth knowing:
 - Update is `PUT` with `If-Match`; it replaces everything the description carries (a missing element goes back
   to its default, so omitting `ForwardTo` clears it). `RequiresSession`, `EnablePartitioning`,
   `RequiresDuplicateDetection` cannot change (400). Validation is done before the existence check, as in the recordings.
-- Validation (400): lock duration over 5 min (queues, subscriptions), duplicate window outside 20 s to 7 days,
-  `MaxMessageSizeInKilobytes` over 256 (Standard) or sent with api-version before 2021-05, `MaxDeliveryCount` under 1,
-  `AutoDeleteOnIdle` under 5 min, unknown `Status`, bad values, bad SQL in rules.
+- Validation, with the texts of a Standard namespace (checked in November 2026): a lock duration of zero or below, or over 5 min (queues, subscriptions); a duplicate window of zero or below or over 7 days
+  (Azure takes a window under 20 seconds although Microsoft Learn says 20 seconds is the least); a `DefaultMessageTimeToLive` under one second; a `MaxDeliveryCount` under 1 (400) or over 2,147,483,647
+  (500, as Azure); `AutoDeleteOnIdle` under 5 min; a `UserMetadata` over 1,024 characters; `MaxSizeInMegabytes` that is not a whole number of gigabytes up to 80
+  (or 0, the default size; Standard stops at 5 GB); `MaxMessageSizeInKilobytes` other than 256 or 1,024 to 102,400 (Standard takes 256 only; both are
+  refused with api-version before 2021-05); `Status` other than `Active`, `Disabled`, `SendDisabled`, `ReceiveDisabled` and `Creating`, a topic with `ReceiveDisabled`
+  and a subscription with `SendDisabled`; booleans as `true`, `false`, `1`, `0`; names of letters, digits, `.`, `-` and `_` (a subscription or rule name at most 50 characters, `$` names refused);
+  `ForwardTo` / `ForwardDeadLetteredMessagesTo` as a full address of a queue or topic that exists (a bare name is "Absolute URI must be provided",
+  a missing target "does not exist", with Azure's different texts for a create, an update and a subscription; the host in the address is not compared);
+  `$top` and `$skip` that are not numbers; an `api-version` that Azure does not list. A body that is no description is 404 "not recognized as a namespace policy put request".
+  An update with an `If-Match` that is neither `*` nor the entity's ETag is 412 (queue, topic) or 500 (subscription).
 - `GET` of an unknown queue or topic answers 200 with the "Publicly Listed Services" feed, as the real service does
-  (the SDK turns the missing content into `ResourceNotFoundError`). Unknown subscription or rule: 404.
+  (the SDK turns the missing content into `ResourceNotFoundError`); so do the reads of the subscriptions and rules of a topic that is not there, and `GET /$nothing`.
+  Unknown subscription or rule of a topic that exists: 404. Deleting a subscription or rule that is not there is 404 "The messaging entity '...' could not be found".
 - A partitioned entity shows 16 times the requested `MaxSizeInMegabytes` and `SupportOrdering` false; sending the shown
   total back on update does not multiply it again.
-- `ForwardTo` is stored as the entity path and shown as `sb://{Host header}/{path}`; the target is not checked.
+- `ForwardTo` is stored as the entity path and shown as `sb://{Host header}/{path}`.
+- Rules are checked as Azure checks them: an expression that is empty, longer than 1,024 characters or does not parse, an unknown function, a parameter that is used and not given (or given and
+  not used), a `sys.` property that does not exist (or is not settable in an action), `LIKE` with a number, a bare `TRUE`, `FALSE` or property as a filter, `==`, commas between the statements of an action, a correlation filter with nothing set. `REMOVE sys.Label` is taken (and changes nothing).
 - The ids and links of the entries of a list (`<id>`, `<link rel="self">`) repeat the casing of the request path: a client that asks
   for `/{topic}/Subscriptions` or `.../Rules` gets `/Subscriptions/` and `/Rules/` back, one that asks in lower case (the Python SDK)
   gets lower case. The JavaScript SDK finds the names in the entries by matching `/Subscriptions/` and `/Rules/` exactly.
@@ -246,14 +272,21 @@ Behaviour worth knowing:
 - A .NET duration in a correlation property is kept as a marked string (`\0azemu-duration:PT1H`) because the SQL value
   type has no duration; it round-trips through the API but never matches a message property.
 - `SqlFilterCount` / `CorrelationFilterCount` of a topic are sent from api-version 2024-05 (the SDK default), not for 2021-05.
-- Not checked: that `ForwardTo` targets exist, entity name characters, `MaxSizeInMegabytes` values, auto-delete on idle
-  (stored only), authorization rule enforcement.
+- Not checked: auto-delete on idle (stored only), authorization rule enforcement. Not copied from Azure's answers: the `ExceptionDescription` repeat in some texts, the HTML 400 for a name of 261 characters, `a/b` as a queue name, and
+  the duplicated elements Azure answers after a topic was updated with the Python SDK (a defect of the service).
 
-## Behaviour that could not be confirmed against Azure
+## Checked against Azure, and what could not be
 
-- Value of `x-opt-deadletter-source` for a subscription: the docs say "the name of the queue or subscription",
-  so the entity's own name is used (`sub`, not `topic/Subscriptions/sub`).
-- `add-rule` / `enumerate-rules`: the encoding is the JavaScript SDK's (tested against it, no recording of the live service).
+A Standard namespace was compared with this emulator in November 2026 (Python SDK 7.15.0, a few probes with the JavaScript SDK). What was checked is described where it is built (above) and in the tests of
+`tests/sdk-python/servicebus` (`test_azure_checked.py` and the tests with "checked in November 2026" in a comment); the Rust tests are `tests/azure_behaviour.rs` and `tests/admin_azure_behaviour.rs` of the crate.
+
+- `x-opt-deadletter-source` of a dead letter of a subscription is `topic/Subscriptions/sub`; of a queue, the queue's name. Checked.
+- `add-rule`, `remove-rule` and `enumerate-rules`: checked with the JavaScript SDK's rule manager (`createRule`, `listRules`, `deleteRule`) on Azure; it gets the rules back as the emulator answers them. A raw `enumerate-rules` request
+  from the Python SDK's management helper got `501` "Invalid command" from Azure, so that request was not in the form Azure takes; the emulator keeps answering it.
+- A settlement or session call after the session lock ran out: the Python SDK raised its session-lock error on Azure and on the emulator; the service's own text was hidden by the SDK, so `com.microsoft:session-lock-lost` with the text above stays inferred.
+- Not checked: transactions (the Python SDK has none; the error texts and the one entity rule), receiver settle mode `second`, idle time out, frame size and link credit, large messages and the other Premium limits, partitioned entities, authorization rules, SAS expiry.
+- A subscription that is `Disabled` or `ReceiveDisabled` did not stop a send to its topic in a second probe, although one earlier probe suggested it; the emulator does not refuse the send.
+- How several rules interact when one of them fails to evaluate is not known: the emulator delivers nothing to that subscription and dead-letters the message once.
 
 ## Reset
 

@@ -206,13 +206,43 @@ pub(crate) fn parse_datetime(s: &str) -> Option<Dt> {
         }
         frac = f * 10u32.pow(7 - n as u32);
     }
+    let mut offset = 0i64;
     if i < c.len() {
         if c[i] == 'Z' && i + 1 == c.len() {
         } else {
-            return None;
+            // a UTC offset, `+05:30`, `-0800` or `+05`, also after a space; the time is then converted to UTC
+            let mut j = i;
+            if c[j] == ' ' {
+                j += 1;
+            }
+            let sign = match c.get(j) {
+                Some('+') => 1,
+                Some('-') => -1,
+                _ => return None,
+            };
+            j += 1;
+            let oh = digits(&c, j, 2)? as i64;
+            j += 2;
+            let mut om = 0i64;
+            if j < c.len() {
+                if c[j] == ':' {
+                    j += 1;
+                }
+                om = digits(&c, j, 2)? as i64;
+                j += 2;
+            }
+            if j != c.len() || om > 59 || oh > 14 || (oh == 14 && om > 0) {
+                return None;
+            }
+            offset = sign * (oh * 3600 + om * 60) * TICKS_PER_SEC;
         }
     }
-    Dt::new(year, month, day, hour, minute, second, frac)
+    let dt = Dt::new(year, month, day, hour, minute, second, frac)?;
+    if offset == 0 {
+        Some(dt)
+    } else {
+        Dt::from_ticks(dt.ticks().checked_sub(offset)?)
+    }
 }
 
 /// Formats with `DATETIMEFORMAT` specifiers.
@@ -236,8 +266,9 @@ pub(crate) fn format_custom(dt: &Dt, fmt: &str) -> String {
         let h12 = if dt.hour.is_multiple_of(12) { 12 } else { dt.hour % 12 };
         let fr = format!("{:07}", dt.frac);
         let produced: Option<(String, usize)> = match c {
-            'd' => Some((if run == 1 { dt.day.to_string() } else { format!("{:02}", dt.day) }, run.min(2))),
-            'M' => Some((if run == 1 { dt.month.to_string() } else { format!("{:02}", dt.month) }, run.min(2))),
+            // a run of d or M is one field, however long (`dddd` is `15`, not `1515`)
+            'd' => Some((if run == 1 { dt.day.to_string() } else { format!("{:02}", dt.day) }, run)),
+            'M' => Some((if run == 1 { dt.month.to_string() } else { format!("{:02}", dt.month) }, run)),
             'y' => {
                 let n = run.min(4);
                 let s = if n == 1 {

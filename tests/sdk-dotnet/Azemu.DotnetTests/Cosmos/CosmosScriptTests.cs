@@ -197,8 +197,12 @@ public class CosmosScriptTests : CosmosBase, IClassFixture<CosmosFixture>
         Assert.Equal(new[] { "i2", "i3" }, where.Select(d => (string)d["id"]!).OrderBy(x => x, StringComparer.Ordinal).ToArray());
         var tax = await All(c.GetItemQueryIterator<double>("SELECT VALUE udf.Tax(t.income) FROM t"));
         Assert.Equal(new double[] { 50, 1000, 28000, 40000 }, tax.OrderBy(x => x).ToArray());
-        var ex = await Fails(async () => await All(c.GetItemQueryIterator<JObject>("SELECT VALUE udf.Tax(t.nothing) FROM t", requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("a") })));
+        // a function is not called when an argument is undefined: no row, no error (Azure, checked in November 2026)
+        var none = await All(c.GetItemQueryIterator<JObject>("SELECT VALUE udf.Tax(t.nothing) FROM t", requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("a") }));
+        Assert.Empty(none);
+        await c.Scripts.CreateUserDefinedFunctionAsync(new UserDefinedFunctionProperties { Id = "boom", Body = "function boom(x) { throw 'bad input'; }" });
+        var ex = await Fails(async () => await All(c.GetItemQueryIterator<JObject>("SELECT VALUE udf.boom(t.income) FROM t", requestOptions: new QueryRequestOptions { PartitionKey = new PartitionKey("a") })));
         Assert.Equal(HttpStatusCode.BadRequest, ex.StatusCode);
-        Assert.Contains("no input", ex.Message);
+        Assert.Contains("bad input", ex.Message);
     }
 }

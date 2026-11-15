@@ -1,5 +1,5 @@
-//! Authentication for the `dfs` endpoint: the same loose rules as Blob (signatures are
-//! checked for `devstoreaccount1` only, SAS content is honoured for every account), with the
+//! Authentication for the `dfs` endpoint: the same rules as Blob (the form of a signature is checked for every account,
+//! the signature itself for `devstoreaccount1` only, SAS content is honoured for every account), with the
 //! Data Lake permission letters (`m` move, `e` execute, `o` ownership, `p` permissions) and
 //! directory SAS (`sr=d`, `sdd` depth).
 
@@ -8,7 +8,7 @@ use azemu_core::storage::sig::{verify_sas, verify_shared_key, SasTarget, Storage
 use azemu_core::storage::StorageAccounts;
 use azemu_core::Request;
 
-use crate::auth::{auth_failed, check_sas_window, malformed_authorization, no_auth_info, public_access_not_permitted, Authz};
+use crate::auth::{check_sas_window, malformed_authorization, no_auth_info, public_access_not_permitted, rejected, Authz};
 use crate::cx::Cx;
 use crate::dfs::ops::Op;
 use crate::errors::{err, ApiError};
@@ -39,8 +39,8 @@ pub fn authorize(req: &Request, op: Op, t: &Target<'_>) -> Result<Authz, ApiErro
     match classify(req) {
         Auth::Bearer => Ok(Authz::default()),
         Auth::SharedKey { .. } => {
-            if let Some(detail) = verify_shared_key(req, StorageService::Blob, t.accounts).rejection() {
-                return Err(auth_failed(detail.to_string()));
+            if let Some(why) = verify_shared_key(req, StorageService::Blob, t.accounts).rejection() {
+                return Err(rejected(why));
             }
             Ok(Authz::default())
         }
@@ -53,8 +53,8 @@ pub fn authorize(req: &Request, op: Op, t: &Target<'_>) -> Result<Authz, ApiErro
                 (None, _, _) => None,
             };
             let target = SasTarget::Blob { container: t.container_name.unwrap_or(""), blob: signed_path.as_deref() };
-            if let Some(detail) = verify_sas(req, StorageService::Blob, t.accounts, &target).rejection() {
-                return Err(auth_failed(detail.to_string()));
+            if let Some(why) = verify_sas(req, StorageService::Blob, t.accounts, &target).rejection() {
+                return Err(rejected(why));
             }
             let perms = check_sas_window(req, &p, t.container)?;
             check_sas(op, &p, perms, t, depth)?;
@@ -72,7 +72,7 @@ pub fn authorize(req: &Request, op: Op, t: &Target<'_>) -> Result<Authz, ApiErro
             } else if need.anon != Anon::No && !t.public_access_allowed {
                 Err(public_access_not_permitted())
             } else {
-                Err(no_auth_info())
+                Err(no_auth_info(req))
             }
         }
     }

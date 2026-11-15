@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from azure.eventhub import EventData
 
+import ehutil
 from ehutil import Collector, bodies, make_consumer, read_all_from_start, read_exact, read_from_start, send_n, texts
 
 
@@ -20,6 +21,14 @@ def five(emu, hub, producer):
     """Five events (m-0..m-4) in partition 0 of `hub`, as received (so with their sequence numbers, offsets and times)."""
     send_n(producer, 5, partition_id="0")
     return read_from_start(emu, hub, 5, partition_id="0")
+
+
+@pytest.fixture
+def five_solo(emu, solo_hub, track):
+    """Five events (m-0..m-4) in the only partition of a hub nothing else was sent to."""
+    p = track(ehutil.make_producer(emu, solo_hub))
+    send_n(p, 5, partition_id="0")
+    return solo_hub, read_from_start(emu, solo_hub, 5, partition_id="0")
 
 
 @pytest.fixture
@@ -113,14 +122,31 @@ def test_datetime_position_exclusive_skips_the_event_with_that_time(emu, hub, sp
     assert bodies(got) == ["m-2", "m-3", "m-4"]
 
 
-def test_datetime_position_inclusive_includes_the_event_with_that_time(emu, hub, spaced):
-    got = read(emu, hub, 4, starting_position=spaced[1].enqueued_time, starting_position_inclusive=True)
-    assert bodies(got) == ["m-1", "m-2", "m-3", "m-4"]
+def read_between(emu, hub, at_least, at_most, **kw):
+    """Like `read`, for a case where Azure may give one event fewer than the emulator."""
+    kw.setdefault("partition_id", "0")
+    kw.setdefault("max_wait_time", 1)
+    with Collector(make_consumer(emu, hub), **kw) as col:
+        col.wait_events(at_least)
+        col.settle(0.5)
+        got = col.events
+    assert at_least <= len(got) <= at_most, f"expected {at_least} to {at_most} events, got {bodies(got)}"
+    return got
 
 
-def test_datetime_position_of_the_first_event_inclusive_gives_everything(emu, hub, spaced):
-    got = read(emu, hub, 5, starting_position=spaced[0].enqueued_time, starting_position_inclusive=True)
-    assert bodies(got) == texts(5)
+# Azure compares the time of an event with more than the milliseconds it reports, and the time it reports is the later one: with the
+# event's own enqueued time given inclusive, the event itself came back 2 times in 10 (a real namespace, November 2026). The emulator
+# counts milliseconds, so it always gives the event. Both give every later event, and neither gives an earlier one.
+def test_datetime_position_inclusive_gives_the_later_events_and_maybe_the_event_itself(emu, hub, spaced):
+    got = read_between(emu, hub, 3, 4, starting_position=spaced[1].enqueued_time, starting_position_inclusive=True)
+    assert bodies(got)[-3:] == ["m-2", "m-3", "m-4"]
+    assert bodies(got)[:-3] in ([], ["m-1"])
+
+
+def test_datetime_position_of_the_first_event_inclusive_gives_all_the_later_events(emu, hub, spaced):
+    got = read_between(emu, hub, 4, 5, starting_position=spaced[0].enqueued_time, starting_position_inclusive=True)
+    assert bodies(got)[-4:] == texts(5)[1:]
+    assert bodies(got)[:-4] in ([], ["m-0"])
 
 
 def test_datetime_taken_between_two_sends_splits_the_stream(emu, hub, producer):
@@ -137,15 +163,73 @@ def test_datetime_in_the_future_gives_nothing(emu, hub, five):
     read(emu, hub, 0, starting_position=datetime.now(timezone.utc) + timedelta(hours=1))
 
 
-def test_datetime_long_ago_gives_everything(emu, hub, five):
+def test_datetime_long_ago_gives_everything(emu, five_solo):
+    hub, _ = five_solo
     got = read(emu, hub, 5, starting_position=datetime.now(timezone.utc) - timedelta(days=1))
     assert bodies(got) == texts(5)
 
 
-def test_naive_datetime_is_read_as_utc(emu, hub, five):
+def test_naive_datetime_is_read_as_utc(emu, five_solo):
     # event_position_selector uses calendar.timegm(value.utctimetuple()): a naive datetime counts as UTC
+    hub, _ = five_solo
     long_ago = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1)
     assert len(read(emu, hub, 5, starting_position=long_ago)) == 5
+
+
+# -- positions that do not exist yet -------------------------------------------------------------------------------------------------
+@pytest.mark.parametrize("ahead,inclusive", [(2, False), (1, False), (1, True), (2, True), (1000, False)], ids=["+2", "+1", "+1-incl", "+2-incl", "+1000"])
+def test_sequence_number_beyond_the_end_is_refused(emu, hub1, producer1, ahead, inclusive):
+    # Azure (November 2026): com.microsoft:argument-error, "The supplied sequence number '3' is invalid. The last sequence number in the
+    # system is '2' ...", also for the number after the last one, inclusive or not (only the last one itself waits for the next event)
+    send_n(producer1, 2, partition_id="0")
+    (last,) = [e.sequence_number for e in read_from_start(emu, hub1, 2, partition_id="0")][-1:]
+    col = Collector(
+        make_consumer(emu, hub1, retry_total=0), partition_id="0", starting_position=last + ahead, starting_position_inclusive=inclusive, max_wait_time=1
+    ).start()
+    try:
+        col.wait_until(lambda c: c.errors, 10, "an on_error call")
+        assert col.count() == 0
+    finally:
+        col.stop()
+
+
+def test_offset_past_the_end_is_refused(emu, hub1, producer1):
+    # Azure (November 2026): com.microsoft:argument-error, "The supplied offset '145' is invalid. The last offset in the system is '144' ..."
+    send_n(producer1, 2, partition_id="0")
+    last = read_from_start(emu, hub1, 2, partition_id="0")[-1]
+    col = Collector(make_consumer(emu, hub1, retry_total=0), partition_id="0", starting_position=str(int(last.offset) + 1), max_wait_time=1).start()
+    try:
+        col.wait_until(lambda c: c.errors, 10, "an on_error call")
+        assert col.count() == 0
+    finally:
+        col.stop()
+
+
+@pytest.mark.parametrize("kind", ["sequence", "offset"])
+def test_the_last_position_waits_for_the_next_event(emu, hub1, producer1, kind):
+    send_n(producer1, 2, partition_id="0")
+    last = read_from_start(emu, hub1, 2, partition_id="0")[-1]
+    position = last.sequence_number if kind == "sequence" else last.offset
+    col = Collector(make_consumer(emu, hub1), partition_id="0", starting_position=position, max_wait_time=1).start()
+    try:
+        col.wait_initialized(1)
+        col.settle(0.5)
+        assert col.errors == [] and col.count() == 0
+        send_n(producer1, 1, prefix="next", partition_id="0")
+        assert bodies(col.wait_events(1)) == ["next-0"]
+    finally:
+        col.stop()
+
+
+def test_a_start_position_that_is_not_a_number_is_refused(emu, hub1):
+    from azure.eventhub.exceptions import EventHubError
+
+    col = Collector(make_consumer(emu, hub1, retry_total=0), partition_id="0", starting_position="not-a-number", max_wait_time=1).start()
+    try:
+        col.wait_until(lambda c: c.errors, 10, "an on_error call")
+        assert isinstance(col.errors[0][1], EventHubError)
+    finally:
+        col.stop()
 
 
 # -- "-1" and "@latest" ----------------------------------------------------------------------------------------------------------
@@ -195,7 +279,7 @@ def test_dict_of_positions_one_per_partition(emu, two_partitions):
 def test_partition_missing_from_the_dict_starts_at_the_beginning(emu, two_partitions):
     hub, p0, p1 = two_partitions
     got = read_all(emu, hub, 4 + 1, starting_position={"1": p1[2].sequence_number})
-    assert got == {"0": texts(4, "a"), "1": ["b-3"]}
+    assert got == {"0": texts(4, "a"), "1": ["b-3"]}  # (on a shared hub "-1" means after what was there before the test)
 
 
 def test_dict_with_offsets_and_a_sequence_number_mixed(emu, two_partitions):
@@ -221,8 +305,14 @@ def test_one_inclusive_flag_applies_to_every_partition(emu, two_partitions):
     assert got == {"0": ["a-1", "a-2", "a-3"], "1": ["b-1", "b-2", "b-3"]}
 
 
-def test_one_sequence_number_for_all_partitions_applies_to_each(emu, two_partitions):
-    hub, p0, p1 = two_partitions
+def test_one_sequence_number_for_all_partitions_applies_to_each(emu, solo_hub2, track):
+    # (a hub of its own: one number means the same event in both partitions only when both started empty)
+    hub = solo_hub2
+    p = track(ehutil.make_producer(emu, hub))
+    send_n(p, 4, prefix="a", partition_id="0")
+    send_n(p, 4, prefix="b", partition_id="1")
+    by = read_all_from_start(emu, hub, 8)
+    p0, p1 = by["0"], by["1"]
     assert p0[1].sequence_number == p1[1].sequence_number  # both partitions started empty
     got = read_all(emu, hub, 2 + 2, starting_position=p0[1].sequence_number)
     assert got == {"0": ["a-2", "a-3"], "1": ["b-2", "b-3"]}

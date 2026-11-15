@@ -68,7 +68,6 @@ pub fn new_spec(req: &Request, kind: BlobKind, body_headers: bool) -> Result<New
             Some(Immutability { until, mode: mode.to_ascii_lowercase() })
         }
     };
-    crate::cpk::require_key_with_hash(req)?;
     Ok(NewSpec {
         props,
         metadata: parse_metadata(req)?,
@@ -77,7 +76,8 @@ pub fn new_spec(req: &Request, kind: BlobKind, body_headers: bool) -> Result<New
         legal_hold: hdr_true(req, "x-ms-legal-hold"),
         immutability,
         scope: hdr(req, "x-ms-encryption-scope").map(str::to_string),
-        cpk: hdr(req, "x-ms-encryption-key-sha256").map(str::to_string),
+        // a hash without the key is accepted by Azure and the blob is written without a key (checked in November 2026)
+        cpk: hdr(req, "x-ms-encryption-key").and(hdr(req, "x-ms-encryption-key-sha256")).map(str::to_string),
     })
 }
 
@@ -300,16 +300,29 @@ pub fn check_mutable(b: &Blob, now: Time) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// A blob written with a customer-provided key can only be read with it.
+/// A blob written with a customer-provided key can only be read and written with that key. The answers are Azure's (checked
+/// in November 2026): no key `BlobUsesCustomerSpecifiedEncryption`, another key `BlobCustomerSpecifiedEncryptionMismatch`.
 pub fn check_cpk(b: &Blob, req: &Request) -> Result<(), ApiError> {
     let Some(stored) = &b.cpk_sha256 else { return Ok(()) };
-    match hdr(req, "x-ms-encryption-key-sha256") {
-        None => Err(err("BlobUsesCustomerSpecifiedEncryption")),
-        // the hash of the key in the request is the hash of the key the blob was written with
-        Some(given) if given.trim() == stored => Ok(()),
-        Some(_) => Err(err("BlobUsesCustomerSpecifiedEncryption")
-            .msg("The blob is encrypted with customer specified encryption, but the key provided in the request is not the one it was written with.")),
+    // the hash alone does not name the key: without the key header the answer is the same whatever the hash says
+    if hdr(req, "x-ms-encryption-key").is_none() {
+        return Err(err("BlobUsesCustomerSpecifiedEncryption"));
     }
+    // the hash of the key in the request is the hash of the key the blob was written with
+    match hdr(req, "x-ms-encryption-key-sha256") {
+        Some(given) if given.trim() == stored => Ok(()),
+        _ => Err(err("BlobCustomerSpecifiedEncryptionMismatch")),
+    }
+}
+
+/// The same for a read or a metadata change, which also refuses a key sent for a blob that was written without one
+/// (`409 BlobDoesNotUseCustomerSpecifiedEncryption`: Get Blob, Get Blob Properties, Set Blob Metadata). A write does not:
+/// Put Block and Put Block List with a key onto a plain blob are `201` (recorded, `test_put_block_and_put_block_list`).
+pub fn check_cpk_read(b: &Blob, req: &Request) -> Result<(), ApiError> {
+    if b.cpk_sha256.is_none() && hdr(req, "x-ms-encryption-key").is_some() {
+        return Err(err("BlobDoesNotUseCustomerSpecifiedEncryption"));
+    }
+    check_cpk(b, req)
 }
 
 /// A blob written with an explicit encryption scope needs the scope on writes too.

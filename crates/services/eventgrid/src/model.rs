@@ -245,4 +245,8 @@ pub struct TopicConfig {
     /// The ARM resource id events of this custom topic carry as `topic` (the ARM layer sends it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_id: Option<String>,
+    /// The access keys of a custom topic (the ARM layer sends its `key1` and `key2`). Given, they replace the keys the topic
+    /// had (an empty list takes them away); missing, the keys stay as they are.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keys: Option<Vec<String>>,
 }

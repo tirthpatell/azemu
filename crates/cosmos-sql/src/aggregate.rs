@@ -50,6 +50,13 @@ impl Acc {
                 }
             }
             AggregateKind::Min | AggregateKind::Max => {
+                // an array or an object among the values makes MIN and MAX undefined (a real account does that)
+                if matches!(v.forced(), Val::Arr(_) | Val::Obj(_)) {
+                    self.bad = true;
+                }
+                if self.bad {
+                    return 0;
+                }
                 let better = match &self.best {
                     None => true,
                     Some(b) => {
@@ -76,19 +83,34 @@ impl Acc {
         match self.kind {
             AggregateKind::Count => Val::int(self.count),
             AggregateKind::Sum | AggregateKind::Average => {
-                if self.bad || self.count == 0 {
+                if self.bad {
                     return Val::Undefined;
                 }
                 if self.kind == AggregateKind::Sum {
+                    // the sum of no values is 0 (Azure answers 0, not undefined); AVG of no values is undefined
                     match self.int_sum {
                         Some(s) => Val::int(s),
                         None => Val::num(self.float_sum),
                     }
+                } else if self.count == 0 {
+                    Val::Undefined
                 } else {
-                    Val::num(self.float_sum / self.count as f64)
+                    // integers are added exactly and converted once: 5 + 9007199254740993 + -3 over 3 is
+                    // 3002399751580332, as Azure writes it
+                    let sum = match self.int_sum {
+                        Some(s) => s as f64,
+                        None => self.float_sum,
+                    };
+                    Val::num(sum / self.count as f64)
                 }
             }
-            AggregateKind::Min | AggregateKind::Max => self.best.clone().unwrap_or(Val::Undefined),
+            AggregateKind::Min | AggregateKind::Max => {
+                if self.bad {
+                    Val::Undefined
+                } else {
+                    self.best.clone().unwrap_or(Val::Undefined)
+                }
+            }
         }
     }
 }

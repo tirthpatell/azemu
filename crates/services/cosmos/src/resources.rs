@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value};
 
-use crate::errors::{check_id, CosmosError, R};
+use crate::errors::{missing_properties, name_of, CosmosError, NameOf, R};
 use crate::out::{Cx, Out};
 use crate::query;
 use crate::rid;
@@ -56,16 +56,11 @@ impl Scope<'_> {
 
     pub fn create(&mut self, cx: &Cx, upsert: bool) -> R<Out> {
         let body = cx.body_object()?;
-        let id = body
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| CosmosError::bad_request("The input content is invalid because the required properties - 'id; ' - are missing"))?
-            .to_string();
-        check_id(&id)?;
+        let id = name_of(NameOf::Other, &body)?;
         (self.validate)(&body)?;
         if let Some(existing) = self.map.get_mut(&id) {
             if !upsert {
-                return Err(CosmosError::conflict());
+                return Err(CosmosError::resource_conflict());
             }
             existing.props = strip(&body);
             existing.meta.touch(cx.now);
@@ -91,10 +86,9 @@ impl Scope<'_> {
         let body = cx.body_object()?;
         let k = self.key_of(key).ok_or_else(CosmosError::not_found_default)?;
         (self.validate)(&body)?;
-        let new_id = body.get("id").and_then(Value::as_str).unwrap_or(&k).to_string();
-        check_id(&new_id)?;
+        let new_id = if body.contains_key("id") { name_of(NameOf::Other, &body)? } else { k.clone() };
         if new_id != k && self.map.contains_key(&new_id) {
-            return Err(CosmosError::conflict());
+            return Err(CosmosError::resource_conflict());
         }
         let mut r = self.map.remove(&k).ok_or_else(CosmosError::not_found_default)?;
         r.props = strip(&body);
@@ -127,57 +121,55 @@ impl Scope<'_> {
 fn strip(body: &Map<String, Value>) -> Map<String, Value> {
     body.iter()
         .filter(|(k, _)| !matches!(k.as_str(), "id" | "_rid" | "_self" | "_etag" | "_ts" | "_token"))
-        .map(|(k, v)| (k.clone(), canonical(k, v)))
+        .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
-}
-
-/// The service stores enum-like strings in their canonical case ("Pre", "All", "Read").
-fn canonical(key: &str, v: &Value) -> Value {
-    let Some(s) = v.as_str() else { return v.clone() };
-    let table: &[&str] = match key {
-        "triggerType" => &["Pre", "Post"],
-        "triggerOperation" => &["All", "Create", "Update", "Delete", "Replace"],
-        "permissionMode" => &["Read", "All"],
-        _ => return v.clone(),
-    };
-    table.iter().find(|t| t.eq_ignore_ascii_case(s)).map(|t| Value::String((*t).to_string())).unwrap_or_else(|| v.clone())
 }
 
 pub fn validate_none(_: &Map<String, Value>) -> R<()> {
     Ok(())
 }
 
-fn need_str(b: &Map<String, Value>, k: &str) -> R<()> {
-    match b.get(k) {
-        Some(Value::String(_)) => Ok(()),
-        _ => Err(CosmosError::bad_request(format!("The input content is invalid because the required properties - '{k}; ' - are missing"))),
+/// The properties of `names` that the body lacks (or holds as something other than a string), as Azure lists them: in
+/// alphabetical order, in one message.
+fn need_strings(b: &Map<String, Value>, names: &[&str]) -> R<()> {
+    let mut missing: Vec<&str> = names.iter().copied().filter(|k| !matches!(b.get(*k), Some(Value::String(_)))).collect();
+    missing.sort_unstable();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(missing_properties(&missing, false))
     }
+}
+
+fn invalid_value(what: &str, v: &str, kind: &str) -> CosmosError {
+    CosmosError::bad_request_list(&[
+        format!("The input {what} '{v}' is invalid. Ensure to provide a valid {kind}."),
+        "The request payload is invalid. Ensure to provide a valid request payload.".to_string(),
+    ])
 }
 
 pub fn validate_body(b: &Map<String, Value>) -> R<()> {
-    need_str(b, "body")
+    need_strings(b, &["body"])
 }
 
 pub fn validate_trigger(b: &Map<String, Value>) -> R<()> {
-    need_str(b, "body")?;
-    need_str(b, "triggerType")?;
-    need_str(b, "triggerOperation")?;
+    need_strings(b, &["body", "triggerOperation", "triggerType"])?;
     let t = b.get("triggerType").and_then(Value::as_str).unwrap_or("");
     if !t.eq_ignore_ascii_case("pre") && !t.eq_ignore_ascii_case("post") {
-        return Err(CosmosError::bad_request("triggerType must be Pre or Post."));
+        return Err(invalid_value("trigger type", t, "trigger type"));
     }
     let o = b.get("triggerOperation").and_then(Value::as_str).unwrap_or("");
-    if !["all", "create", "update", "delete", "replace"].contains(&o.to_ascii_lowercase().as_str()) {
-        return Err(CosmosError::bad_request("triggerOperation must be All, Create, Update, Delete or Replace."));
+    if !["all", "create", "update", "delete", "replace", "upsert"].contains(&o.to_ascii_lowercase().as_str()) {
+        return Err(invalid_value("trigger request type", o, "trigger request type"));
     }
     Ok(())
 }
 
 pub fn validate_permission(b: &Map<String, Value>) -> R<()> {
-    need_str(b, "resource")?;
+    need_strings(b, &["permissionMode", "resource"])?;
     let m = b.get("permissionMode").and_then(Value::as_str).unwrap_or("");
     if !m.eq_ignore_ascii_case("read") && !m.eq_ignore_ascii_case("all") {
-        return Err(CosmosError::bad_request("permissionMode must be Read or All."));
+        return Err(invalid_value("Permission mode", m, "permission mode"));
     }
     Ok(())
 }

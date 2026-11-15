@@ -124,8 +124,29 @@ impl Rule {
         }
     }
 
+    /// A rule with a SQL filter. Refused with Azure's texts: a filter that is empty or too long or that does not parse, a parameter that is used
+    /// and not given (or given and not used), a system property that does not exist.
     pub fn sql_filter(name: &str, expression: &str, parameters: Params, now: i64) -> Result<Rule, String> {
-        let compiled = Filter::parse(expression).map_err(|e| e.to_string())?;
+        if expression.is_empty() {
+            return Err("The property 'SqlExpression' is null or empty.".into());
+        }
+        let len = expression.chars().count();
+        if len > azemu_servicebus_sql::MAX_SQL_LEN {
+            return Err(format!(
+                "The length of the filter statement is {len}, which exceeds the maximum length of {}",
+                azemu_servicebus_sql::MAX_SQL_LEN
+            ));
+        }
+        let compiled = Filter::parse(expression).map_err(|e| parse_error_text(expression, &e))?;
+        let (used, sys) = compiled.uses();
+        check_parameters(&used, &parameters)?;
+        for p in sys {
+            if !azemu_servicebus_sql::KNOWN_SYS.iter().any(|k| k.eq_ignore_ascii_case(&p)) {
+                return Err(format!(
+                    "The specified property {p} does not exist, or it is not a gettable property of the Microsoft.ServiceBus.Messaging.BrokeredMessage class.\r Parameter name: qualifiedPropertyName"
+                ));
+            }
+        }
         Ok(Rule {
             name: name.to_string(),
             filter: RuleFilter::Sql { expression: expression.to_string(), parameters, compatibility_level: 20, compiled },
@@ -139,40 +160,178 @@ impl Rule {
             self.action = None;
             return Ok(self);
         }
-        let compiled = Action::parse(expression).map_err(|e| e.to_string())?;
+        let len = expression.chars().count();
+        if len > azemu_servicebus_sql::MAX_SQL_LEN {
+            return Err(format!(
+                "The length of the filter action statement is {len}, which exceeds the maximum length of {}.",
+                azemu_servicebus_sql::MAX_SQL_LEN
+            ));
+        }
+        let compiled = Action::parse(expression).map_err(|e| parse_error_text(expression, &e))?;
+        let (used, read, set) = compiled.uses();
+        check_parameters(&used, &parameters)?;
+        for p in read {
+            if !azemu_servicebus_sql::KNOWN_SYS.iter().any(|k| k.eq_ignore_ascii_case(&p)) {
+                return Err(format!(
+                    "The specified property {p} does not exist, or it is not a gettable property of the Microsoft.ServiceBus.Messaging.BrokeredMessage class.\r Parameter name: qualifiedPropertyName"
+                ));
+            }
+        }
+        for p in set {
+            if !SETTABLE_SYS.iter().any(|k| k.eq_ignore_ascii_case(&p)) {
+                return Err(format!(
+                    "The specified property ({p}) does not exist or it is not a settable property of the Microsoft.ServiceBus.Messaging.BrokeredMessage class.\r Parameter name: property"
+                ));
+            }
+        }
         self.action = Some(RuleAction { expression: expression.to_string(), parameters, compiled });
         Ok(self)
     }
 
-    fn matches(&self, msg: &Message) -> bool {
-        match &self.filter {
+    fn matches(&self, msg: &Message) -> Result<bool, azemu_servicebus_sql::EvalError> {
+        Ok(match &self.filter {
             RuleFilter::True => true,
             RuleFilter::False => false,
-            RuleFilter::Sql { compiled, parameters, .. } => compiled.try_matches(&MsgProps(msg), parameters).unwrap_or(false),
+            RuleFilter::Sql { compiled, parameters, .. } => compiled.try_matches(&MsgProps(msg), parameters)?,
             RuleFilter::Correlation(c) => correlation_matches(c, msg),
-        }
+        })
     }
 }
 
-/// The messages to enqueue in a subscription for `inc`: empty when no rule matches.
-pub fn evaluate(rules: &[Rule], inc: &Incoming, _dead_letter_on_exception: bool) -> Vec<Message> {
+/// The system properties a rule action may set (the settable ones of the service's message class).
+const SETTABLE_SYS: &[&str] = &[
+    "Label",
+    "Subject",
+    "ContentType",
+    "MessageId",
+    "SessionId",
+    "CorrelationId",
+    "To",
+    "ReplyTo",
+    "ReplyToSessionId",
+    "TimeToLive",
+    "PartitionKey",
+    "ViaPartitionKey",
+    "ScheduledEnqueueTimeUtc",
+];
+
+/// Azure refuses a rule whose parameters and expression do not agree.
+fn check_parameters(used: &[String], given: &Params) -> Result<(), String> {
+    if let Some(p) = used.iter().find(|p| !given.contains_key(*p)) {
+        return Err(format!(
+            "A parameter (@{p}) used in the expression specified in SqlExpression is missing from the Parameters property."
+        ));
+    }
+    if let Some(q) = given.keys().find(|k| !used.contains(k)) {
+        return Err(format!(
+            "The specified parameter (@{q}) in Parameters property was not used in the expression specified in SqlExpression."
+        ));
+    }
+    Ok(())
+}
+
+/// The text Azure answers a SQL expression that does not parse with: `There was an error parsing the SQL expression. [Token line=1, column=3,
+/// Token in error= =, Additional details= syntax error, unexpected EQ]`. The details are the service's for the cases it was seen to answer
+/// (a text that stops too early, a string that is not closed, a character it does not know, an unknown function or scope, a reserved word); the
+/// rest says `syntax error, unexpected <token>`.
+fn parse_error_text(sql: &str, e: &azemu_servicebus_sql::ParseError) -> String {
+    const LEAD: &str = "There was an error parsing the SQL expression.";
+    let chars: Vec<char> = sql.chars().collect();
+    let eof = |details: String| format!("{LEAD} [Token line=2, column=0, Token in error=  , Additional details= {details}]");
+    if e.message.starts_with("Expression of type") {
+        return e.message.clone();
+    }
+    if let Some(f) = e.message.strip_prefix("unknown function '").and_then(|r| r.split('\'').next()) {
+        return format!("The specified function name ({f}) is unknown. Make sure the function name is correct.");
+    }
+    if e.message.starts_with("unterminated") {
+        let open = e.position.min(chars.len());
+        let content: String = chars[(open + 1).min(chars.len())..].iter().collect();
+        return eof(format!("The string ({content}) was not terminated properly."));
+    }
+    let pos = e.position.min(chars.len());
+    if pos >= chars.len() {
+        return eof("syntax error, unexpected EOF".into());
+    }
+    let word = |from: usize| -> String {
+        let mut end = from;
+        while end < chars.len() && (chars[end].is_alphanumeric() || chars[end] == '_') {
+            end += 1;
+        }
+        if end == from {
+            end = from + 1;
+        }
+        chars[from..end].iter().collect()
+    };
+    if let Some(scope) = e.message.strip_prefix("unknown scope '").and_then(|r| r.split('\'').next()) {
+        let col = pos + scope.chars().count() + 1;
+        return format!(
+            "{LEAD} [Token line=1, column={col}, Token in error= {}, Additional details= The specified scope ({scope}) is not supported.]",
+            word(col.min(chars.len().saturating_sub(1)))
+        );
+    }
+    let tok = word(pos);
+    if e.message.starts_with("unexpected character") {
+        return format!("{LEAD} [Token line=1, column={pos}, Token in error= {tok}, Additional details= Unrecognized character. '{tok}']");
+    }
+    if tok.eq_ignore_ascii_case("BETWEEN") {
+        return format!("{LEAD} [Token line=1, column={pos}, Token in error= {tok}, Additional details= '{tok}' is a reserved keyword. Use a delimited identifier if you intended to use a reserved keyword as a property name.]");
+    }
+    let name = match tok.as_str() {
+        "=" => "EQ".to_string(),
+        t if t.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') => "IDENTIFIER".to_string(),
+        t if t.chars().next().is_some_and(|c| c.is_ascii_digit()) => "INTEGER".to_string(),
+        t => format!("'{t}'"),
+    };
+    format!("{LEAD} [Token line=1, column={pos}, Token in error= {tok}, Additional details= syntax error, unexpected {name}]")
+}
+
+/// A rule that could not be evaluated: Azure dead-letters the message with this reason and description.
+pub struct Failure {
+    pub reason: &'static str,
+    pub description: String,
+}
+
+/// What the rules of a subscription make of a message.
+pub struct Evaluation {
+    /// The messages to enqueue in the subscription: empty when no rule matches.
+    pub copies: Vec<Message>,
+    /// Set when a filter or an action failed (`FilterException`, `RuleActionException`): then nothing is delivered.
+    pub failure: Option<Failure>,
+}
+
+/// What to enqueue in a subscription for `inc`. A filter or an action that fails to evaluate (a string compared with a number, say) stops
+/// the evaluation: nothing is delivered and the failure says why.
+pub fn evaluate(rules: &[Rule], inc: &Incoming) -> Evaluation {
     let mut plain = false;
     let mut with_action = Vec::new();
     for rule in rules {
-        if !rule.matches(&inc.message) {
-            continue;
+        match rule.matches(&inc.message) {
+            Ok(true) => {}
+            Ok(false) => continue,
+            Err(e) => {
+                return Evaluation { copies: Vec::new(), failure: Some(Failure { reason: "FilterException", description: e.message }) }
+            }
         }
         match &rule.action {
             None => plain = true,
             Some(a) => {
                 let mut copy = inc.message.clone();
-                if a.compiled.try_apply(&mut MsgPropsMut(&mut copy), &a.parameters).is_ok() {
-                    crate::core::set_prop(
-                        copy.application_properties.get_or_insert_with(Vec::new),
-                        "RuleName",
-                        AmqpValue::String(rule.name.clone()),
-                    );
-                    with_action.push(copy);
+                match a.compiled.try_apply(&mut MsgPropsMut(&mut copy), &a.parameters) {
+                    Ok(()) => {
+                        crate::core::set_prop(
+                            copy.application_properties.get_or_insert_with(Vec::new),
+                            "RuleName",
+                            AmqpValue::String(rule.name.clone()),
+                        );
+                        with_action.push(copy);
+                    }
+                    Err(e) => {
+                        return Evaluation {
+                            copies: Vec::new(),
+                            failure: Some(Failure { reason: "RuleActionException", description: e.message }),
+                        }
+                    }
                 }
             }
         }
@@ -182,7 +341,7 @@ pub fn evaluate(rules: &[Rule], inc: &Incoming, _dead_letter_on_exception: bool)
         out.push(inc.message.clone());
     }
     out.extend(with_action);
-    out
+    Evaluation { copies: out, failure: None }
 }
 
 fn eq_opt(want: &Option<String>, have: Option<&str>) -> bool {

@@ -127,8 +127,8 @@ public class SbSessionTests : SbBase, IClassFixture<SbFixture>
     {
         var q = await SessionQueue();
         await using var c = Client();
-        // Azure refuses it; the SDK turns that answer into an ArgumentException about the SessionId
-        var ex = await Assert.ThrowsAsync<ArgumentException>(async () => await c.CreateSender(q).SendMessageAsync(new ServiceBusMessage("no-session")));
+        // Azure refuses it with amqp:not-allowed (checked in November 2026); the SDK turns that answer into an InvalidOperationException about the SessionId
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(async () => await c.CreateSender(q).SendMessageAsync(new ServiceBusMessage("no-session")));
         Assert.Contains("SessionId", ex.Message);
     }
 

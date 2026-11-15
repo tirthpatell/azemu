@@ -56,12 +56,6 @@ const MAX_DELETED_CONTAINERS: usize = 256;
 pub fn delete(cx: &mut Cx, name: &str) -> ApiResult {
     let req = cx.req;
     let now = cx.now;
-    if name == crate::analytics::LOGS && cx.account().logs_pinned {
-        // Microsoft Learn ("Azure Storage Analytics logging"): the container cannot be deleted once Storage Analytics has
-        // been enabled, though its contents can be. The page gives no error code; this one is a guess.
-        return Err(err("InvalidOperation")
-            .msg("The $logs container cannot be deleted once Storage Analytics logging has been enabled. Its blobs can be deleted."));
-    }
     let c = cx.container(name)?;
     lease::check_write(&c.lease, hdr(req, "x-ms-lease-id"), Scope::Container)?;
     cond::check_container(req, &c.etag, c.last_modified, Kind::Write)?;
@@ -154,12 +148,6 @@ pub fn set_metadata(cx: &mut Cx, name: &str) -> ApiResult {
     let req = cx.req;
     let now = cx.now;
     let md = parse_metadata(req)?;
-    if name == crate::analytics::LOGS && cx.account().logs_pinned {
-        // Microsoft Learn ("Azure Storage Analytics logging"): the container cannot be deleted once Storage Analytics has
-        // been enabled, though its contents can be. The page gives no error code; this one is a guess.
-        return Err(err("InvalidOperation")
-            .msg("The $logs container cannot be deleted once Storage Analytics logging has been enabled. Its blobs can be deleted."));
-    }
     let c = cx.container(name)?;
     lease::check_write(&c.lease, hdr(req, "x-ms-lease-id"), Scope::Container)?;
     cond::check_container(req, &c.etag, c.last_modified, Kind::Write)?;
@@ -229,12 +217,6 @@ pub fn set_acl(cx: &mut Cx, name: &str) -> ApiResult {
         if policies.len() > 5 {
             return Err(ApiError::invalid_xml("A maximum of 5 access policies may be set."));
         }
-    }
-    if name == crate::analytics::LOGS && cx.account().logs_pinned {
-        // Microsoft Learn ("Azure Storage Analytics logging"): the container cannot be deleted once Storage Analytics has
-        // been enabled, though its contents can be. The page gives no error code; this one is a guess.
-        return Err(err("InvalidOperation")
-            .msg("The $logs container cannot be deleted once Storage Analytics logging has been enabled. Its blobs can be deleted."));
     }
     let public_access_allowed = cx.account().public_access_allowed;
     let c = cx.container(name)?;

@@ -38,7 +38,11 @@ pub(super) static FUNCS: &[FuncSpec] = &[
     }),
     f("DATETIMEFORMAT", 2, 2, |_, a| match (&a[0], &a[1]) {
         (Val::Str(s), Val::Str(fmt)) => match parse_datetime(s) {
-            Some(d) => Val::string(format_custom(&d, fmt)),
+            // a format that comes out empty is undefined (`'F'` of a whole second, `''`)
+            Some(d) => match format_custom(&d, fmt) {
+                t if t.is_empty() => Val::Undefined,
+                t => Val::string(t),
+            },
             None => Val::Undefined,
         },
         _ => Val::Undefined,
@@ -193,15 +197,8 @@ fn datetime_bin(_: &Ctx, a: &[Val]) -> Val {
         _ => return Val::Undefined,
     };
     match part {
-        Part::Year => {
-            let yb = start.year + (dt.year - start.year).div_euclid(size) * size;
-            dt_val(Dt::new(yb, 1, 1, 0, 0, 0, 0))
-        }
-        Part::Month => {
-            let idx = (dt.year * 12 + dt.month as i64 - 1) - (start.year * 12 + start.month as i64 - 1);
-            let total = start.year * 12 + start.month as i64 - 1 + idx.div_euclid(size) * size;
-            dt_val(Dt::new(total.div_euclid(12), (total.rem_euclid(12) + 1) as u32, 1, 0, 0, 0, 0))
-        }
+        // only days and smaller units are bins (a real account answers undefined for years and months)
+        Part::Year | Part::Month => Val::Undefined,
         p => {
             let unit = match p.nanos().and_then(|u| u.checked_mul(size as i128)) {
                 Some(u) => u,

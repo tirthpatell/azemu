@@ -84,30 +84,12 @@ fn statements_without_semicolons() {
     assert_eq!(p.get(Scope::User, "color"), None);
 }
 
+// Azure takes no commas between statements: `SET a = 1, b = 2` is "Unrecognized character. ','" (checked in November 2026).
 #[test]
-fn comma_separated_assignments() {
-    let mut p = base();
-    act("SET a = 1, b = 2, [c d] = 3", &mut p);
-    assert_eq!(p.get(Scope::User, "a"), Some(Value::Long(1)));
-    assert_eq!(p.get(Scope::User, "b"), Some(Value::Long(2)));
-    assert_eq!(p.get(Scope::User, "c d"), Some(Value::Long(3)));
-}
-
-#[test]
-fn comma_separated_statements() {
-    let mut p = base();
-    act("SET a = 1, REMOVE color, SET b = 2", &mut p);
-    assert_eq!(p.get(Scope::User, "a"), Some(Value::Long(1)));
-    assert_eq!(p.get(Scope::User, "color"), None);
-    assert_eq!(p.get(Scope::User, "b"), Some(Value::Long(2)));
-}
-
-#[test]
-fn comma_separated_removes() {
-    let mut p = base();
-    act("REMOVE color, priority", &mut p);
-    assert_eq!(p.get(Scope::User, "color"), None);
-    assert_eq!(p.get(Scope::User, "priority"), None);
+fn commas_between_statements_are_refused() {
+    for sql in ["SET a = 1, b = 2, [c d] = 3", "SET a = 1, REMOVE color, SET b = 2", "REMOVE color, priority"] {
+        assert!(bad(sql).message.contains(','), "{sql}");
+    }
 }
 
 #[test]
@@ -285,9 +267,12 @@ fn action_empty_is_error() {
     assert!(bad("   ").message.contains("empty"));
 }
 
+// Azure takes `REMOVE sys.Label`; nothing is removed (a system property is not in the application properties).
 #[test]
-fn action_remove_sys_is_error() {
-    assert!(bad("REMOVE sys.Label").message.contains("system"));
+fn action_remove_sys_is_taken_and_changes_nothing() {
+    let mut p = base();
+    act("REMOVE sys.Label", &mut p);
+    assert_eq!(p.get(Scope::User, "color"), Some(Value::Str("red".into())));
 }
 
 #[test]

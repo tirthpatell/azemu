@@ -436,3 +436,89 @@ def test_dfs_filesystem_properties_header(raw, service, uniq):
     r = raw.dfs("HEAD", name, {"resource": "filesystem"})
     assert r.status_code == 200
     assert parse_props_header(r.headers["x-ms-properties"]) == {"hello": "world"}
+
+
+# -- what the dfs host answers to the Blob endpoint's operations (Azure, November 2026) ------------------------------
+def test_blob_only_operations_on_the_dfs_host_are_errors_not_501(raw, fs):
+    fsn = fs.file_system_name
+    assert raw.dfs("PUT", f"{fsn}/f1", {"resource": "file"}).status_code == 201
+
+    def check(r, status, code):
+        assert (r.status_code, r.headers["x-ms-error-code"]) == (status, code), r.text
+        assert r.json()["error"]["code"] == code
+
+    # restype=container is the Blob endpoint's
+    check(raw.dfs("GET", fsn, {"restype": "container", "comp": "list"}), 400, "InvalidQueryParameterValue")
+    check(raw.dfs("GET", fsn, {"restype": "container"}), 400, "InvalidQueryParameterValue")
+    check(raw.dfs("GET", fsn, {"restype": "container", "comp": "acl"}), 400, "InvalidQueryParameterValue")
+    check(raw.dfs("PUT", f"{fsn}2", {"restype": "container"}), 400, "InvalidQueryParameterValue")
+    assert raw.dfs("HEAD", f"{fsn}2").status_code == 404  # nothing was created
+    # service level
+    check(raw.dfs("GET", "", {"comp": "list"}), 400, "InvalidUri")
+    check(raw.dfs("GET", "", {"restype": "service", "comp": "properties"}), 400, "InvalidUri")
+    check(raw.dfs("POST", "", {"restype": "service", "comp": "userdelegationkey"}), 400, "InvalidUri")
+    check(raw.dfs("GET", "", {"comp": "blobs", "where": "\"a\"='1'"}), 400, "InvalidUri")
+    check(raw.dfs("PUT", "", {"restype": "service", "comp": "properties"}), 400, "MissingRequiredHeader")
+    # a PUT or POST on a path with no resource and no action is a missing header
+    for comp, extra in [("metadata", {}), ("snapshot", {}), ("tier", {"x-ms-access-tier": "Cool"}), ("block", {})]:
+        q = {"comp": comp, **({"blockid": "MDAwMQ=="} if comp == "block" else {})}
+        check(raw.dfs("PUT", f"{fsn}/f1", q, headers=extra, data=b"x"), 400, "MissingRequiredHeader")
+    check(raw.dfs("PUT", f"{fsn}/new", None, headers={"x-ms-blob-type": "BlockBlob"}, data=b"x"), 400, "MissingRequiredHeader")
+    # Query Blob Contents: the dfs host reads the POST as a lease
+    r = raw.dfs("POST", f"{fsn}/f1", {"comp": "query"}, headers={"Content-Type": "application/xml"}, data=b"<QueryRequest/>")
+    check(r, 400, "MissingRequiredHeader")
+    assert r.json()["error"]["detail"] == {"HeaderName": "x-ms-lease-action"}
+    # these are served
+    for q in ({"comp": "metadata"}, {"comp": "blocklist", "blocklisttype": "all"}, {"comp": "tags"}, None):
+        assert raw.dfs("GET", f"{fsn}/f1", q).status_code == 200, q
+    assert raw.dfs("HEAD", f"{fsn}/f1").status_code == 200
+
+
+def test_acl_errors_have_azures_codes(raw, fs):
+    fsn = fs.file_system_name
+    assert raw.dfs("PUT", f"{fsn}/f1", {"resource": "file"}).status_code == 201
+    base = ["user::rwx", "group::r-x", "other::---", "mask::rwx"]
+
+    def acl(n):
+        return ",".join(base + [f"user:00000000-0000-0000-0000-{i:012d}:r-x" for i in range(n)])
+
+    set_acl = lambda v: raw.dfs("PATCH", f"{fsn}/f1", {"action": "setAccessControl"}, headers={"x-ms-acl": v})
+    assert set_acl(acl(28)).status_code == 200  # 32 entries are the most
+    r = set_acl(acl(29))
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "TooManyAclEntries")
+    assert r.json()["error"]["message"].startswith("The number of access control entries is more than allowed.")
+    r = set_acl("bogus")
+    # (sic) Azure's code has the typo
+    assert (r.status_code, r.json()["error"]["code"]) == (400, "InvaldAccessControlList")
+    assert r.json()["error"]["message"].startswith("The access control list value is invalid.")
+
+
+def test_blob_endpoint_writes_into_a_filesystem_have_azures_errors(raw, fs):
+    fsn = fs.file_system_name
+    assert raw.dfs("PUT", f"{fsn}/f1", {"resource": "file"}).status_code == 201
+    assert raw.dfs("PUT", f"{fsn}/dir1", {"resource": "directory"}).status_code == 201
+    xml = {"Content-Type": "application/xml"}
+    bt = {"x-ms-blob-type": "BlockBlob"}
+    blk = {"comp": "block", "blockid": "MDAwMQ=="}
+    lst = b"<BlockList><Latest>MDAwMQ==</Latest></BlockList>"
+
+    def check(r, status, code):
+        assert (r.status_code, r.headers["x-ms-error-code"]) == (status, code), r.text
+
+    check(raw.blob("PUT", f"{fsn}/f1/child", headers=bt, data=b"x"), 404, "BlobNotFound")
+    check(raw.blob("PUT", f"{fsn}/dir1", headers=bt, data=b"x"), 409, "OperationNotAllowedInCurrentState")
+    check(raw.blob("PUT", f"{fsn}/f1/c2", blk, data=b"x"), 409, "OperationNotAllowedInCurrentState")
+    check(raw.blob("PUT", f"{fsn}/dir1", blk, data=b"x"), 409, "OperationNotAllowedInCurrentState")
+    r = raw.blob("PUT", f"{fsn}/dir1", {"comp": "blocklist"}, headers=xml, data=lst)
+    check(r, 400, "OperationNotSupportedOnDirectory")
+    assert "The requested operation is not supported on a directory." in r.text
+    check(raw.blob("PUT", f"{fsn}/f1/c3", {"comp": "blocklist"}, headers=xml, data=lst), 409, "OperationNotAllowedInCurrentState")
+    src = raw.url("blob", f"{fsn}/f1")
+    check(raw.blob("PUT", f"{fsn}/dir1", headers={"x-ms-copy-source": src}), 409, "OperationNotAllowedInCurrentState")
+    check(raw.blob("PUT", f"{fsn}/f1/c4", headers={"x-ms-copy-source": src}), 404, "BlobNotFound")
+    # 61 segments are fine, 62 are too deep
+    deep = lambda n: "/".join(f"s{i}" for i in range(n))
+    assert raw.blob("PUT", f"{fsn}/{deep(61)}", headers=bt, data=b"x").status_code == 201
+    r = raw.blob("PUT", f"{fsn}/{deep(62)}", headers=bt, data=b"x")
+    check(r, 409, "PathIsTooDeep")
+    assert "This operation is not permitted as the path is too deep." in r.text

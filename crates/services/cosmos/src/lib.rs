@@ -34,6 +34,7 @@ mod select;
 mod state;
 mod udf;
 mod users;
+mod validate;
 
 use azemu_core::{async_trait, Mount, Request, Response, Service};
 use parking_lot::Mutex;
@@ -315,6 +316,8 @@ impl Service for CosmosService {
             Err(CosmosError::unauthorized("Required Header authorization is missing. Ensure a valid Authorization token is passed."))
         } else if req.body.len() > limits::MAX_REQUEST_BYTES {
             Err(CosmosError::too_large())
+        } else if let Err(e) = validate::check(&cx) {
+            Err(e)
         } else {
             cx.preparse();
             let step = router::dispatch(&mut self.state.lock(), &cx);

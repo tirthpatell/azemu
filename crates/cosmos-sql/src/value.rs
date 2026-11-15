@@ -18,6 +18,14 @@ impl Num {
             Num::Float(f) => f,
         }
     }
+    /// The position `array[n]` reads: a fraction is cut off (`a[1.5]` is `a[1]`), a negative number reads nothing.
+    pub fn index(self) -> Option<usize> {
+        match self {
+            Num::Int(i) => usize::try_from(i).ok(),
+            Num::Float(f) if f.is_finite() && f >= 0.0 && f < usize::MAX as f64 => Some(f as usize),
+            Num::Float(_) => None,
+        }
+    }
     /// Integer value if the number is integral and in the i64 range.
     pub fn as_i64(self) -> Option<i64> {
         match self {
@@ -183,9 +191,9 @@ impl Val {
             };
         }
         match (self, idx) {
-            (Val::Arr(a), Val::Num(n)) => match n.as_i64() {
-                Some(i) if i >= 0 => a.get(i as usize).cloned().unwrap_or(Val::Undefined),
-                _ => Val::Undefined,
+            (Val::Arr(a), Val::Num(n)) => match n.index() {
+                Some(i) => a.get(i).cloned().unwrap_or(Val::Undefined),
+                None => Val::Undefined,
             },
             (Val::Obj(_), Val::Str(s)) => self.get_prop(s),
             _ => Val::Undefined,
@@ -206,6 +214,25 @@ impl Val {
             Value::String(s) => Val::str(s),
             Value::Array(a) => Val::arr(a.iter().map(Val::from_json).collect()),
             Value::Object(o) => Val::Obj(Arc::new(o.iter().map(|(k, v)| (Arc::from(k.as_str()), Val::from_json(v))).collect())),
+        }
+    }
+
+    /// True if arrays and objects are nested more than `limit` levels deep in the value.
+    pub fn depth_exceeds(&self, limit: usize) -> bool {
+        match self {
+            Val::Arr(a) => limit == 0 || a.iter().any(|v| v.depth_exceeds(limit - 1)),
+            Val::Obj(o) => limit == 0 || o.iter().any(|(_, v)| v.depth_exceeds(limit - 1)),
+            _ => false,
+        }
+    }
+
+    /// True if a NaN or an infinity is in the value (JSON cannot write it).
+    pub fn has_non_finite(&self) -> bool {
+        match self {
+            Val::Num(Num::Float(f)) => !f.is_finite(),
+            Val::Arr(a) => a.iter().any(Val::has_non_finite),
+            Val::Obj(o) => o.iter().any(|(_, v)| v.has_non_finite()),
+            _ => false,
         }
     }
 
@@ -236,9 +263,9 @@ impl Val {
 /// `value[idx]` on stored JSON, with the rules of `Val::get_index`.
 pub(crate) fn json_index<'v>(v: &'v Value, idx: &Val) -> Option<&'v Value> {
     match (v, idx) {
-        (Value::Array(a), Val::Num(n)) => match n.as_i64() {
-            Some(i) if i >= 0 => a.get(i as usize),
-            _ => None,
+        (Value::Array(a), Val::Num(n)) => match n.index() {
+            Some(i) => a.get(i),
+            None => None,
         },
         (Value::Object(m), Val::Str(s)) => m.get(&**s),
         _ => None,

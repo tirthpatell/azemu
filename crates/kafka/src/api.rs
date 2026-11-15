@@ -33,7 +33,8 @@ pub const CREATE_PARTITIONS: i16 = 37;
 
 /// The APIs and versions the emulator serves, in the order `ApiVersions` lists them. The upper bound of each is the
 /// last version before the one that needs topic ids (Produce 13, Fetch 13, ...) or another feature the emulator
-/// does not have; the lower bound is the oldest version that the current Java client (4.x) still sends.
+/// does not have; the lower bound is the oldest version that the current Java client (4.x) still sends. This is what the
+/// library can decode; what a server tells its clients can be less (see `ADVERTISED_MAX`).
 pub static SERVED: &[ApiSpec] = &[
     ApiSpec { key: PRODUCE, name: "Produce", min: 3, max: 9 },
     ApiSpec { key: FETCH, name: "Fetch", min: 4, max: 12 },
@@ -57,6 +58,15 @@ pub static SERVED: &[ApiSpec] = &[
     ApiSpec { key: SASL_AUTHENTICATE, name: "SaslAuthenticate", min: 0, max: 2 },
     ApiSpec { key: CREATE_PARTITIONS, name: "CreatePartitions", min: 0, max: 3 },
 ];
+
+/// The highest versions Event Hubs tells its clients about where that is less than `SERVED` (the list a real namespace sent in
+/// November 2026): (api key, version). A server that advertises these makes clients use the versions Azure's clients use.
+pub const ADVERTISED_MAX: &[(i16, i16)] = &[(PRODUCE, 7), (API_VERSIONS, 3), (DESCRIBE_CONFIGS, 2), (CREATE_PARTITIONS, 1)];
+
+/// The highest version of an API to put in an `ApiVersions` answer.
+pub fn advertised_max(spec: &ApiSpec) -> i16 {
+    ADVERTISED_MAX.iter().find(|(k, _)| *k == spec.key).map(|(_, v)| spec.max.min(*v)).unwrap_or(spec.max)
+}
 
 pub fn served(key: i16) -> Option<&'static ApiSpec> {
     SERVED.iter().find(|a| a.key == key)

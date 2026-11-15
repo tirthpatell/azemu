@@ -160,6 +160,7 @@ def test_namespace_properties(admin):
     assert ns.name
 
 
+@pytest.mark.emulator_only
 def test_namespace_is_selected_by_host_name(emu, admin, new_queue):
     # a client for another namespace (`other.servicebus.localhost`) does not see the queues of `default`
     import sbutil

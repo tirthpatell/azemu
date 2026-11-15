@@ -98,7 +98,7 @@ async fn namespaces_are_separate() {
 }
 
 #[tokio::test]
-async fn autocreate_on_creates_hub_with_four_partitions_and_consumer_group() {
+async fn autocreate_on_creates_hub_with_four_partitions_and_a_new_group_name_is_just_accepted() {
     let env = env().await;
     let mut c = env.client().await;
     attach_sender(&mut c, "auto").await.unwrap();
@@ -109,15 +109,16 @@ async fn autocreate_on_creates_hub_with_four_partitions_and_consumer_group() {
         assert!(h.autocreated);
         assert!(!h.has_consumer_group("newgroup"));
     }
+    // Azure takes a group nobody made and does not add it to the list (a real namespace, November 2026)
     consume(&mut c, "auto", "newgroup", 3, &from_start()).await.unwrap();
-    assert!(env.shared.state.lock().hub("myns", "auto").unwrap().has_consumer_group("newgroup"));
+    assert!(!env.shared.state.lock().hub("myns", "auto").unwrap().has_consumer_group("newgroup"));
     // names are case-insensitive
     attach_sender(&mut c, "AUTO/Partitions/1").await.unwrap();
     assert_eq!(env.shared.state.lock().namespaces["myns"].hubs.len(), 1);
 }
 
 #[tokio::test]
-async fn autocreate_off_refuses_missing_hubs_and_groups_with_not_found() {
+async fn autocreate_off_refuses_missing_hubs_with_not_found_and_takes_any_group_name() {
     let env = env_with(Shared::new(false, None)).await;
     env.hub("exists", 2);
     let mut c = env.client().await;
@@ -126,13 +127,13 @@ async fn autocreate_off_refuses_missing_hubs_and_groups_with_not_found() {
     assert_eq!(e.condition, "amqp:not-found");
     let d = e.description.unwrap();
     assert!(d.contains("sb://myns.servicebus.windows.net/missing") && d.contains("could not be found") && d.contains("TrackingId"), "{d}");
+    assert!(d.contains("SystemTracker:myns.servicebus.windows.net:missing"), "{d}");
 
     let e = consume(&mut c, "missing", "$Default", 0, &from_start()).await.unwrap_err();
     assert_eq!(condition(e), "amqp:not-found");
 
-    let e = consume(&mut c, "exists", "nogroup", 0, &from_start()).await.unwrap_err().unwrap();
-    assert_eq!(e.condition, "amqp:not-found");
-    assert!(e.description.unwrap().contains("exists/ConsumerGroups/nogroup"));
+    // a consumer group that was never created is accepted (Azure, November 2026)
+    consume(&mut c, "exists", "nogroup", 0, &from_start()).await.unwrap();
 
     // what exists works
     attach_sender(&mut c, "exists/Partitions/1").await.unwrap();

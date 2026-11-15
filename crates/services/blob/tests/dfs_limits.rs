@@ -64,15 +64,16 @@ async fn more_than_32_acl_entries_are_refused_on_every_way_in() {
     // 29 named entries and the three base ones are 32; the mask is added, so 28 are the most that fit with it
     let too_many = format!("{base},{}", named(33, false));
     let r = l.d("PUT", "/lake/d?resource=directory", &[("x-ms-acl", &too_many)], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"), "{}", r.text());
-    assert!(r.text().contains("32"), "{}", r.text());
+    // Azure (November 2026): `TooManyAclEntries` with a fixed text
+    assert_eq!((r.status, code(&r).as_str()), (400, "TooManyAclEntries"), "{}", r.text());
+    assert!(r.text().contains("The number of access control entries is more than allowed."), "{}", r.text());
     assert_eq!(l.d("PUT", "/lake/d?resource=directory", &[], "").await.status, 201);
     for mode in ["set", "modify"] {
         let r = l.d("PATCH", &format!("/lake/d?action=setAccessControlRecursive&mode={mode}"), &[("x-ms-acl", &too_many)], "").await;
-        assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"), "{mode}");
+        assert_eq!((r.status, code(&r).as_str()), (400, "TooManyAclEntries"), "{mode}");
     }
     let r = l.d("PATCH", "/lake/d?action=setAccessControl", &[("x-ms-acl", &too_many)], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
+    assert_eq!((r.status, code(&r).as_str()), (400, "TooManyAclEntries"));
     // default entries are counted apart: 28 access and 28 default named entries are fine
     let both = format!("{base},{},{}", named(28, false), named(28, true));
     let r = l.d("PATCH", "/lake/d?action=setAccessControl", &[("x-ms-acl", &both)], "").await;
@@ -87,7 +88,7 @@ async fn a_6000_entry_default_acl_is_refused_before_it_costs_anything() {
     let huge = format!("user::rwx,group::r-x,other::---,{}", named(6000, true));
     let t = Instant::now();
     let r = l.d("PUT", "/lake/d?resource=directory", &[("x-ms-acl", &huge)], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
+    assert_eq!((r.status, code(&r).as_str()), (400, "TooManyAclEntries"));
     assert!(r.body.len() < 2000, "the answer does not repeat the header ({} bytes)", r.body.len());
     assert!(t.elapsed() < Duration::from_secs(1), "{:?}", t.elapsed());
 }
@@ -284,15 +285,30 @@ async fn a_blob_cannot_be_made_below_a_file_or_in_place_of_a_directory() {
     let l = lake().await;
     l.file("a.txt", "data").await;
     assert_eq!(l.d("PUT", "/lake/dir?resource=directory", &[], "").await.status, 201);
-    for (path, body) in [("a.txt/child", "x"), ("a.txt/x/y/z", "x"), ("dir", "x")] {
+    // Azure's answers on the Blob endpoint (November 2026), not the Data Lake endpoint's `PathConflict`: Put Blob below a file is
+    // `BlobNotFound`, in place of a directory `OperationNotAllowedInCurrentState`
+    for (path, body) in [("a.txt/child", "x"), ("a.txt/x/y/z", "x")] {
         let r = l.b("PUT", &format!("/lake/{path}"), &[("x-ms-blob-type", "BlockBlob")], body).await;
-        assert_eq!((r.status, code(&r).as_str()), (409, "PathConflict"), "{path}: {}", r.text());
+        assert_eq!((r.status, code(&r).as_str()), (404, "BlobNotFound"), "{path}: {}", r.text());
     }
-    // staging a block and committing, and copying, follow the same rule
+    let r = l.b("PUT", "/lake/dir", &[("x-ms-blob-type", "BlockBlob")], "x").await;
+    assert_eq!((r.status, code(&r).as_str()), (409, "OperationNotAllowedInCurrentState"), "{}", r.text());
+    // staging a block, committing a list and copying follow the same rules
     let r = l.b("PUT", "/lake/a.txt/c?comp=block&blockid=MDAwMDA%3D", &[], "x").await;
-    assert_eq!((r.status, code(&r).as_str()), (409, "PathConflict"));
-    let r = l.b("PUT", "/lake/a.txt/c", &[("x-ms-copy-source", &format!("{}/lake/a.txt", l.blob))], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (409, "PathConflict"));
+    assert_eq!((r.status, code(&r).as_str()), (409, "OperationNotAllowedInCurrentState"));
+    let r = l.b("PUT", "/lake/dir?comp=block&blockid=MDAwMDA%3D", &[], "x").await;
+    assert_eq!((r.status, code(&r).as_str()), (409, "OperationNotAllowedInCurrentState"));
+    let list = "<BlockList><Latest>MDAwMDA=</Latest></BlockList>";
+    let r = l.b("PUT", "/lake/dir?comp=blocklist", &[], list).await;
+    assert_eq!((r.status, code(&r).as_str()), (400, "OperationNotSupportedOnDirectory"));
+    assert!(r.text().contains("The requested operation is not supported on a directory."), "{}", r.text());
+    let r = l.b("PUT", "/lake/a.txt/c?comp=blocklist", &[], list).await;
+    assert_eq!((r.status, code(&r).as_str()), (409, "OperationNotAllowedInCurrentState"));
+    let src = format!("{}/lake/a.txt", l.blob);
+    let r = l.b("PUT", "/lake/a.txt/c", &[("x-ms-copy-source", &src)], "").await;
+    assert_eq!((r.status, code(&r).as_str()), (404, "BlobNotFound"));
+    let r = l.b("PUT", "/lake/dir", &[("x-ms-copy-source", &src)], "").await;
+    assert_eq!((r.status, code(&r).as_str()), (409, "OperationNotAllowedInCurrentState"));
     assert_eq!(l.d("GET", "/lake/a.txt/child", &[], "").await.status, 404);
     let list = l.d("GET", "/lake?resource=filesystem&recursive=true", &[], "").await.text();
     assert!(!list.contains("child"), "{list}");
@@ -335,10 +351,12 @@ async fn path_depth_and_length_limits() {
     let ok: String = (0..60).map(|i| format!("d{i}")).collect::<Vec<_>>().join("/") + "/f.txt"; // 61 segments
     assert_eq!(l.d("PUT", &format!("/lake/{ok}?resource=file"), &[], "").await.status, 201);
     let too_deep: String = (0..61).map(|i| format!("e{i}")).collect::<Vec<_>>().join("/") + "/f.txt"; // 62 segments
+                                                                                                      // (the code for the Data Lake endpoint is the Blob endpoint's: only that one was tried on Azure)
     let r = l.d("PUT", &format!("/lake/{too_deep}?resource=file"), &[], "").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidResourceName"));
+    assert_eq!((r.status, code(&r).as_str()), (409, "PathIsTooDeep"));
     let r = l.b("PUT", &format!("/lake/{too_deep}"), &[("x-ms-blob-type", "BlockBlob")], "x").await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "InvalidResourceName"));
+    assert_eq!((r.status, code(&r).as_str()), (409, "PathIsTooDeep"));
+    assert!(r.text().contains("This operation is not permitted as the path is too deep."), "{}", r.text());
     let long = "x".repeat(1025);
     let r = l.d("PUT", &format!("/lake/{long}?resource=file"), &[], "").await;
     assert_eq!((r.status, code(&r).as_str()), (400, "InvalidResourceName"));

@@ -80,11 +80,14 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
     let aliases: Vec<String> = q.from.as_ref().map(|f| f.sources.iter().map(|s| s.alias.clone()).collect()).unwrap_or_default();
     let penv = Env { parent, aliases: &[], vals: &[] };
     let top = match &q.select.top {
-        Some(t) => Some(count_value(ctx, t, &penv, "TOP")?),
+        Some(t) => Some(count_value(ctx, t, &penv, ("SC2060", "The count value provided for a TOP clause must be an integer."))?),
         None => None,
     };
     let window = match &q.offset_limit {
-        Some(ol) => Some((count_value(ctx, &ol.offset, &penv, "OFFSET")?, count_value(ctx, &ol.limit, &penv, "LIMIT")?)),
+        Some(ol) => Some((
+            count_value(ctx, &ol.offset, &penv, ("SC2062", "The OFFSET count value exceeds the maximum allowed value."))?,
+            count_value(ctx, &ol.limit, &penv, ("SC2061", "The LIMIT count value exceeds the maximum allowed value."))?,
+        )),
         None => None,
     };
     // how many rows of the sorted / arrival order anything after this stage can use
@@ -96,8 +99,10 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
     if let Some(h) = hint {
         need = Some(need.map_or(h, |n| n.min(h)));
     }
-    let arrival_order = !q.is_aggregate && q.order_by.is_empty();
-    if arrival_order && need == Some(0) {
+    // DISTINCT over one property of the item comes out in the order of the index (ascending), not in arrival order
+    let sorted_distinct = q.select.distinct && q.order_by.is_empty() && !q.is_aggregate && distinct_is_indexed(q);
+    let arrival_order = !q.is_aggregate && q.order_by.is_empty() && !sorted_distinct;
+    if !q.is_aggregate && q.order_by.is_empty() && need == Some(0) {
         return Ok(Vec::new());
     }
     let keep_root = parent.is_none();
@@ -106,6 +111,8 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
     let mut collect = Collect {
         q,
         entries: Vec::new(),
+        next_seq: 0,
+        all_descending: !q.order_by.is_empty() && q.order_by.iter().all(|o| o.descending),
         seen: HashSet::new(),
         held: 0,
         // DISTINCT without ORDER BY is decided as rows arrive; with ORDER BY it is applied to the sorted rows
@@ -134,9 +141,12 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
                 return collect.push(ctx, &env, None);
             }
             let mut key = String::new();
+            let mut key_val = Val::Undefined;
             for g in &q.group_by {
-                key.push_str(&canon_key(&ctx.eval(g, &env, None)?));
+                let v = ctx.eval(g, &env, None)?;
+                key.push_str(&canon_key(&v));
                 key.push('|');
+                key_val = v;
             }
             let gi = match index.get(&key) {
                 Some(&i) => i,
@@ -145,7 +155,7 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
                     let held: usize = first.iter().map(|v| v.est_bytes(ctx.bytes_left())).sum();
                     ctx.charge_bytes(key.len() + held + aggs.len() * 96 + 160)?;
                     index.insert(key, groups.len());
-                    groups.push(Group { first, accs: aggs.iter().map(|a| new_acc(a)).collect() });
+                    groups.push(Group { first, key: key_val, accs: aggs.iter().map(|a| new_acc(a)).collect() });
                     groups.len() - 1
                 }
             };
@@ -165,7 +175,18 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
 
     if q.is_aggregate {
         if q.group_by.is_empty() && groups.is_empty() {
-            groups.push(Group { first: vec![Val::Undefined; aliases.len()], accs: aggs.iter().map(|a| new_acc(a)).collect() });
+            groups.push(Group {
+                first: vec![Val::Undefined; aliases.len()],
+                key: Val::Undefined,
+                accs: aggs.iter().map(|a| new_acc(a)).collect(),
+            });
+        }
+        // One GROUP BY expression and nothing but COUNT to compute: the groups come in ascending order of the key (Azure
+        // reads the index). With several expressions, or with SUM, AVG, MIN or MAX, they come in the order they first
+        // appeared (seen on a real account, November 2026).
+        let only_counts = aggs.iter().all(|a| matches!(&a.kind, ExprKind::Aggregate { kind: crate::ast::AggregateKind::Count, .. }));
+        if q.group_by.len() == 1 && only_counts {
+            groups.sort_by(|a, b| cmp_total(&a.key, &b.key));
         }
         for g in &groups {
             let mut results: HashMap<usize, Val> = HashMap::with_capacity(aggs.len());
@@ -179,9 +200,12 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
 
     let mut entries = collect.entries;
     if !q.order_by.is_empty() {
-        sort_entries(q, &mut entries);
+        sort_entries(q, &mut entries, collect.all_descending);
     }
-    let mut out: Vec<Val> = entries.into_iter().map(|(v, _)| v).collect();
+    let mut out: Vec<Val> = entries.into_iter().map(|(v, _, _)| v).collect();
+    if sorted_distinct {
+        out.sort_by(cmp_total);
+    }
 
     if q.select.distinct && !collect.inline_distinct {
         let mut seen = HashSet::new();
@@ -212,7 +236,11 @@ fn run_inner(ctx: &Ctx, q: &Query, scope: Scope, hint: Option<usize>) -> Result<
 /// What the rows that pass WHERE (or the finished groups) turn into: the projection and the ORDER BY keys.
 struct Collect<'q> {
     q: &'q Query,
-    entries: Vec<(Val, Vec<Val>)>,
+    /// The projection, the ORDER BY keys and the arrival number of each row.
+    entries: Vec<(Val, Vec<Val>, usize)>,
+    next_seq: usize,
+    /// Every ORDER BY item is DESC: rows with equal keys then come last-arrived first, as a backwards index scan gives them.
+    all_descending: bool,
     /// DISTINCT without ORDER BY: the canonical text of the rows kept so far.
     seen: HashSet<String>,
     /// Bytes `entries` holds, as counted against the budget.
@@ -245,21 +273,20 @@ impl Collect<'_> {
         for item in &q.order_by {
             keys.push(ctx.eval(&item.expr, env, grp)?);
         }
-        // Cosmos serves ORDER BY from the index; an item whose sort value is undefined is not in
-        // the index of that path unless the path is indexed explicitly or a composite index is
-        // used (Microsoft Learn, "Indexing policies"). The caller says which case it is.
-        if ctx.order_by_excludes_undefined && keys.iter().any(|k| k.is_undefined()) {
-            return Ok(Flow::Continue);
-        }
+        // A row whose sort value is undefined is part of the result: Azure indexes every path (the default policy is
+        // `/*`), an item without the property is in the index as "undefined", and that sorts first (last when
+        // descending). Checked against a real account, November 2026.
         let bytes = entry_bytes(ctx, &proj, &keys);
         ctx.charge_bytes(bytes)?;
         self.held += bytes;
-        self.entries.push((proj, keys));
+        let seq = self.next_seq;
+        self.next_seq += 1;
+        self.entries.push((proj, keys, seq));
         if let (Some(at), Some(n)) = (self.prune_at, self.need) {
             if self.entries.len() >= at {
-                sort_entries(q, &mut self.entries);
+                sort_entries(q, &mut self.entries, self.all_descending);
                 self.entries.truncate(n);
-                let kept: usize = self.entries.iter().map(|(p, k)| entry_bytes(ctx, p, k)).sum();
+                let kept: usize = self.entries.iter().map(|(p, k, _)| entry_bytes(ctx, p, k)).sum();
                 ctx.release_bytes(self.held.saturating_sub(kept));
                 self.held = kept;
             }
@@ -282,7 +309,7 @@ fn entry_bytes(ctx: &Ctx, proj: &Val, keys: &[Val]) -> usize {
     n
 }
 
-fn sort_entries(q: &Query, entries: &mut [(Val, Vec<Val>)]) {
+fn sort_entries(q: &Query, entries: &mut [(Val, Vec<Val>, usize)], all_descending: bool) {
     entries.sort_by(|a, b| {
         for (i, item) in q.order_by.iter().enumerate() {
             let o = cmp_total(&a.1[i], &b.1[i]);
@@ -291,13 +318,36 @@ fn sort_entries(q: &Query, entries: &mut [(Val, Vec<Val>)]) {
                 return o;
             }
         }
-        Ordering::Equal
+        // equal keys: in the order the rows arrived, or the reverse of it when every key is descending
+        if all_descending {
+            b.2.cmp(&a.2)
+        } else {
+            a.2.cmp(&b.2)
+        }
     });
+}
+
+/// DISTINCT over a single value (`DISTINCT VALUE c.t`, `DISTINCT c.t`, `DISTINCT LOWER(c.t) AS x`, `DISTINCT VALUE {t: c.t}`)
+/// comes out ascending, as Azure reads the index. With several items, or a function in `VALUE`, the rows keep the order they
+/// arrived in. Both were seen on a real account (November 2026); the rule between them is a guess from those answers.
+fn distinct_is_indexed(q: &Query) -> bool {
+    let Some(from) = &q.from else { return false };
+    if from.sources.len() != 1 || from.sources[0].iterate {
+        return false;
+    }
+    let SourceExpr::Expr(Expr { kind: ExprKind::Ident(_), .. }) = &from.sources[0].source else { return false };
+    match &q.select.spec {
+        SelectSpec::Value(e) => matches!(e.kind, ExprKind::Property(..) | ExprKind::Index(..) | ExprKind::Object(_)),
+        SelectSpec::Items(items) => items.len() == 1,
+        SelectSpec::Star => false,
+    }
 }
 
 /// One group: its first row (what non aggregate select items see) and its running aggregates.
 struct Group {
     first: Row,
+    /// The value of the GROUP BY expression of the first row (the last one when there are several).
+    key: Val,
     accs: Vec<Acc>,
 }
 
@@ -362,10 +412,12 @@ fn collect_aggregates(q: &Query) -> Vec<&Expr> {
     out
 }
 
-fn count_value(ctx: &Ctx, e: &Expr, env: &Env, what: &str) -> Result<usize, SqlError> {
+/// The value of a TOP, OFFSET or LIMIT count: a whole number from 0 to 2^31 - 1, else the error Azure names, on the
+/// text of the count.
+pub(crate) fn count_value(ctx: &Ctx, e: &Expr, env: &Env, err: (&str, &str)) -> Result<usize, SqlError> {
     match ctx.eval(e, env, None)?.as_i64() {
-        Some(n) if n >= 0 => Ok(n as usize),
-        _ => Err(SqlError::eval(format!("{what} must be a non-negative integer."))),
+        Some(n) if (0..=crate::parser::MAX_COUNT).contains(&n) => Ok(n as usize),
+        _ => Err(SqlError::at(err.0, err.1.to_string(), e.span.start, e.span.end)),
     }
 }
 

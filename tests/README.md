@@ -10,7 +10,7 @@ The suites are also working examples of pointing each SDK at the emulator; [`doc
 | [`sdk-go/`](sdk-go/README.md) | the Go SDK modules | Go |
 | [`sdk-java/`](sdk-java/README.md) | the Java SDKs | JDK 17+, Maven |
 | [`sdk-dotnet/`](sdk-dotnet/README.md) | the .NET SDKs | .NET 10 SDK |
-| [`sdk-rust/`](sdk-rust/README.md) | the Rust SDK crates | Rust, OpenSSL headers |
+| [`sdk-rust/`](sdk-rust/README.md) | the Rust SDK crates, in three projects: the current ones, `beta/`, and `older/` (the versions that projects are often pinned to) | Rust, OpenSSL headers |
 | [`functions/`](functions/README.md) | the Azure Functions host (Core Tools) against the emulator | .NET 10 SDK, Core Tools 4, Node |
 | [`terraform/`](terraform/README.md) | the `azurerm` Terraform provider through Resource Manager | Terraform |
 | [`container/`](container/README.md) | the container image, reached by name from a second container | Docker |

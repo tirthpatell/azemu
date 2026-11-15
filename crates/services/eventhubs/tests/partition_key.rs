@@ -1,55 +1,48 @@
 //! Partition keys go to the partition Azure chooses.
 //!
-//! The expected values were computed by Microsoft's own function, not by this crate: the JavaScript SDK's
-//! `mapPartitionKeyToId` and `hashPartitionKey` in
-//! `tests/sdk-js/node_modules/@azure/event-hubs/dist/esm/impl/partitionKeyToIdMapper.js` (version in
-//! `tests/sdk-js/package.json`), run with Node by `tests/partition_key_values.mjs` in this folder. To make them
-//! again: `node crates/services/eventhubs/tests/partition_key_values.mjs`. The .NET SDK's `PartitionResolver`
-//! implements the same function. The columns are the partition counts in `COUNTS`.
+//! `partition_key_azure.jsonl` holds `[key, partitions, partition]` as a real Standard namespace answered in November 2026:
+//! 475 samples, each an event sent with that key (no partition id) to an event hub with 2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 28, 30, 31
+//! or 32 partitions and read back. They include upper and lower case of one letter, characters that are not ASCII, and keys picked
+//! to fall where the ways of dividing the ring differ (28, 30 and 31 partitions). The function is not the one in Microsoft's SDKs,
+//! which their buffered producers use and the service does not: see `model::partition_for_key`.
 
-use azemu_eventhubs::model::{hash_key, partition_for_key};
+use azemu_eventhubs::model::{key_bytes, key_position, partition_for_key};
 
-const COUNTS: [usize; 7] = [1, 2, 3, 4, 8, 16, 32];
-
-/// (key, `hashPartitionKey`, partition for each count in `COUNTS`)
-const EXPECTED: &[(&str, i16, [usize; 7])] = &[
-    ("", 0, [0, 0, 0, 0, 0, 0, 0]),
-    ("a", -16220, [0, 0, 2, 0, 4, 12, 28]),
-    ("alpha", 873, [0, 1, 0, 1, 1, 9, 9]),
-    ("beta", -6771, [0, 1, 0, 3, 3, 3, 19]),
-    ("gamma", -11976, [0, 0, 0, 0, 0, 8, 8]),
-    ("user-1", -27605, [0, 1, 2, 1, 5, 5, 21]),
-    ("order-12345", 22030, [0, 0, 1, 2, 6, 14, 14]),
-    ("device/42", 4230, [0, 0, 0, 2, 6, 6, 6]),
-    ("sensor-temperature-01", -5782, [0, 0, 1, 2, 6, 6, 22]),
-    ("0123456789ab", -17054, [0, 0, 2, 2, 6, 14, 30]),
-    ("0123456789abc", -4167, [0, 1, 0, 3, 7, 7, 7]),
-    ("hello world", 24431, [0, 1, 2, 3, 7, 15, 15]),
-    ("Zürich-ß", 15217, [0, 1, 1, 1, 1, 1, 17]),
-    ("日本語のキー", 18957, [0, 1, 0, 1, 5, 13, 13]),
-    ("😀", -17126, [0, 0, 2, 2, 6, 6, 6]),
-    ("tenant:acme:region:eu-west-1", 17248, [0, 0, 1, 0, 0, 0, 0]),
-    ("xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", -29224, [0, 0, 1, 0, 0, 8, 8]),
-    ("The quick brown fox jumps over the lazy dog", -31937, [0, 1, 2, 1, 1, 1, 1]),
-    ("k1", 23816, [0, 0, 2, 0, 0, 8, 8]),
-    ("partition-key-with-a-fairly-long-name-1234567890", -6264, [0, 0, 0, 0, 0, 8, 24]),
-];
-
-#[test]
-fn twenty_keys_land_where_the_javascript_sdk_puts_them() {
-    assert_eq!(EXPECTED.len(), 20);
-    for (key, hash, parts) in EXPECTED {
-        assert_eq!(hash_key(key), *hash, "hash of {key:?}");
-        for (count, want) in COUNTS.iter().zip(parts) {
-            assert_eq!(partition_for_key(key, *count), *want, "key {key:?} with {count} partitions");
-        }
-    }
+fn samples() -> Vec<(String, usize, usize)> {
+    include_str!("partition_key_azure.jsonl")
+        .lines()
+        .map(|l| {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            (v[0].as_str().unwrap().to_string(), v[1].as_u64().unwrap() as usize, v[2].as_u64().unwrap() as usize)
+        })
+        .collect()
 }
 
 #[test]
-fn the_review_example_for_four_partitions() {
-    // the SDK maps alpha, beta, gamma to 1, 3, 0 (the old FNV hash gave 3, 3, 2)
-    assert_eq!([partition_for_key("alpha", 4), partition_for_key("beta", 4), partition_for_key("gamma", 4)], [1, 3, 0]);
+fn every_key_lands_where_azure_put_it() {
+    let all = samples();
+    assert_eq!(all.len(), 475);
+    let wrong: Vec<_> = all.iter().filter(|(k, n, p)| partition_for_key(k, *n) != *p).map(|(k, n, p)| (k.as_str(), *n, *p)).collect();
+    assert!(wrong.is_empty(), "keys that go elsewhere than on Azure (key, partitions, Azure's partition): {wrong:?}");
+}
+
+#[test]
+fn the_samples_cover_the_partition_counts_that_divide_the_ring_unevenly() {
+    let counts: std::collections::BTreeSet<usize> = samples().into_iter().map(|s| s.1).collect();
+    assert_eq!(counts.into_iter().collect::<Vec<_>>(), vec![2, 3, 4, 5, 6, 7, 8, 12, 16, 24, 28, 30, 31, 32]);
+}
+
+#[test]
+fn case_does_not_matter_and_a_letter_outside_ascii_is_a_question_mark() {
+    assert_eq!(key_bytes("Alpha-1"), b"ALPHA-1");
+    assert_eq!(key_bytes("é"), b"?");
+    assert_eq!(key_bytes("日本"), b"??");
+    // a character outside the Basic Multilingual Plane is two UTF-16 units
+    assert_eq!(key_bytes("😀"), b"??");
+    for n in [2usize, 4, 7, 32] {
+        assert_eq!(partition_for_key("device-A7", n), partition_for_key("DEVICE-a7", n));
+    }
+    assert_eq!(key_position("ü"), key_position("é"));
 }
 
 #[test]
@@ -59,4 +52,6 @@ fn a_partition_is_always_inside_the_hub() {
             assert!(partition_for_key(&format!("key-{i}"), n) < n);
         }
     }
+    assert_eq!(partition_for_key("anything", 1), 0);
+    assert_eq!(partition_for_key("anything", 0), 0);
 }

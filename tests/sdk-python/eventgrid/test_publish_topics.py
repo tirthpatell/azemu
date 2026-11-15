@@ -190,6 +190,7 @@ def test_unsupported_credential_type_is_a_client_side_error(emu, topic):
 def _raw(emu, topic, body, headers=None, params=None):
     h = {"Content-Type": "application/json; charset=utf-8", "aeg-sas-key": "c2VjcmV0"}
     h.update(headers or {})
+    h = {k: v for k, v in h.items() if v is not None}  # None takes a header away
     return requests.post(
         emu.url("eventgrid", topic) + "/api/events",
         params=params if params is not None else {"api-version": "2018-01-01"},
@@ -212,12 +213,14 @@ def test_success_response_headers_and_empty_body(emu, topic):
     "headers",
     [
         {"aeg-sas-key": "c2VjcmV0"},
-        {"aeg-sas-key": "", "aeg-sas-token": "r=x&e=2030-01-01&s=sig"},
-        {"aeg-sas-key": "", "Authorization": "SharedAccessSignature r=x&e=2030-01-01&s=sig"},
-        {"aeg-sas-key": "", "Authorization": "Bearer eyJhbGciOi.fake.token"},
+        {"aeg-sas-key": None, "aeg-sas-token": "r=x&e=2030-01-01&s=sig"},
+        {"aeg-sas-key": None, "Authorization": "SharedAccessSignature r=x&e=2030-01-01&s=sig"},
+        {"aeg-sas-key": None, "Authorization": "Bearer eyJhbGciOi.fake.token"},
     ],
 )
 def test_all_credential_forms_are_accepted(emu, topic, headers):
+    # a topic without keys (made through the admin API) takes any key or token; with keys it compares them
+    # (`test_publish_with_keys.py`)
     r = _raw(emu, topic, [{"customId": "1"}], headers=headers)
     assert r.status_code == 200, r.text
 
@@ -233,7 +236,10 @@ def test_request_without_any_credential_is_401(emu, topic):
     body = r.json()
     assert body["error"]["code"] == "Unauthorized"
     assert body["error"]["details"][0]["code"] == "Unauthorized"
-    assert "not authorized" in body["error"]["message"]
+    # the words of the service (tried against Azure in November 2026)
+    assert body["error"]["message"].startswith(
+        "Request must contain one of the following authorization signature: aeg-sas-token, aeg-sas-key. Report '"
+    )
 
 
 def test_publish_is_idempotent_for_resending_the_same_event_id(publisher):

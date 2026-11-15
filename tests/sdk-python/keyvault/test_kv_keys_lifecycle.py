@@ -160,12 +160,15 @@ def test_recover_brings_back_all_versions(keys):
     assert {p.version for p in keys.list_properties_of_key_versions(name)} == versions
 
 
-def test_recover_key_that_was_not_deleted_is_not_found(keys):
+def test_recover_key_that_was_not_deleted_is_refused(keys):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Key exists already: <name>".
     name = unique("k")
     keys.create_ec_key(name)
-    with pytest.raises(ResourceNotFoundError) as exc:
+    with pytest.raises(HttpResponseError) as exc:
         keys.begin_recover_deleted_key(name, _polling_interval=POLL)
-    assert error_code(exc.value) == "KeyNotFound"
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert f"Key exists already: {name}" in exc.value.message
 
 
 def test_recovered_key_still_signs_with_the_original_private_key(keys, server_crypto):
@@ -213,11 +216,15 @@ def test_key_name_can_be_reused_after_purge(keys):
     assert len(list(keys.list_properties_of_key_versions(name))) == 1
 
 
-def test_purge_active_key_is_not_found_and_keeps_the_key(keys):
+def test_purge_active_key_is_refused_and_keeps_the_key(keys):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Key must be deleted prior to being purged."
     name = unique("k")
     keys.create_ec_key(name)
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(HttpResponseError) as exc:
         keys.purge_deleted_key(name)
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert "Key must be deleted prior to being purged." in exc.value.message
     assert keys.get_key(name).name == name
 
 

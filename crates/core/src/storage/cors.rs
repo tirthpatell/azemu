@@ -2,17 +2,28 @@
 //! for Azure Storage"). The rules come from Set Service Properties; the services keep them and pass
 //! them in as [`CorsRule`]s. Blob, Queue and Table can use the same two functions:
 //!
-//! - [`preflight`] answers an `OPTIONS` request. It needs no credentials and is judged against the
-//!   service, not the resource. Missing `Origin` or `Access-Control-Request-Method`: 400
-//!   `MissingRequiredHeader`. No rule matches (or there are no rules): 403 `CorsPreflightFailure`.
-//! - [`apply`] adds the `Access-Control-*` headers to the answer of an actual request that carries
-//!   `Origin`.
+//! - [`preflight`] (Table: [`preflight_table`]) answers an `OPTIONS` request. It needs no credentials and is judged
+//!   against the service, not the resource. Missing `Origin` or `Access-Control-Request-Method`: 400
+//!   `InvalidHeaderValue`. No rule matches (or there are no rules): 403 `CorsPreflightFailure`.
+//! - [`apply`] adds the `Access-Control-*` headers to the answer of an actual request.
 //!
 //! Rules are tried in order. A rule is picked when the origin and the method match; from then on
 //! only that rule counts, and if the request headers of a preflight are not all allowed by it, the
 //! preflight fails. Origins match case-sensitively; `*` stands for any origin, and a `*` inside an
-//! entry (`http://*.contoso.com`) for any run of characters. Allowed headers match by name without
-//! case, with a trailing `*` as a prefix.
+//! entry (`http://*.contoso.com`) for any run of characters. Methods match case-sensitively. Allowed headers match by
+//! name without case, with a trailing `*` as a prefix.
+//!
+//! All of this, and the answers below, was checked against real Azure in November 2026:
+//!
+//! - A preflight that matches answers the origin it was sent (also for a rule with `*`), with
+//!   `Access-Control-Allow-Credentials: true`, the method and the request headers as sent, and no `Vary`.
+//! - An actual request with a matching rule gets `Access-Control-Allow-Origin` (`*` when the rule lists `*`, else the
+//!   origin, with `Access-Control-Allow-Credentials: true` and, on GET and HEAD, `Vary: Origin`) and
+//!   `Access-Control-Expose-Headers`: the names of the rule, where a name with a trailing `*` stands for the headers
+//!   of this answer that start with it. A request with no `Origin` is matched by a rule with `*` as origin; on an
+//!   account with CORS rules a GET or HEAD that no rule matches still gets `Vary: Origin`.
+//! - The error bodies have the form of the service: Blob and Queue have `MessageDetails`; Table answers in
+//!   its own XML (`m:error`).
 
 use http::{HeaderValue, Method};
 
@@ -78,7 +89,7 @@ fn allows_any_origin(rule: &CorsRule) -> bool {
 }
 
 fn method_allowed(rule: &CorsRule, method: &str) -> bool {
-    items(&rule.allowed_methods).any(|m| m.eq_ignore_ascii_case(method))
+    items(&rule.allowed_methods).any(|m| m == method)
 }
 
 fn header_allowed(rule: &CorsRule, name: &str) -> bool {
@@ -103,66 +114,139 @@ fn set(resp: &mut Response, name: &'static str, value: &str) {
     }
 }
 
-/// Answer a preflight request (`OPTIONS` with `Origin` and `Access-Control-Request-Method`).
+/// How the errors of a preflight are written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Style {
+    /// Blob and Queue: `<Error>` with a `MessageDetails` element.
+    Storage,
+    /// Table: the OData `m:error` document.
+    Table,
+}
+
+/// Answer a preflight request (`OPTIONS` with `Origin` and `Access-Control-Request-Method`) of Blob or Queue.
 /// The caller adds the common storage headers (`storage::finish`).
 pub fn preflight(req: &Request, rules: &[CorsRule]) -> Response {
-    let ctx = &req.ctx;
+    preflight_as(req, rules, Style::Storage)
+}
+
+/// The same for Table, whose errors have another form.
+pub fn preflight_table(req: &Request, rules: &[CorsRule]) -> Response {
+    preflight_as(req, rules, Style::Table)
+}
+
+fn preflight_as(req: &Request, rules: &[CorsRule], style: Style) -> Response {
     let Some(origin) = req.header("origin") else {
-        return missing(req, "Origin");
+        return missing(req, "Origin", style);
     };
     let Some(method) = req.header("access-control-request-method") else {
-        return missing(req, "Access-Control-Request-Method");
+        return missing(req, "Access-Control-Request-Method", style);
     };
-    let asked: Vec<&str> = req.header("access-control-request-headers").map(|h| items(h).collect()).unwrap_or_default();
-    let failed = || storage::error(ctx, 403u16, "CorsPreflightFailure", "CORS not enabled or no matching rule found for this request.");
+    let asked_raw = req.header("access-control-request-headers");
+    let asked: Vec<&str> = asked_raw.map(|h| items(h).collect()).unwrap_or_default();
+    let failed = || {
+        error(
+            req,
+            style,
+            403,
+            "CorsPreflightFailure",
+            "CORS not enabled or no matching rule found for this request.",
+            "No CORS rules matches this request",
+        )
+    };
     let Some(rule) = pick(rules, origin.trim(), method.trim()) else {
         return failed();
     };
     if !asked.iter().all(|h| header_allowed(rule, h)) {
         return failed();
     }
-    let any = allows_any_origin(rule);
     let mut resp = Resp::new(200u16).body("").build();
-    set(&mut resp, "access-control-allow-origin", if any { "*" } else { origin.trim() });
+    // the origin is echoed even for a rule with `*`, and credentials are allowed
+    set(&mut resp, "access-control-allow-origin", origin.trim());
     set(&mut resp, "access-control-allow-methods", method.trim());
-    if !asked.is_empty() {
-        set(&mut resp, "access-control-allow-headers", &asked.join(","));
+    if let (Some(raw), false) = (asked_raw, asked.is_empty()) {
+        set(&mut resp, "access-control-allow-headers", raw.trim());
     }
     set(&mut resp, "access-control-max-age", &rule.max_age.to_string());
-    if !any {
-        // an echoed origin may carry credentials; `*` may not (browsers refuse the pair)
-        set(&mut resp, "access-control-allow-credentials", "true");
-        set(&mut resp, "vary", "Origin");
-    }
+    set(&mut resp, "access-control-allow-credentials", "true");
     resp
 }
 
-fn missing(req: &Request, header_name: &str) -> Response {
-    storage::error_with_details(
-        &req.ctx,
-        400u16,
-        "MissingRequiredHeader",
-        "An HTTP header that's mandatory for this request is not specified.",
-        &[("HeaderName", header_name)],
+fn missing(req: &Request, header_name: &str, style: Style) -> Response {
+    error(
+        req,
+        style,
+        400,
+        "InvalidHeaderValue",
+        "A required CORS header is not present.",
+        &format!("Missing required CORS header {header_name}"),
     )
 }
 
-/// Add the CORS headers to the answer of an actual request. Does nothing without `Origin` or without
-/// rules. With a matching rule: `Access-Control-Allow-Origin` (`*` or the origin), the exposed headers
-/// and, for an exact origin, `Access-Control-Allow-Credentials` and (GET/HEAD) `Vary: Origin`. Without a
-/// matching rule only `Vary: Origin` is added to a GET/HEAD answer, as Azure does.
+fn error(req: &Request, style: Style, status: u16, code: &str, message: &str, details: &str) -> Response {
+    match style {
+        Style::Storage => storage::error_with_details(&req.ctx, status, code, message, &[("MessageDetails", details)]),
+        Style::Table => {
+            let ctx = &req.ctx;
+            let body = format!(
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?><m:error xmlns:m=\"http://schemas.microsoft.com/ado/2007/08/dataservices/metadata\"><m:code>{}</m:code><m:message xml:lang=\"en-US\">{}\nRequestId:{}\nTime:{}</m:message></m:error>",
+                storage::xml_escape(code),
+                storage::xml_escape(message),
+                storage::xml_escape(&ctx.request_id),
+                crate::time::iso8601_7(ctx.time)
+            );
+            Resp::new(status).xml(body).header("x-ms-error-code", code).build()
+        }
+    }
+}
+
+/// The names of `ExposedHeaders` as Azure sends them: a name is sent as written, a name with a trailing `*` stands for the
+/// headers of the answer that start with it (`x-ms-request-id` and `x-ms-version` first, then the others by name).
+fn exposed_names(rule: &CorsRule, resp: &Response) -> String {
+    let rank = |n: &str| match n {
+        "x-ms-request-id" => 0,
+        "x-ms-version" => 1,
+        _ => 2,
+    };
+    let mut out: Vec<String> = Vec::new();
+    for item in items(&rule.exposed_headers) {
+        match item.strip_suffix('*') {
+            Some(prefix) => {
+                let prefix = prefix.to_ascii_lowercase();
+                let mut found: Vec<String> =
+                    resp.headers().keys().map(|k| k.as_str().to_string()).filter(|n| n.starts_with(&prefix) && !out.contains(n)).collect();
+                found.sort_by(|a, b| rank(a).cmp(&rank(b)).then_with(|| a.cmp(b)));
+                out.extend(found);
+            }
+            None if !out.iter().any(|n| n.eq_ignore_ascii_case(item)) => out.push(item.to_string()),
+            None => {}
+        }
+    }
+    out.join(",")
+}
+
+/// Add the CORS headers to the answer of an actual request (call it when the common headers are already on the answer:
+/// the exposed names are matched against them). Does nothing without rules. With a matching rule:
+/// `Access-Control-Allow-Origin` (`*` when the rule lists `*`, else the origin), the exposed headers and, for an exact
+/// origin, `Access-Control-Allow-Credentials` and (GET/HEAD) `Vary: Origin`. A request with no `Origin` is matched by a rule
+/// that lists `*`. A GET or HEAD that no rule matches gets only `Vary: Origin`.
 pub fn apply(resp: &mut Response, req: &Request, rules: &[CorsRule]) {
     if rules.is_empty() || req.method == Method::OPTIONS {
         return;
     }
-    let Some(origin) = req.header("origin") else { return };
     let cacheable = req.method == Method::GET || req.method == Method::HEAD;
-    match pick(rules, origin.trim(), req.method.as_str()) {
+    let method = req.method.as_str();
+    let origin = req.header("origin").map(str::trim);
+    let matched = match origin {
+        Some(o) => pick(rules, o, method),
+        None => rules.iter().find(|r| allows_any_origin(r) && method_allowed(r, method)),
+    };
+    match matched {
         Some(rule) => {
             let any = allows_any_origin(rule);
-            set(resp, "access-control-allow-origin", if any { "*" } else { origin.trim() });
-            if !rule.exposed_headers.trim().is_empty() {
-                set(resp, "access-control-expose-headers", rule.exposed_headers.trim());
+            set(resp, "access-control-allow-origin", if any { "*" } else { origin.unwrap_or("*") });
+            let exposed = exposed_names(rule, resp);
+            if !exposed.is_empty() {
+                set(resp, "access-control-expose-headers", &exposed);
             }
             if !any {
                 set(resp, "access-control-allow-credentials", "true");
@@ -262,13 +346,17 @@ mod tests {
         assert_eq!(r.status(), 200);
         assert_eq!(hv(&r, "access-control-allow-origin"), Some("http://a.example"));
         assert_eq!(hv(&r, "access-control-allow-methods"), Some("PUT"));
-        assert_eq!(hv(&r, "access-control-allow-headers"), Some("X-MS-Meta-One,Content-Type"));
+        // the request headers are sent back as they came (real Azure keeps the space)
+        assert_eq!(hv(&r, "access-control-allow-headers"), Some("X-MS-Meta-One, Content-Type"));
         assert_eq!(hv(&r, "access-control-max-age"), Some("120"));
         assert_eq!(hv(&r, "access-control-allow-credentials"), Some("true"));
-        assert_eq!(hv(&r, "vary"), Some("Origin"));
+        // real Azure sends no Vary on a preflight
+        assert!(hv(&r, "vary").is_none());
         // another origin, another method
         assert_eq!(preflight(&pre_from("http://b.example", "PUT", ""), &rules).status(), 403);
         assert_eq!(preflight(&pre_from("http://a.example", "DELETE", ""), &rules).status(), 403);
+        // the method is matched as written: `put` is not `PUT`
+        assert_eq!(preflight(&pre_from("http://a.example", "put", ""), &rules).status(), 403);
         // a header the rule does not list
         assert_eq!(preflight(&pre_from("http://a.example", "PUT", "authorization"), &rules).status(), 403);
         // no rules at all
@@ -284,55 +372,82 @@ mod tests {
     }
 
     #[test]
-    fn star_origin_has_no_credentials_and_no_vary() {
+    fn a_preflight_for_a_rule_with_star_answers_the_origin_with_credentials() {
         let rules = vec![rule("*", "GET", "*", "x-ms-*", 0)];
         let r = preflight(&pre_from("http://any.example", "GET", "x-anything"), &rules);
-        assert_eq!(hv(&r, "access-control-allow-origin"), Some("*"));
-        assert!(hv(&r, "access-control-allow-credentials").is_none());
+        assert_eq!(hv(&r, "access-control-allow-origin"), Some("http://any.example"));
+        assert_eq!(hv(&r, "access-control-allow-credentials"), Some("true"));
         assert!(hv(&r, "vary").is_none());
     }
 
     #[test]
-    fn missing_headers_are_400() {
+    fn errors_are_those_of_azure() {
         let rules = docs_rules();
+        let body = |r: &Response| String::from_utf8_lossy(r.body()).into_owned();
+        // blob and queue: InvalidHeaderValue with MessageDetails
         let r = preflight(&req("OPTIONS", &[("access-control-request-method", "GET")]), &rules);
         assert_eq!(r.status(), 400);
-        assert_eq!(hv(&r, "x-ms-error-code"), Some("MissingRequiredHeader"));
-        assert!(String::from_utf8_lossy(r.body()).contains("<HeaderName>Origin</HeaderName>"));
+        assert_eq!(hv(&r, "x-ms-error-code"), Some("InvalidHeaderValue"));
+        assert!(body(&r).contains("<Message>A required CORS header is not present."), "{}", body(&r));
+        assert!(body(&r).contains("<MessageDetails>Missing required CORS header Origin</MessageDetails>"));
         let r = preflight(&req("OPTIONS", &[("origin", "http://x")]), &rules);
         assert_eq!(r.status(), 400);
-        assert!(String::from_utf8_lossy(r.body()).contains("<HeaderName>Access-Control-Request-Method</HeaderName>"));
+        assert!(body(&r).contains("<MessageDetails>Missing required CORS header Access-Control-Request-Method</MessageDetails>"));
+        let r = preflight(&pre_from("http://nope.example", "DELETE", ""), &rules);
+        assert!(body(&r).contains("<MessageDetails>No CORS rules matches this request</MessageDetails>"), "{}", body(&r));
+        // table: the OData document, no byte order mark
+        let r = preflight_table(&req("OPTIONS", &[("access-control-request-method", "GET")]), &rules);
+        assert_eq!(
+            (r.status().as_u16(), hv(&r, "x-ms-error-code"), hv(&r, "content-type")),
+            (400, Some("InvalidHeaderValue"), Some("application/xml"))
+        );
+        let b = body(&r);
+        assert!(b.starts_with("<?xml version=\"1.0\" encoding=\"utf-8\"?><m:error xmlns:m=\"http://schemas.microsoft.com/ado/2007/08/dataservices/metadata\"><m:code>InvalidHeaderValue</m:code><m:message xml:lang=\"en-US\">A required CORS header is not present.\nRequestId:r\nTime:"), "{b}");
+        assert!(b.ends_with("</m:message></m:error>") && !b.contains("MessageDetails"));
+        let r = preflight_table(&pre_from("http://nope.example", "DELETE", ""), &rules);
+        assert!(body(&r).contains("<m:code>CorsPreflightFailure</m:code>"), "{}", body(&r));
     }
 
     #[test]
     fn actual_requests() {
-        let rules = vec![rule("http://a.example", "GET,PUT", "", "x-ms-meta-*", 0), rule("*", "GET", "", "", 0)];
-        let mut ok = Resp::new(200u16).build();
+        let rules = vec![rule("http://a.example", "GET,PUT", "", "x-ms-meta-*,x-lit", 0), rule("*", "GET", "", "x-star", 0)];
+        let answer = || Resp::new(200u16).header("x-ms-request-id", "i").header("x-ms-version", "v").header("x-ms-meta-b", "1").build();
+        let mut ok = answer();
         apply(&mut ok, &req("GET", &[("origin", "http://a.example")]), &rules);
         assert_eq!(hv(&ok, "access-control-allow-origin"), Some("http://a.example"));
-        assert_eq!(hv(&ok, "access-control-expose-headers"), Some("x-ms-meta-*"));
+        assert_eq!(hv(&ok, "access-control-allow-credentials"), Some("true"));
+        // a name with `*` stands for the headers this answer has; a plain name is listed as written
+        assert_eq!(hv(&ok, "access-control-expose-headers"), Some("x-ms-meta-b,x-lit"));
         assert_eq!(hv(&ok, "vary"), Some("Origin"));
         // PUT is not cached by browsers: no Vary
-        let mut put = Resp::new(200u16).build();
+        let mut put = answer();
         apply(&mut put, &req("PUT", &[("origin", "http://a.example")]), &rules);
         assert_eq!(hv(&put, "access-control-allow-origin"), Some("http://a.example"));
         assert!(hv(&put, "vary").is_none());
-        // the wildcard rule for another origin
-        let mut star = Resp::new(200u16).build();
+        // the rule with `*`: `*` back, no credentials, no Vary
+        let mut star = answer();
         apply(&mut star, &req("GET", &[("origin", "http://z.example")]), &rules);
         assert_eq!(hv(&star, "access-control-allow-origin"), Some("*"));
-        assert!(hv(&star, "vary").is_none());
+        assert_eq!(hv(&star, "access-control-expose-headers"), Some("x-star"));
+        assert!(hv(&star, "access-control-allow-credentials").is_none() && hv(&star, "vary").is_none());
+        // no Origin: the rule with `*` still applies; with only exact origins a GET gets Vary
+        let mut none = answer();
+        apply(&mut none, &req("GET", &[]), &rules);
+        assert_eq!(hv(&none, "access-control-allow-origin"), Some("*"));
+        let mut exact = answer();
+        apply(&mut exact, &req("GET", &[]), &rules[..1]);
+        assert!(hv(&exact, "access-control-allow-origin").is_none());
+        assert_eq!(hv(&exact, "vary"), Some("Origin"));
         // no matching rule: nothing but Vary on GET
-        let mut none = Resp::new(200u16).build();
+        let mut none = answer();
         apply(&mut none, &req("DELETE", &[("origin", "http://z.example")]), &rules);
         assert!(hv(&none, "access-control-allow-origin").is_none() && hv(&none, "vary").is_none());
-        let mut none = Resp::new(200u16).build();
+        let mut none = answer();
         apply(&mut none, &req("GET", &[("origin", "http://z.example")]), &rules[..1]);
         assert!(hv(&none, "access-control-allow-origin").is_none());
         assert_eq!(hv(&none, "vary"), Some("Origin"));
-        // no Origin, or no rules: untouched
-        let mut plain = Resp::new(200u16).build();
-        apply(&mut plain, &req("GET", &[]), &rules);
+        // no rules: untouched
+        let mut plain = answer();
         apply(&mut plain, &req("GET", &[("origin", "http://a.example")]), &[]);
         assert!(plain.headers().get("access-control-allow-origin").is_none() && plain.headers().get("vary").is_none());
     }

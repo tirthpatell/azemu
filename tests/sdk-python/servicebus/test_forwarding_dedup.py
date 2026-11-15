@@ -7,18 +7,22 @@ consumed; scheduled messages take part), Microsoft's test_queue_message_duplicat
 
 from datetime import timedelta
 
+import pytest
 from azure.servicebus import ServiceBusMessage
 
 from sbutil import DLQ, bodies, body_of, drain_bodies, drain_sub, receive_n, send_n, utcnow, wait_until
 
 
 # -- auto-forwarding ----------------------------------------------------------------------------
-def test_queue_forwards_messages_to_target_queue(sb, new_queue):
+# Real Service Bus refuses a receiver (a DLQ receiver too, when the dead letters are forwarded) on an entity that
+# forwards: `amqp:not-allowed`, "Cannot create a message receiver on an entity with auto-forwarding enabled", and so does
+# the emulator. "The source is empty" is therefore checked through the runtime counts.
+def test_queue_forwards_messages_to_target_queue(sb, admin, new_queue):
     target = new_queue("target")
     source = new_queue("source", forward_to=target)
     sent = send_n(sb, source, 5)
     assert drain_bodies(sb, target) == sent
-    assert drain_bodies(sb, source) == []
+    assert admin.get_queue_runtime_properties(source).total_message_count == 0
 
 
 def test_forwarded_message_keeps_body_and_properties(sb, new_queue):
@@ -36,14 +40,14 @@ def test_forwarded_message_keeps_body_and_properties(sb, new_queue):
         assert m.delivery_count == 0
 
 
-def test_forwarded_message_has_enqueued_sequence_number_of_its_first_queue(sb, new_queue):
-    # SDK docs: enqueued_sequence_number reflects the sequence number first assigned, for auto-forwarded messages
+def test_forwarded_message_has_no_enqueued_sequence_number(sb, new_queue):
+    # Azure sets x-opt-enqueue-sequence-number only on a message that came through a topic (checked in November 2026)
     target = new_queue("target")
     source = new_queue("source", forward_to=target)
     send_n(sb, source, 1)
     with sb.get_queue_receiver(target, max_wait_time=3) as r:
         (m,) = receive_n(r, 1, max_wait=3)
-        assert m.enqueued_sequence_number
+        assert m.enqueued_sequence_number is None
 
 
 def test_forwarding_keeps_order(sb, new_queue):
@@ -53,15 +57,17 @@ def test_forwarding_keeps_order(sb, new_queue):
     assert drain_bodies(sb, target) == sent
 
 
-def test_forwarding_chain_of_three_queues(sb, new_queue):
+def test_forwarding_chain_of_three_queues(sb, admin, new_queue):
     c = new_queue("c")
     b = new_queue("b", forward_to=c)
     a = new_queue("a", forward_to=b)
     sent = send_n(sb, a, 3)
     assert drain_bodies(sb, c) == sent
-    assert drain_bodies(sb, b) == [] and drain_bodies(sb, a) == []
+    assert admin.get_queue_runtime_properties(b).total_message_count == 0
+    assert admin.get_queue_runtime_properties(a).total_message_count == 0
 
 
+@pytest.mark.azure_differs("Azure keeps forward_to set by an update in the description but did not forward new messages in a minute; unexplained, so the emulator forwards at once")
 def test_forwarding_set_by_update_applies_to_new_messages(sb, admin, new_queue):
     target = new_queue("target")
     source = new_queue("source")
@@ -73,7 +79,7 @@ def test_forwarding_set_by_update_applies_to_new_messages(sb, admin, new_queue):
     assert drain_bodies(sb, target) == ["after-0"]
 
 
-def test_dead_lettered_messages_are_forwarded_to_the_dlq_target(sb, new_queue):
+def test_dead_lettered_messages_are_forwarded_to_the_dlq_target(sb, admin, new_queue):
     target = new_queue("dlq-target")
     source = new_queue("source", forward_dead_lettered_messages_to=target)
     send_n(sb, source, 1, prefix="dl")
@@ -86,7 +92,7 @@ def test_dead_lettered_messages_are_forwarded_to_the_dlq_target(sb, new_queue):
         assert d.dead_letter_reason == "why"
         assert d.dead_letter_error_description == "because"
         assert d.dead_letter_source == source
-    assert drain_bodies(sb, source, sub_queue=DLQ) == []
+    assert admin.get_queue_runtime_properties(source).dead_letter_message_count == 0
 
 
 def test_max_delivery_count_dead_letters_are_forwarded_too(sb, new_queue):
@@ -108,7 +114,7 @@ def test_subscription_forwards_to_queue(sb, admin, new_topic, new_sub, new_queue
     sub = new_sub(topic, forward_to=target)
     sent = send_n(sb, topic, 4, topic=True)
     assert drain_bodies(sb, target) == sent
-    assert drain_sub(sb, topic, sub) == []
+    assert admin.get_subscription_runtime_properties(topic, sub).total_message_count == 0
 
 
 def test_subscription_forward_only_gets_filtered_messages(sb, admin, new_topic, new_sub, new_queue):
@@ -135,7 +141,8 @@ def test_subscription_dead_letters_are_forwarded_to_queue(sb, new_topic, new_sub
     with sb.get_queue_receiver(target, max_wait_time=3) as t:
         (d,) = receive_n(t, 1, max_wait=3)
         assert d.dead_letter_reason == "why"
-        assert d.dead_letter_source == sub
+        # Azure names the source of a subscription's dead letter with its topic (checked in November 2026)
+        assert d.dead_letter_source == f"{topic}/Subscriptions/{sub}"
 
 
 def test_topic_to_subscription_to_queue_to_queue(sb, new_topic, new_sub, new_queue):

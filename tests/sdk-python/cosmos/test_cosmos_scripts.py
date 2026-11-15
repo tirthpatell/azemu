@@ -2,7 +2,7 @@
 
 import pytest
 from azure.cosmos import documents
-from azure.cosmos.exceptions import CosmosResourceExistsError, CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceExistsError, CosmosResourceNotFoundError
 
 from cosmosutil import uid
 
@@ -77,14 +77,30 @@ def _trigger(i="t1", body="function() {var x = 10;}", **kw):
 def test_trigger_create_returns_definition(container):
     t = container.scripts.create_trigger(_trigger())
     assert t["id"] == "t1" and t["body"] == "function() {var x = 10;}"
+    assert t["triggerType"].lower() == "pre" and t["triggerOperation"].lower() == "all"
+
+
+def test_trigger_type_and_operation_come_back_as_sent(container):
+    # Azure keeps the case it was sent (the SDK's constants are lower case); any case is accepted (checked in November 2026)
+    t = container.scripts.create_trigger(_trigger(triggerType="Pre", triggerOperation="All"))
     assert t["triggerType"] == "Pre" and t["triggerOperation"] == "All"
+    # "upsert" is a trigger operation too
+    container.scripts.create_trigger(_trigger("t4", triggerOperation="upsert"))
+    t = container.scripts.create_trigger(_trigger("t2", triggerType="POST", triggerOperation="create"))
+    assert t["triggerType"] == "POST" and t["triggerOperation"] == "create"
+    assert container.scripts.get_trigger("t2")["triggerType"] == "POST"
+    for bad, text in ((dict(triggerType="middle"), "The input trigger type 'middle' is invalid. Ensure to provide a valid trigger type."),
+                      (dict(triggerOperation="read"), "The input trigger request type 'read' is invalid. Ensure to provide a valid trigger request type.")):
+        with pytest.raises(CosmosHttpResponseError) as e:
+            container.scripts.create_trigger(_trigger("t3", **bad))
+        assert e.value.status_code == 400 and text in str(e.value), str(e.value)
 
 
 @pytest.mark.not_on_vnext(reason="vnext lower-cases triggerType/triggerOperation")
 def test_trigger_get_and_list(container):
     container.scripts.create_trigger(_trigger("t1"))
     container.scripts.create_trigger(_trigger("t2", triggerType=documents.TriggerType.Post, triggerOperation=documents.TriggerOperation.Delete))
-    assert container.scripts.get_trigger("t2")["triggerType"] == "Post"
+    assert container.scripts.get_trigger("t2")["triggerType"].lower() == "post"
     assert sorted(t["id"] for t in container.scripts.list_triggers()) == ["t1", "t2"]
 
 

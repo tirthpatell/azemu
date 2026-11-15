@@ -123,7 +123,7 @@ async fn sending_to_a_session_queue_without_session_id_is_rejected() {
     let mut c = e.client().await;
     let s = sender(&mut c, "sq").await;
     match c.send_message_wait(s, &msg("x")).await {
-        Some(DeliveryState::Rejected { error: Some(err) }) => assert_eq!(err.condition, "com.microsoft:argument-error"),
+        Some(DeliveryState::Rejected { error: Some(err) }) => assert_eq!(err.condition, "amqp:not-allowed"),
         other => panic!("{other:?}"),
     }
 }

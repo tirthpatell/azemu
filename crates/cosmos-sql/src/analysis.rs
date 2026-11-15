@@ -167,7 +167,8 @@ fn partial_item(c: &Ctx, e: &Expr) -> String {
         Some((kind @ (AggregateKind::Min | AggregateKind::Max), arg)) if c.opts.composite_min_max => {
             let a = c.etext(arg);
             let (name, f) = if kind == AggregateKind::Min { ("min", "MIN") } else { ("max", "MAX") };
-            format!("{{\"item\": {{\"{name}\": {f}({a}), \"count\": COUNT({a})}}}}")
+            // `item` is the bare value (the Python SDK reads it), `item2` the composite (the Java and JavaScript SDKs read it)
+            format!("{{\"item\": {f}({a}), \"item2\": {{\"{name}\": {f}({a}), \"count\": COUNT({a})}}}}")
         }
         _ => format!("{{\"item\": {}}}", c.etext(e)),
     }
@@ -254,12 +255,12 @@ fn rewrite(c: &Ctx, top: Option<u64>) -> String {
         s.push_str(&format!("\nGROUP BY {}", gs.join(", ")));
         return s;
     }
-    if q.is_aggregate && q.order_by.is_empty() {
+    if q.is_aggregate && q.group_by.is_empty() {
         if let (SelectSpec::Items(items), true) = (&q.select.spec, c.opts.non_value_aggregate) {
             // one group: every partition answers one object, `{"payload": {alias: {"item": partial}, ..}}`
             let parts: Vec<String> =
                 items.iter().zip(item_names(items)).map(|(i, n)| format!("{}: {}", json_str(&n), group_item(c, &i.expr))).collect();
-            let mut s = format!("SELECT VALUE {{\"payload\": {{{}}}}}{}", parts.join(", "), from);
+            let mut s = format!("SELECT {{{}}} AS payload{}", parts.join(", "), from);
             if let Some(w) = orig_where {
                 s.push_str(&format!("\nWHERE {w}"));
             }
@@ -276,41 +277,57 @@ fn rewrite(c: &Ctx, top: Option<u64>) -> String {
         }
         return s;
     }
-    if !q.order_by.is_empty() {
+    if !q.order_by.is_empty() && !q.is_aggregate {
         let items: Vec<String> = q.order_by.iter().map(|o| format!("{{\"item\": {}}}", c.etext(&o.expr))).collect();
-        let order: Vec<String> =
-            q.order_by.iter().map(|o| format!("{} {}", c.etext(&o.expr), if o.descending { "DESC" } else { "ASC" })).collect();
-        // DISTINCT with ORDER BY is "ordered": every SDK removes the repeats itself (next to the previous row). Without TOP and
-        // OFFSET LIMIT the partitions can therefore send every row, with its `_rid`, which the Java SDK needs to build the
-        // continuation token of a page (`OrderByContinuationToken`: "rid must not be null"). With TOP or OFFSET LIMIT the
-        // partition must remove the repeats before it counts, so the DISTINCT form stays (and has no `_rid`).
-        let head = if q.select.distinct && (q.select.top.is_some() || top.is_some()) {
-            format!("SELECT DISTINCT {}VALUE {{\"orderByItems\": [{}], \"payload\": {}}}", top_text(c), items.join(", "), payload(c, false))
-        } else {
-            format!(
-                "SELECT {}{}._rid, [{}] AS orderByItems, {} AS payload",
-                top_text(c),
-                c.first_alias(),
-                items.join(", "),
-                payload(c, false)
-            )
+        // the ORDER BY clause as it was written (`c.n DESC, c.t`)
+        let order_text = {
+            let sp = q.order_span.expect("ORDER BY has a span");
+            let first = q.order_by[0].expr.span.start;
+            c.text(Span { start: first, end: sp.end })
         };
-        let mut s = format!("{head}{from}\nWHERE ({ORDER_BY_FILTER_PLACEHOLDER})");
-        if let Some(w) = orig_where {
-            s.push_str(&format!(" AND ({w})"));
+        // DISTINCT with ORDER BY is "ordered": every SDK removes the repeats itself, next to the previous row, so the
+        // partitions send every row (with its `_rid`, which the Java SDK needs for the continuation token of a page) and
+        // no TOP: the plan carries the count (`top`), and the filter keeps out the items without the sort value. This is
+        // what a real account plans.
+        let ordered_distinct = q.select.distinct;
+        let head = format!(
+            "SELECT {}{}._rid, [{}] AS orderByItems, {} AS payload",
+            if ordered_distinct { String::new() } else { top_text(c) },
+            c.first_alias(),
+            items.join(", "),
+            payload(c, false)
+        );
+        // `WHERE ((<original>) AND (<filter>))`, and for DISTINCT VALUE the items without the value are left out too
+        let mut filter = match &orig_where {
+            Some(w) => format!("(({w}) AND ({ORDER_BY_FILTER_PLACEHOLDER}))"),
+            None => format!("({ORDER_BY_FILTER_PLACEHOLDER})"),
+        };
+        if let (true, SelectSpec::Value(v)) = (ordered_distinct, &q.select.spec) {
+            filter = format!("({filter} AND IS_DEFINED({}))", c.etext(v));
         }
-        s.push_str(&format!("\nORDER BY {}", order.join(", ")));
+        let mut s = format!("{head}{from}\nWHERE {filter}");
+        s.push_str(&format!("\nORDER BY {order_text}"));
         return s;
     }
     if q.offset_limit.is_some() {
-        let mut s =
-            format!("SELECT {}{}{}{}", if q.select.distinct { "DISTINCT " } else { "" }, top_text(c), c.text(q.select.items_span), from);
+        // the partition sends the first offset + limit rows: `OFFSET 0 LIMIT <offset + limit>`, as a real account plans it
+        let mut s = format!("SELECT {}{}{}", if q.select.distinct { "DISTINCT " } else { "" }, c.text(q.select.items_span), from);
         if let Some(w) = orig_where {
             s.push_str(&format!("\nWHERE {w}"));
         }
+        s.push_str(&format!("\nOFFSET 0 LIMIT {}", top.unwrap_or(0)));
         return s;
     }
     String::new()
+}
+
+/// DISTINCT is "ordered" (the SDK removes the repeats next to the previous row) when the distinct value is the one the rows are
+/// sorted by (`SELECT DISTINCT VALUE c.pk ... ORDER BY c.pk`); otherwise it is unordered, as a real account plans it.
+fn distinct_matches_order(c: &Ctx) -> bool {
+    match (&c.q.select.spec, c.q.order_by.as_slice()) {
+        (SelectSpec::Value(v), [o]) => c.etext(v) == c.etext(&o.expr),
+        _ => false,
+    }
 }
 
 pub(crate) fn info(q: &Query, source: &str, params: &Params, opts: PlanOptions) -> QueryInfo {
@@ -319,9 +336,11 @@ pub(crate) fn info(q: &Query, source: &str, params: &Params, opts: PlanOptions) 
     let lim = q.offset_limit.as_ref().and_then(|o| resolve_u64(&o.limit, params));
     let top = q.select.top.as_ref().and_then(|t| resolve_u64(t, params));
 
+    // ORDER BY next to an aggregate without GROUP BY changes nothing (one row): a real account plans it as the aggregate
+    let ordered = !q.order_by.is_empty() && !(q.is_aggregate && q.group_by.is_empty());
     let distinct_type = if !q.select.distinct {
         DistinctType::None
-    } else if q.order_by.is_empty() {
+    } else if !ordered || !distinct_matches_order(&c) {
         DistinctType::Unordered
     } else {
         DistinctType::Ordered
@@ -335,12 +354,14 @@ pub(crate) fn info(q: &Query, source: &str, params: &Params, opts: PlanOptions) 
             match &q.select.spec {
                 SelectSpec::Value(e) => aggregates.extend(direct_aggregate(e).map(|a| a.0)),
                 SelectSpec::Items(items) => {
-                    aggregates.extend(items.iter().filter_map(|i| direct_aggregate(&i.expr).map(|a| a.0)));
+                    // a select list of aggregates is a group of one: the aliases carry the operators, `aggregates` is empty
                     if opts.non_value_aggregate {
                         for (i, n) in items.iter().zip(item_names(items)) {
                             aliases.push(n.clone());
                             alias_map.push((n, direct_aggregate(&i.expr).map(|a| a.0)));
                         }
+                    } else {
+                        aggregates.extend(items.iter().filter_map(|i| direct_aggregate(&i.expr).map(|a| a.0)));
                     }
                 }
                 SelectSpec::Star => {}
@@ -348,12 +369,8 @@ pub(crate) fn info(q: &Query, source: &str, params: &Params, opts: PlanOptions) 
         }
     } else {
         match &q.select.spec {
-            SelectSpec::Value(e) => {
-                // the SDKs find the operator of `SELECT VALUE <aggregate> ... GROUP BY` here, not in the alias map
-                aggregates.extend(direct_aggregate(e).map(|a| a.0));
-                aliases.push("$1".to_string());
-                alias_map.push(("$1".to_string(), direct_aggregate(e).map(|a| a.0)));
-            }
+            // the SDKs find the operator of `SELECT VALUE <aggregate> ... GROUP BY` in `aggregates`, not in the aliases
+            SelectSpec::Value(e) => aggregates.extend(direct_aggregate(e).map(|a| a.0)),
             SelectSpec::Items(items) => {
                 for (i, n) in items.iter().zip(item_names(items)) {
                     aliases.push(n.clone());
@@ -374,8 +391,12 @@ pub(crate) fn info(q: &Query, source: &str, params: &Params, opts: PlanOptions) 
         top,
         offset: off,
         limit: lim,
-        order_by: q.order_by.iter().map(|o| if o.descending { SortOrder::Descending } else { SortOrder::Ascending }).collect(),
-        order_by_expressions: q.order_by.iter().map(|o| c.etext(&o.expr)).collect(),
+        order_by: if ordered {
+            q.order_by.iter().map(|o| if o.descending { SortOrder::Descending } else { SortOrder::Ascending }).collect()
+        } else {
+            Vec::new()
+        },
+        order_by_expressions: if ordered { q.order_by.iter().map(|o| c.etext(&o.expr)).collect() } else { Vec::new() },
         group_by_expressions: q.group_by.iter().map(|g| c.etext(g)).collect(),
         group_by_aliases: aliases,
         aggregates,
@@ -493,5 +514,56 @@ pub(crate) fn udf_names(q: &Query, out: &mut Vec<String>) {
                 udf_names(sq, out);
             }
         }
+    }
+}
+
+/// The query features a client must declare (`x-ms-cosmos-supported-query-features`) to be served this query across
+/// partitions. A client that lacks one gets a `400` that names it (from a real account, November 2026).
+pub(crate) fn required_features(q: &Query) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    match &q.select.spec {
+        SelectSpec::Value(_) if q.is_aggregate && q.group_by.is_empty() => out.push("Aggregate"),
+        SelectSpec::Items(items) if items.iter().any(|i| i.expr.contains_aggregate()) => {
+            out.push("NonValueAggregate");
+            if items.iter().filter(|i| i.expr.contains_aggregate()).count() > 1 {
+                out.push("MultipleAggregates");
+            }
+        }
+        _ => {}
+    }
+    if !q.group_by.is_empty() {
+        out.push("GroupBy");
+    }
+    if q.select.distinct {
+        out.push("Distinct");
+    }
+    if q.select.top.is_some() {
+        out.push("Top");
+    }
+    if q.offset_limit.is_some() {
+        out.push("OffsetAndLimit");
+    }
+    match q.order_by.len() {
+        0 => {}
+        1 => out.push("OrderBy"),
+        _ => out.push("MultipleOrderBy"),
+    }
+    out
+}
+
+/// `SELECT VALUE <expression with an aggregate in it>`, where the expression is more than the aggregate itself
+/// (`COUNT(1) + 1`, `{a: COUNT(1)}`): a cross partition query cannot be merged.
+pub(crate) fn has_composed_aggregate(q: &Query) -> bool {
+    match &q.select.spec {
+        SelectSpec::Value(e) => e.contains_aggregate() && direct_aggregate(e).is_none(),
+        _ => false,
+    }
+}
+
+/// A select list (no VALUE) with an aggregate in one of its items.
+pub(crate) fn has_select_list_aggregate(q: &Query) -> bool {
+    match &q.select.spec {
+        SelectSpec::Items(items) => items.iter().any(|i| i.expr.contains_aggregate()),
+        _ => false,
     }
 }

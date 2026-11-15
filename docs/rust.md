@@ -1,7 +1,7 @@
 # Using azemu from Rust
 
 This page is for a Rust project that uses the Azure SDK for Rust. It takes you from nothing to a passing `cargo test` against the emulator, and says what
-to do where the SDK has no crate. Everything here was run on Linux x86-64 against azemu 0.1.0 with the crate versions in the table; what was not run says "not tried".
+to do where the SDK has no crate. Everything here was run on Linux x86-64 against azemu 0.2.0 with the crate versions in the table; what was not run says "not tried". On macOS one way was run on a GitHub runner; its section says which, and what comes from documentation and source only.
 
 If you only want to see one request work, the front page has it: [`README.md`](../README.md#a-first-request). A complete small project (Blob, Queue, Key Vault, Cosmos DB
 and its tests) is in [`examples/rust/`](../examples/rust/README.md).
@@ -33,7 +33,7 @@ with an *s*, `azure_security_keyvault`, `azure_messaging_servicebus`, `azure_sto
 them, all 0.21 from 2024) are no longer updated, and a crates.io search can list them before the current ones. How to tell the current ones apart: the crate name is
 singular (`azure_storage_blob`), the Key Vault crates have a suffix (`azure_security_keyvault_secrets`), the versions are 1.x, and they depend on `azure_core` 1.x.
 
-The versions below were run against azemu 0.1.0. All of them except Event Hubs sit on `azure_core` 1.1.
+The versions below were run against azemu 0.2.0. All of them except Event Hubs sit on `azure_core` 1.1.
 
 | Service | Official crate | Version run | Notes |
 |---|---|---|---|
@@ -50,6 +50,16 @@ The versions below were run against azemu 0.1.0. All of them except Event Hubs s
 | Resource Manager | **none usable** | `reqwest` | REST (section 6) |
 
 Cosmos DB 1.0.0 and 1.1.0-beta.2 both work; the suites in [`tests/sdk-rust`](../tests/sdk-rust/README.md) use the beta and the example in `examples/rust` the stable one.
+
+**Older versions, also run.** Projects are often pinned to earlier versions. These ran against azemu 0.2.0 in [`tests/sdk-rust/older`](../tests/sdk-rust/README.md), a project of its own because it cannot share a build with the 1.1 crates:
+
+| Crate | Version also run | What was run |
+|---|---|---|
+| `azure_core`, `azure_identity` | 1.0.0 | `ManagedIdentityCredential` (the two variables of section 3) and a fixed-token credential, both for Blob over https |
+| `azure_storage_blob` | 1.0.0 | create, upload, download, list and delete, over https with a credential and over plain http with an account SAS and no credential (section 5) |
+| `azure_data_cosmos` | 0.36.0 | upsert, read, create, patch, query (in one partition and across partitions), delete, `404` and `409`, with the feature `key_auth` only. This version has `create_database` and `create_container` (the 1.x `control_plane` feature does not exist in it), and it does not read `AZURE_COSMOS_BINARY_ENCODING_ENABLED`; it does read `COSMOS_DISABLE_IMDS`. The database and container were made with the two REST calls of section 7 in most of the tests, and with the crate's own calls in one |
+
+Versions before 0.36.0 of the Cosmos crate were not tried. Cargo picks the newest compatible version of every other crate, so these versions ran on the same TLS stack as the 1.1 ones (`reqwest` 0.13 and `rustls-platform-verifier` 0.7.1, from `older/Cargo.lock`): section 3 applies to them in the same way.
 
 **The `azure_core` conflict.** The newest Event Hubs crate (0.16) needs `azure_core` 1.2.0-beta, and the other current crates need 1.1, so Cargo cannot put them in one build:
 
@@ -83,18 +93,92 @@ standard ports ([`reaching-the-emulator.md`](reaching-the-emulator.md)); a path-
 
 **https, and the certificate.** The Rust crates send a token, and they refuse to send one over `http://` (`"http://.../ must use https"`, tried). azemu answers https on the same
 port, with a certificate from its own authority, so your program must trust that authority (`ca.pem`, whose path is in the ready line, and which `GET /_azemu/ca.pem` also serves).
-The Azure crates use rustls with the platform verifier, which reads `SSL_CERT_FILE` on Linux. That variable *replaces* the system list, so give it a bundle: the system list plus `ca.pem`.
-Set it before the first client is built:
+The Azure crates use rustls with the platform verifier, and what that reads depends on the system:
 
-```bash
-cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem     # Linux; on macOS the system bundle is /etc/ssl/cert.pem
-export SSL_CERT_FILE=~/.azemu/bundle.pem
-```
+- **Linux:** the verifier reads the system list, and `SSL_CERT_FILE` *replaces* it, so give it a bundle: the system list plus `ca.pem`. Set it before the first client is built:
+
+  ```bash
+  cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem
+  export SSL_CERT_FILE=~/.azemu/bundle.pem
+  ```
+
+- **macOS:** `SSL_CERT_FILE` is not read. The authority has to be trusted in the Keychain: see [macOS](#macos) below. The bundle above and the test kit's bundle do nothing there.
+- **A client at a time, on any system:** Blob, Queue and Key Vault clients can be given the certificate in code, with no variable and no Keychain: see
+  [One client at a time](#one-client-at-a-time-no-variable-no-keychain) below.
 
 **Without it, a request does not fail at once.** The Blob client's default retry policy retried the certificate error for 81 seconds and then reported
 `InvalidCertificate(UnknownIssuer)`, and the emulator logs nothing because the handshake fails in the client. Turn the retries off in test code (section 5) and the same mistake fails in 40 milliseconds. The
-Cosmos DB and Event Hubs clients failed at once in the same situation (tried: 0.4 s and 0.1 s). The Blob client can also take a `reqwest::Client` that trusts `ca.pem` through `ClientOptions.transport`
-(section 8), which needs no variable; Cosmos DB and Event Hubs read only `SSL_CERT_FILE`. [`azemu-testkit`](#8-tests-with-cargo-test) sets it for you.
+Cosmos DB and Event Hubs clients failed at once in the same situation (tried: 0.4 s and 0.1 s). [`azemu-testkit`](#8-tests-with-cargo-test) sets `SSL_CERT_FILE` for you (Linux).
+
+### macOS
+
+On macOS the crates' TLS asks the system Keychain whether to trust a certificate, and it does not read `SSL_CERT_FILE`. The recipe for Linux above, and the bundle that `azemu-testkit` writes, therefore
+work on Linux only. This is read from the source, not run: the Azure crates use `reqwest` 0.13 with the `rustls-platform-verifier` crate (0.7.1), whose file for Apple systems
+(`src/verification/apple.rs`) decides with Security.framework's `SecTrust` and has no code that reads the variable; the code that reads it (through `rustls-native-certs`) is in `src/verification/others.rs`,
+which is built for other Unix systems only. The Event Hubs 0.15 crate also links a second TLS stack (`native-tls`), which on macOS is Security.framework as well (expected, not looked up). Windows works the same way in kind (the
+system store); not tried.
+
+**What was run:** the system-wide command below (`sudo security add-trusted-cert -d ...` into the System keychain), on a GitHub runner with macOS 26 on Apple silicon, in November 2026: with it the testkit example and the Blob, Cosmos DB and identity tests of the Rust suite passed over https, with no `SSL_CERT_FILE`. **Not run on macOS:** the command for one user's login keychain, the commands that remove the trust, and the certificate given in code. Those are written from Apple's documentation of `security`; if one of them does not do what is written, the documentation of your macOS version wins.
+
+Trust the authority for one user (macOS asks for your password once):
+
+```bash
+security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ~/.azemu/ca.pem
+```
+
+On a CI runner, or for every user of the machine (needs an administrator):
+
+```bash
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain /path/to/ca.pem
+```
+
+Take it out again (the name is the certificate's: `azemu local CA`):
+
+```bash
+security remove-trusted-cert ~/.azemu/ca.pem                                           # the trust setting of the user
+security delete-certificate -c "azemu local CA" ~/Library/Keychains/login.keychain-db  # the certificate itself
+sudo security remove-trusted-cert -d /path/to/ca.pem                                   # the same for the system's keychain
+sudo security delete-certificate -c "azemu local CA" /Library/Keychains/System.keychain
+```
+
+**Why this is fine for the default authority.** The key that signs certificates (`ca.key`) belongs to an issuing certificate that has X.509 name constraints (`crates/core/src/tls.rs`), and the private key of the root that
+you trust (`ca.pem`) is thrown away when the files are made. So the only certificates that chain to the root can name `localhost`, anything under `.localhost`, the loopback addresses and what you gave with `--tls-name`, and nothing else
+(a test in that crate checks that a client library refuses another name; macOS's own check was not tried). **A CA made with `--tls-name core.windows.net` or another real name is different:** it can sign for those real names, so
+trusting it in the Keychain makes your Mac trust whoever can read `ca.key` as that service. Do not put such a CA in a Keychain; use [one client at a time](#one-client-at-a-time-no-variable-no-keychain) for it
+([`SECURITY.md`](../SECURITY.md), [`reaching-the-emulator.md`](reaching-the-emulator.md#https-and-the-emulators-certificate-authority)).
+
+**Keep one authority.** The authority is made again when the certificate directory is new, when the set of `--tls-name` changes, and when it is within 30 days of its end (2 years). Each new one has to be trusted again, and the old one stays in the Keychain until you remove it.
+So on macOS start azemu with the same `--cert-dir` every time (the default `~/.azemu` is one) and the same `--tls-name` values. In a container, mount a volume on `/home/azemu/.azemu` and trust the `ca.pem` from there once
+(without the volume the authority is new at every start).
+
+**`azemu-testkit` on macOS.** The kit starts an emulator for each test program, in a directory of its own (`target/tmp/azemu-testkit-<program>`), so each test program would have its own authority, and `cargo clean` deletes them.
+Use one emulator that stays, with one authority trusted in the Keychain, and tell the kit about it:
+
+```bash
+azemu &                                          # the default certificate directory, ~/.azemu
+security add-trusted-cert -r trustRoot -k ~/Library/Keychains/login.keychain-db ~/.azemu/ca.pem
+AZEMU_GATEWAY=http://127.0.0.1:4577 cargo test   # the kit uses that emulator instead of starting one
+```
+
+The kit has no setting for a fixed certificate directory. The names under `.localhost` that the examples use resolve on macOS 26 and newer only; before that use `--standard-ports` and the standard-port addresses of the kit ([`reaching-the-emulator.md`](reaching-the-emulator.md)).
+The manual `macos-rust` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) does these steps on a GitHub runner (start it by hand); it passed on macOS 26 in November 2026.
+
+### One client at a time (no variable, no Keychain)
+
+Blob, Queue and Key Vault clients take the certificate in code: a `reqwest::Client` (use `reqwest` 0.13, the version the Azure crates use) that has `ca.pem` added, given as the client's transport. It works on every system and does not touch the
+Keychain or the system list, so it is also the way for a CA made with real names:
+
+```rust
+use std::sync::Arc;
+use azure_core::http::{ClientOptions, RetryOptions, Transport};
+
+let pem = std::fs::read("/path/to/ca.pem")?;
+let http = reqwest::Client::builder().tls_certs_merge(vec![reqwest::Certificate::from_pem(&pem)?]).build()?;
+let client_options = ClientOptions { transport: Some(Transport::new(Arc::new(http))), retry: RetryOptions::none(), ..Default::default() };
+```
+
+Pass `client_options` as in section 5. Tried on Linux with no `SSL_CERT_FILE`: a Blob, a Queue and a Key Vault client each made a request over https with it. On macOS the verifier adds the certificate to the system's roots for that client
+(from `apple.rs`, as above; not run). **The Cosmos DB and Event Hubs clients have no such option**: they need the authority in the Keychain (macOS) or in `SSL_CERT_FILE` (Linux).
 
 **Credentials.** azemu accepts any bearer token. The crates' own READMEs use `DeveloperToolsCredential`, which runs the `az` program and needs a sign-in; against azemu it fails with
 `AzureCliCredential authentication failed. az not found on PATH` (tried). `azure_identity` has no `DefaultAzureCredential`. Use one of:
@@ -107,7 +191,12 @@ Cosmos DB and Event Hubs clients failed at once in the same situation (tried: 0.
 
 - in tests, a credential of your own that returns a fixed token for code that takes `Arc<dyn TokenCredential>`. (`azemu-testkit` sets the two variables for you, so `ManagedIdentityCredential` works in tests.)
 
-`ClientSecretCredential` also works if you set `ClientOptions.cloud` to a custom cloud whose `authority_host` is `https://login.localhost:<port>` (it is covered by `tests/sdk-rust`; not tried on this page).
+`ClientSecretCredential` and `WorkloadIdentityCredential` also work if you set `ClientOptions.cloud` to a custom cloud whose `authority_host` is `https://localhost:<port>`
+(`https://azemu:4577` between containers), or `https://login.localhost:<port>`. Both are covered by `tests/sdk-rust` (`azure_identity` 1.0.0; for `WorkloadIdentityCredential` the token
+file may hold any text). The Rust credentials build `<authority host>/{tenant}/oauth2/v2.0/token` from the host alone: they **drop any path in the authority**, so the documented
+`https://localhost:<port>/_azemu/identity/login` form does not work with them, and they **refuse an `http://` authority**. azemu therefore also answers the Entra token paths at the
+root of the gateway (`https://localhost:<port>/{tenant}/oauth2/v2.0/token`), which is what an authority without a path reaches. `AZURE_AUTHORITY_HOST=https://localhost:<port>` is read by the crate when the credential's options name no cloud (from the crate's source;
+not run).
 
 **Cosmos DB keys.** azemu accepts any key, but the Rust SDK computes the signature itself and needs valid base64: `k` fails inside the client (`401/20402 ... failed to compute HMAC-SHA256
 signature`, tried) before anything is sent. Use the well-known emulator key from [`services/cosmos.md`](services/cosmos.md#using-it) (`azemu_testkit::COSMOS_EMULATOR_KEY`).
@@ -116,7 +205,7 @@ signature`, tried) before anything is sent. Use the well-known emulator key from
 
 | Setting | Why |
 |---|---|
-| `SSL_CERT_FILE` (section 3) | trust for azemu's certificate authority |
+| `SSL_CERT_FILE` (section 3) | trust for azemu's certificate authority, on Linux. On macOS the authority goes in the Keychain instead ([macOS](#macos)) |
 | `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` | only if you use `ManagedIdentityCredential` |
 | `AZURE_COSMOS_BINARY_ENCODING_ENABLED=false` (or `BinaryEncodingOptions::new().with_enabled(false)` on the client builder) | the Cosmos crate sends binary-encoded bodies by default; azemu reads JSON. Forgetting it gives a `400` whose text says exactly this (tried) |
 | `COSMOS_DISABLE_IMDS=1` | otherwise each Cosmos client waits 2 seconds for Azure's instance metadata service at `169.254.169.254` before its first request (tried: 2.1 s, and 0.14 s with the variable). On a GitHub-hosted runner, which is an Azure machine, the SDK reads the runner's real metadata instead |
@@ -150,6 +239,36 @@ let queue = QueueServiceClient::new(
 
 A container or a queue exists only after `create`; a second `create` of the same name answers `409 ContainerAlreadyExists`, as Azure does. With no credential at all
 the clients work only for a URL that carries a SAS or for a public container; the other requests are refused (see "Credentials are checked loosely" in the front page). The crates have no Shared Key, connection string or SAS generation.
+
+**Blob with no credential and no certificate: an account SAS over plain http.** A Blob client built with no credential sends no token, so it may use `http://`, which needs no trust setting at all (not even on macOS: no TLS is involved; not run there).
+The emulator checks a SAS for the development account `devstoreaccount1`, so sign one with its well-known key (this ran with `azure_storage_blob` 1.1.0 and with 1.0.0; `hmac` 0.12, `sha2` 0.10 and `base64` 0.22 are dev-dependencies):
+
+```rust
+use base64::{engine::general_purpose::STANDARD, Engine};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
+
+const KEY: &str = "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";   // the well-known development key
+
+/// An account SAS for Blob (read, write, delete, list, add, create; the service, containers and blobs). The key is public, so a far expiry does no harm.
+fn dev_sas() -> String {
+    let (sp, ss, srt, se, spr, sv) = ("rwdlac", "b", "sco", "2099-12-31T00:00:00Z", "https,http", "2020-12-06");
+    // service version 2020-12-06: account, permissions, services, resource types, start (empty), expiry, IP (empty), protocols, version, encryption scope (empty), each ending in a newline
+    let to_sign = format!("devstoreaccount1\n{sp}\n{ss}\n{srt}\n\n{se}\n\n{spr}\n{sv}\n\n");
+    let mut mac = Hmac::<Sha256>::new_from_slice(&STANDARD.decode(KEY).unwrap()).unwrap();
+    mac.update(to_sign.as_bytes());
+    let sig = STANDARD.encode(mac.finalize().into_bytes());
+    let enc = |s: &str| s.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D").replace(':', "%3A").replace(',', "%2C");
+    format!("sv={sv}&ss={ss}&srt={srt}&sp={sp}&se={}&spr={}&sig={}", enc(se), enc(spr), enc(&sig))
+}
+
+// started with --standard-ports (or --pin blob=10000); in the host-name form: http://devstoreaccount1.blob.core.localhost:4577/?{sas}
+let url = Url::parse(&format!("http://127.0.0.1:10000/devstoreaccount1?{}", dev_sas()))?;
+let blobs = BlobServiceClient::new(url, None, Some(options))?;           // no credential
+```
+
+With the standard-port address, give the account without a trailing slash (`.../devstoreaccount1`): the client then builds `.../devstoreaccount1/box/hello.txt`. A SAS with a signature that is not the right one is `403`, and a request with neither credential nor SAS is `401`
+(both tried with 1.0.0). Other account names have no key that a client can know, so there is nothing to sign with, and their SAS is not checked ([`services/blob.md`](services/blob.md#auth)).
 
 **Key Vault.** A vault reached as `{vault}.vault.localhost` needs nothing. A host with a single label (`https://localhost:10010` or `https://azemu:10010` under `--standard-ports`) makes
 the client's challenge check fail; switch it off (the same field is on the keys and certificates clients):
@@ -225,7 +344,7 @@ It needs `SSL_CERT_FILE` like the others (the crate uses OpenSSL). **Not tried**
 If your code depends on those, test that part in another language (the emulator supports them; see the service page), or against real Azure.
 
 **App Configuration, Event Grid and Resource Manager.** There is no usable crate for any of them. Call the REST API with `reqwest` and a token from `azure_identity`; azemu accepts any token.
-This ran against azemu with `reqwest` 0.13 (its default TLS reads `SSL_CERT_FILE` like the Azure crates) and the variables of section 3:
+This ran against azemu with `reqwest` 0.13 (its default TLS reads `SSL_CERT_FILE` like the Azure crates, on Linux) and the variables of section 3:
 
 ```rust
 use azure_core::credentials::TokenCredential;
@@ -281,11 +400,30 @@ Nothing below the account exists until something creates it, as on Azure. From R
   ```
 
 - **Event Grid topics:** `curl -X PUT http://localhost:4577/_azemu/eventgrid/topics/orders -d '{}'` (section 6 ran it from Rust).
-- **From a file**, loaded at start and again after every reset: `AZEMU_SERVICEBUS_CONFIG`, `AZEMU_EVENTHUBS_CONFIG`, `AZEMU_EVENTGRID_CONFIG` (formats on the service pages).
-- **Resource Manager**, as Terraform and the management SDKs do (section 6 shows the REST form for a resource group).
-- Or start with `--lenient`: queues, topics and event hubs then come into being when first used. Azure does not do this, so a test that passes only because of it would fail there. Cosmos DB databases and containers are never made for you.
+- **Cosmos DB databases and containers without an SDK call** (for a version of the Rust Cosmos crate that has no create calls, or to use the same steps with every version): two `POST`s with any HTTP client. The `Authorization` value only has to be there. Tried with `curl`
+  against a running emulator (`201` each; the same call again is `409`):
 
-`azemu-testkit` (below) has `create_event_hub` and `create_service_bus_queue`, which make these two calls.
+  ```bash
+  curl -i -X POST "http://myacct.documents.localhost:4577/dbs" \
+    -H 'Authorization: x' -H 'x-ms-version: 2018-12-31' -H 'Content-Type: application/json' -d '{"id":"app"}'
+  # HTTP/1.1 201 Created
+  # {"id":"app","_rid":"d3mxAA==","_self":"dbs/d3mxAA==/","_etag":"\"0x8DF4212488508E5\"","_colls":"colls/","_users":"users/","_ts":1794633844}
+
+  curl -i -X POST "http://myacct.documents.localhost:4577/dbs/app/colls" \
+    -H 'Authorization: x' -H 'x-ms-version: 2018-12-31' -H 'Content-Type: application/json' \
+    -d '{"id":"items","partitionKey":{"paths":["/tenantId"],"kind":"Hash","version":2}}'
+  # HTTP/1.1 201 Created
+  # {"id":"items","indexingPolicy":{...},"partitionKey":{"paths":["/tenantId"],"kind":"Hash","version":2},...}
+  ```
+
+- **Blob containers, queues, tables, Cosmos databases and containers, secrets and settings, all from one file**: a seed file, `azemu --seed seed.json` (`AZEMU_SEED`). It is made at start and again after every
+  reset, and what already exists is left as it is. This is the way when the application itself never creates them (Azure's infrastructure code does). Format and an example: [`seed.md`](seed.md).
+  With the testkit: `AZEMU_TESTKIT_ARGS="--seed tests/seed.json"` (not tried).
+- **Service Bus, Event Hubs and Event Grid from a file**, loaded at start and again after every reset: `AZEMU_SERVICEBUS_CONFIG`, `AZEMU_EVENTHUBS_CONFIG`, `AZEMU_EVENTGRID_CONFIG` (formats on the service pages; the seed file does not carry them).
+- **Resource Manager**, as Terraform and the management SDKs do (section 6 shows the REST form for a resource group).
+- Or start with `--lenient`: queues, topics and event hubs then come into being when first used. Azure does not do this, so a test that passes only because of it would fail there. Cosmos DB databases and containers are never made for you (a seed file or the two calls above make them).
+
+`azemu-testkit` (below) has `create_event_hub` and `create_service_bus_queue`, which make the two calls above, and `create_blob_container`, `create_cosmos_database` and `create_cosmos_container`.
 
 ## 8. Tests with `cargo test`
 
@@ -293,12 +431,12 @@ Nothing below the account exists until something creates it, as on Azure. From R
 
 [`crates/testkit`](../crates/testkit/README.md) is a small crate, with no dependencies of its own, that does what a test suite needs. The first call of `shared()` finds or starts one emulator for the test binary on a free port
 (`azemu` on `PATH`, or the file `AZEMU_BIN` names; or the one that `AZEMU_GATEWAY` names, if you set it), writes the certificate bundle, and sets the variables of section 4 for the process:
-`SSL_CERT_FILE`, `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, `COSMOS_DISABLE_IMDS` and `AZURE_COSMOS_BINARY_ENCODING_ENABLED`. The emulator stops when the test program ends, however it ends (it is started with
+`SSL_CERT_FILE` (Linux only: see [macOS](#macos)), `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, `COSMOS_DISABLE_IMDS` and `AZURE_COSMOS_BINARY_ENCODING_ENABLED`. The emulator stops when the test program ends, however it ends (it is started with
 `--exit-on-stdin-close`, and the system closes the pipe on its standard input). The crate also makes endpoints and unique names and resets an account. Add it as a dev-dependency:
 
 ```toml
 [dev-dependencies]
-azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.1.0" }
+azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.2.0" }
 ```
 
 (From a checkout of this repository, [`examples/rust`](../examples/rust/Cargo.toml) uses a `path` instead.) Install the matching `azemu` too (section 1). A test:
@@ -333,10 +471,12 @@ async fn upload() {
 - **Reset.** `emu.reset_account(&account)` empties one account in every service that has accounts; `emu.reset_all()` empties everything (do not call it from tests that run in parallel).
 - **Addresses.** `emu.endpoint(Service::Blob, "acct")` is `https://acct.blob.core.localhost:<port>/`; `emu.host_name(Service::EventHubs, "ns")` is the `ns.eventhub.localhost:<port>` the Event Hubs crate takes;
   `emu.standard_endpoint(...)` is the standard-port form for an emulator started with `--standard-ports`, where `.localhost` names do not resolve.
-- **What to create.** `emu.create_event_hub("ns", "hub", 2)` and `emu.create_service_bus_queue("ns", "queue")` make the two calls of section 7. `COSMOS_EMULATOR_KEY` is the Cosmos key.
+- **What to create.** `emu.create_event_hub("ns", "hub", 2)` and `emu.create_service_bus_queue("ns", "queue")` make the two calls of section 7.
+  `emu.create_blob_container("acct", "box")`, `emu.create_cosmos_database("acct", "app")` and `emu.create_cosmos_container("acct", "app", "items", "/tenantId")` make a container, a database and a
+  container with one partition key path; one that already exists is left as it is, and a refusal (a bad name) panics with the emulator's answer. `COSMOS_EMULATOR_KEY` is the Cosmos key.
 - **A certificate in code.** `emu.ca_pem()` is the text of the emulator's `ca.pem`, for a client that takes a certificate as bytes: a `reqwest::Client` built with `tls_certs_merge` and given to a Blob client as
-  `ClientOptions { transport: Some(Transport::new(Arc::new(client))), .. }` trusts the emulator without `SSL_CERT_FILE` (tried with the Blob client; the Cosmos DB and Event Hubs clients read only the variable).
-- **A running emulator.** `AZEMU_GATEWAY=http://127.0.0.1:4577 cargo test` uses that emulator instead of starting one; `AZEMU_CA_FILE` names its `ca.pem` (the testkit fetches it if you give none).
+  `ClientOptions { transport: Some(Transport::new(Arc::new(client))), .. }` trusts the emulator without `SSL_CERT_FILE` (tried with the Blob, Queue and Key Vault clients; the Cosmos DB and Event Hubs clients have no such option: [One client at a time](#one-client-at-a-time-no-variable-no-keychain)).
+- **A running emulator.** `AZEMU_GATEWAY=http://127.0.0.1:4577 cargo test` uses that emulator instead of starting one; `AZEMU_CA_FILE` names its `ca.pem` (the testkit fetches it if you give none). This is also the way on macOS, where one emulator and one authority in the Keychain are needed ([macOS](#macos)).
 - `AZEMU_TESTKIT_ARGS` adds arguments for the emulator (for example `--lenient`); `AZEMU_TESTKIT_DIR` says where its files go (default `target/tmp`, where `azemu.log` is).
 - Call `shared()` before the first Azure client is built in the test process: it sets environment variables.
 
@@ -346,7 +486,7 @@ Start the emulator outside `cargo test` (a shell step or a CI step), give the te
 
 ```bash
 azemu --cert-dir target/azemu &                  # prints the ready line; stop it with kill when the tests are done
-cat /etc/ssl/certs/ca-certificates.crt target/azemu/ca.pem > target/azemu/bundle.pem
+cat /etc/ssl/certs/ca-certificates.crt target/azemu/ca.pem > target/azemu/bundle.pem     # Linux; on macOS trust ca.pem in the Keychain instead (section 3)
 SSL_CERT_FILE=$PWD/target/azemu/bundle.pem COSMOS_DISABLE_IMDS=1 AZURE_COSMOS_BINARY_ENCODING_ENABLED=false \
   IDENTITY_ENDPOINT=http://localhost:4577/_azemu/identity/msi/token IDENTITY_HEADER=azemu cargo test
 ```
@@ -406,11 +546,11 @@ azemu never answers `429` or `503` and has no way to inject a failure, so retry 
 ## 9. CI
 
 [`examples/ci/github-actions-rust.yml`](../examples/ci/github-actions-rust.yml) is a GitHub Actions workflow for a Rust project whose tests start azemu themselves through the testkit: it installs azemu once from a tag, caches it,
-runs `cargo test`, and uploads the emulator's log (`target/tmp/azemu-testkit-*/azemu.log`) when a test fails. Nothing is published to the runner's ports, so parallel jobs do not collide. The file says which steps were run and which need the first release.
+runs `cargo test`, and uploads the emulator's log (`target/tmp/azemu-testkit-*/azemu.log`) when a test fails. Nothing is published to the runner's ports, so parallel jobs do not collide. The file says which steps were run and which need the first release. On a macOS runner the authority has to be in the keychain first (`sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.pem`; [macOS](#macos), not run), and one emulator has to stay for all the test programs: the manual `macos-rust` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) is an unverified example of both.
 
 ## 10. When something does not work
 
-- **A request hangs for a minute or more, then reports `UnknownIssuer`:** the client does not trust azemu's certificate authority (section 3).
+- **A request hangs for a minute or more, then reports `UnknownIssuer`:** the client does not trust azemu's certificate authority (section 3). **On macOS with `SSL_CERT_FILE` set and the same error:** the variable is not read there; trust the authority in the Keychain ([macOS](#macos)).
 - **`... must use https`:** the Rust crates send a token only over https (section 3).
 - **`az not found on PATH`:** you used `DeveloperToolsCredential`; use `ManagedIdentityCredential` or a fixed-token credential.
 - **`challenge resource ... doesn't match the requested domain`:** a Key Vault host with one label (section 5).
@@ -420,6 +560,10 @@ runs `cargo test`, and uploads the emulator's log (`target/tmp/azemu-testkit-*/a
 - `azemu --log-level debug` logs each request's query and headers, with credentials replaced by `<redacted>`.
 - A request refused for lack of credentials is logged with the reason, at the default level, on standard error: for example `refused PUT /c1 (restype=container): no Authorization header and no SAS in the query: the Blob SDK was probably built without a credential` (tried).
 - A `501` names the operation azemu does not have; `GET /_azemu/unsupported` lists them with counts (`DELETE` empties the list).
-- `GET /_azemu/config` shows the settings in force and where each came from; `GET /_azemu/health` the version and the services.
+- `GET /_azemu/` lists the admin endpoints (with their methods); `GET /_azemu/config` shows the settings in force and where each came from; `GET /_azemu/health` the version and the services.
+  The services that have admin endpoints of their own (`/_azemu/identity/...`, `/_azemu/eventhubs/...`, `/_azemu/eventgrid/...`) are listed there too, and `GET /_azemu/ca.pem`, `POST /_azemu/reset`, `POST /_azemu/save` and `GET /_azemu/unsupported` are the others.
+- **A TLS error between containers, with nothing else:** the name the client used is not one the certificate authority may sign for. The emulator logs that name once at WARN (`a client asked for a TLS certificate for the name 'azemu'...`)
+  and says to start it with `--tls-name azemu` or `AZEMU_TLS_NAME=azemu`. If it logs nothing, the client trusts an older `ca.pem` (a new container without a volume on `/home/azemu/.azemu` has a new authority): fetch it again.
+- **A 400 or 403 for a signature that is made up:** a Blob, Queue or Table signature that is not base64 (`sig=bad`, `replay`) is refused for every account, as Azure refuses it; one that is base64 but wrong is refused for the development account (section 3 of the Blob page: "Credentials"). Recorded traffic with placeholder signatures needs `AZEMU_LOOSE_AUTH=1`.
 - Some SDK errors print only a short text. Print them with `{:?}` (`Error: {e:?}`, or return the error from `main`) to see the cause.
 - Other languages and the settings each SDK needs: [`sdk-notes.md`](sdk-notes.md). Everything about https: [`reaching-the-emulator.md`](reaching-the-emulator.md).

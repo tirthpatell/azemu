@@ -5,6 +5,9 @@ from azure.cosmos import PartitionKey
 
 from cosmosutil import new_client, uid
 
+# Azure takes https only, so there is no plain http endpoint to try.
+pytestmark = pytest.mark.emulator_only
+
 
 @pytest.fixture
 def plain_client(http_endpoint):

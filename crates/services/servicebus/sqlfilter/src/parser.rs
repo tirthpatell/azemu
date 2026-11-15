@@ -171,6 +171,18 @@ impl Parser {
         if self.is_word("LIKE") {
             self.advance();
             let pattern = self.parse_add()?;
+            // Azure compiles the pattern as text: a number is refused when the rule is made
+            let literal = match &pattern {
+                Expr::Lit(Value::Long(_)) => Some("System.Int64"),
+                Expr::Lit(Value::Double(_)) => Some("System.Double"),
+                Expr::Lit(Value::Bool(_)) => Some("System.Boolean"),
+                _ => None,
+            };
+            if let Some(t) = literal {
+                return self.err(format!(
+                    "Expression of type '{t}' cannot be used for parameter of type 'System.Object' of method 'System.Nullable`1[System.Boolean] LikeMethod(System.Object, System.Object, System.Object)'"
+                ));
+            }
             let escape = if self.is_word("ESCAPE") {
                 self.advance();
                 Some(Box::new(self.parse_add()?))
@@ -370,7 +382,10 @@ pub(crate) fn parse_filter(sql: &str) -> Result<Expr, ParseError> {
     let e = p.parse_or()?;
     p.expect_eof()?;
     match &e {
-        Expr::Lit(Value::Bool(_)) | Expr::Param(_) | Expr::Prop(_) | Expr::PropertyFn(_) => {}
+        // Azure takes a comparison, not a bare value: `TRUE`, `FALSE` and `a` alone are refused (as a syntax error at the end of the text)
+        Expr::Lit(Value::Bool(_)) | Expr::Param(_) | Expr::Prop(_) | Expr::PropertyFn(_) => {
+            return Err(ParseError::new("the filter must be a comparison", sql.chars().count()))
+        }
         Expr::Lit(_) | Expr::NewId | Expr::Neg(_) | Expr::Plus(_) => {
             return Err(ParseError::new("the filter must be a boolean expression", 0))
         }

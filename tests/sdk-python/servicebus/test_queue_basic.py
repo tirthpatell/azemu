@@ -10,6 +10,7 @@ from azure.servicebus import ServiceBusMessage, ServiceBusMessageBatch
 from azure.servicebus.exceptions import (
     MessageSizeExceededError,
     MessagingEntityNotFoundError,
+    ServiceBusAuthenticationError,
     ServiceBusError,
 )
 
@@ -414,28 +415,26 @@ def test_send_message_with_no_body_is_received_with_body_none(sb, queue):
 
 
 @pytest.mark.no_autocreate
-@pytest.mark.emulator_only
 def test_send_to_missing_queue_raises_entity_not_found(sb):
-    # Real Service Bus: attach to a queue that does not exist is refused with amqp:not-found, and so is the emulator
+    # Real Service Bus refuses the `$cbs` token of an entity that does not exist with amqp:not-found (checked in November
+    # 2026), so the link is never attached; the Python SDK shows that as an authentication error. The emulator does the same
     # by default (skipped when it is started with AZEMU_SERVICEBUS_AUTOCREATE=1 / AZEMU_LENIENT=1).
-    with pytest.raises(MessagingEntityNotFoundError):
+    with pytest.raises(ServiceBusAuthenticationError):
         with sb.get_queue_sender("does-not-exist-q") as sender:
             sender.send_messages(ServiceBusMessage("x"))
 
 
 @pytest.mark.no_autocreate
-@pytest.mark.emulator_only
 def test_receive_from_missing_queue_raises_entity_not_found(sb):
-    with pytest.raises(MessagingEntityNotFoundError):
+    with pytest.raises(ServiceBusAuthenticationError):
         with sb.get_queue_receiver("does-not-exist-q", max_wait_time=1) as receiver:
             receiver.receive_messages(max_wait_time=1)
 
 
 @pytest.mark.no_autocreate
-@pytest.mark.emulator_only
 def test_send_to_deleted_queue_raises_entity_not_found(sb, admin, new_queue):
     name = new_queue()
     admin.delete_queue(name)
-    with pytest.raises(MessagingEntityNotFoundError):
+    with pytest.raises(ServiceBusAuthenticationError):
         with sb.get_queue_sender(name) as sender:
             sender.send_messages(ServiceBusMessage("x"))

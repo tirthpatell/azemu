@@ -5,7 +5,7 @@ service properties (logging, metrics, CORS), stored access policies and SAS. Cra
 
 **How to reach it.** `http(s)://{account}.queue.core.localhost:4577/{queue}` (any account name works without being created first). With
 `--standard-ports`: `http://azemu:10001/{account}/{queue}`, the Azurite address, and `UseDevelopmentStorage=true` works. A queue must be created before it is used;
-nothing creates a queue by naming it.
+nothing creates a queue by naming it. A seed file (`--seed`, [`docs/seed.md`](../seed.md)) makes the queues you list at start and after every reset.
 
 **Not built.** Nothing answers 501 (an unknown verb is `405 UnsupportedHttpVerb`). No quotas on queues, messages or bytes, `timeout` is ignored, Entra audience
 checks do not exist. Signatures are verified only for `devstoreaccount1`; a SAS is checked for expiry and permissions for every account.
@@ -122,25 +122,38 @@ InvalidQueryParameterValue`.
 
 ## Authentication
 
+**Credentials Azure refuses without a key.** These are checked for every account name. Each was tried against real Azure in November 2026 (a general-purpose v2 account) and the answers copied:
+
+- A Shared Key or Shared Key Lite header whose signature is not base64 (`replay`, `Sanitized`, empty, no colon, no account name) is `400 InvalidAuthenticationInfo`. Base64 of any size is read: a wrong one is the `403` below.
+- A SAS `sig` that is empty is `403 AuthenticationFailed` with the detail `sig is mandatory. Cannot be empty`; one that is not base64, `Signature fields not well formed.`; one that is not 32 bytes, `Signature size is invalid`. White space in a signature is ignored, as Azure does.
+- A SAS `sv` that is not a date from 2012-02-12 on, or lies too far ahead, is `403 AuthenticationFailed` (detail `sv is either not in the correct format or is not equal or later than version 2012-02-12`); a SAS with no `sv`, `sv is mandatory. Cannot be empty`.
+- An `x-ms-version` that is not a date from 2008-10-27 on, or lies too far ahead, is `400 InvalidHeaderValue`.
+- The date of a Shared Key request (`x-ms-date`, else `Date`) more than 15 minutes old is `403 AuthenticationFailed` with `Request date header too old: '<date>'`; no date is `Request date header not specified`; one that cannot be read is `The Date header in the request is incorrect.` A date in the future is not refused, at any distance (tried up to 30 days).
+- An `Authorization` header of one word, or `Bearer` with no token, is `400 InvalidAuthenticationInfo`; a scheme Azure does not know (`Foo bar`) is `403 AuthenticationFailed` (the detail is `Authentication scheme Foo is not supported`).
+- A request with no `x-ms-version` is a Shared Key request of the old kind: its string to sign is the one of Shared Key Lite (Azure refuses a signature made the SDK way for it).
+
+`AZEMU_LOOSE_AUTH=1` (read once at start) turns off everything in this list that is about signatures and dates: no signature is looked at, whatever its form, and the date is not checked. It is for replaying recorded traffic (`tools/replay` starts azemu with it), whose requests carry placeholder signatures such as `SharedKey devstoreaccount1:replay` and `sig=Sanitized` and the dates of the day they were recorded, and for a tool whose SAS layout azemu does not know. A warning at start says it is on.
+
+Not copied: a bearer token is never looked at, so Azure's `401` for a token that is garbage is not produced (there is no tenant to ask, and there are no role assignments); a `Shared Key` header that names another account than the request is not refused for an account other than the development account (every account name exists here); azemu accepts any `x-ms-version` and `sv` date inside the range, where Azure takes only the versions it has published (it refuses 2013-01-01); for an `x-ms-version` Azure refuses, the answer carries no `x-ms-error-code` or `x-ms-version` header on Azure and carries them here; the detail text of a Shared Key mismatch has its quotes written as `&apos;` (Azure writes `'`; both are the same XML).
+
 **Signature checks.** For the development account `devstoreaccount1` (the only account
 whose key a client can know) the signature of a Shared Key / Shared Key Lite request and of a SAS is verified: `SharedKey` and `SharedKeyLite` headers, account SAS, queue SAS and user delegation SAS. A well-formed
 signature (base64 of 32 bytes) that does not match is `403 AuthenticationFailed` with an
 `AuthenticationErrorDetail` ("The MAC signature found in the HTTP request ... is not the same as
 any computed signature. Server used following string to sign: ..." for Shared Key, "Signature did
 not match. String to sign used was ..." for a SAS). Because the signed resource is part of the
-signature, a SAS for one queue does not open another. Not checked, by design:
+signature, a SAS for one queue does not open another. The signature itself is not compared, by design, for:
 
-- any other account name (the key is invented by azemu, no client can know it);
-- a signature that is plainly a placeholder: not base64 of 32 bytes (the replay tool sends
-  `SharedKey devstoreaccount1:replay`, recordings carry `sig=Sanitized`);
+- any other account name (the key is invented by azemu, no client can know it; the form of its signatures is checked as above);
 - a SAS whose layout sources disagree on (user delegation SAS before 2020-02-10, signed request
   headers / query parameters `srh` / `srq`): the layouts are tried and, if none matches, the request
   is accepted and logged at debug level. A false rejection of a legitimate client is the worst
   outcome, so doubt means accept. (A SAS with an `sv` newer than `2026-12-06`, the Go SDK's, is
   checked with the newest layout and refused when it does not match; the error detail says that the
   version is newer than the layouts azemu knows and names `AZEMU_LOOSE_AUTH=1`, in case a newer SDK
-  changed the layout.);
-- `AZEMU_LOOSE_AUTH=1` in the environment (read once at start) turns every signature check off.
+  changed the layout.).
+
+A signature that is made up (`sig=bad` is not base64 of 32 bytes) is refused for every account, so a test that expects a refusal gets one for the right reason. To test a wrong signature that is well formed, change one character of a real one.
 
 Expiry, start, permission, resource-type, protocol and stored-policy checks below still apply to
 every account. SAS layouts implemented (`azemu_core::storage::sig`): queue SAS 2012-02-12, 2013-08-15, 2015-04-05 (and later unchanged); account SAS 2015-04-05, 2020-12-06; user delegation SAS 2018-11-09 to 2025-07-05. Path-style endpoints
@@ -153,8 +166,10 @@ Bearer tokens are accepted without a check. What a SAS says about itself is hono
 
 | Request | Answer |
 |---|---|
-| no credentials | `403 AuthenticationFailed` |
+| no credentials | `401 NoAuthenticationInformation` with the `WWW-Authenticate: Bearer authorization_uri=...` challenge; for an `x-ms-version` older than 2019-12-12, `404 ResourceNotFound` |
+| expiry not after the start (no start is the time of the request, so an expired SAS without `st` is this) | `403 AuthenticationFailed`, `Signed expiry time [..] has to be after signed start time [..]` |
 | expired, or not yet valid, SAS | `403 AuthenticationFailed` with `AuthenticationErrorDetail` "Signature not valid in the specified time frame: ..." |
+| `sip` that is not the caller | `403 AuthorizationFailure`; a `sip` that is no address: `403 AuthenticationFailed`, `SAS field 'sip' is not well formed.` |
 | SAS with neither `se` nor `si` | `403 AuthenticationFailed` |
 | `si` naming an identifier the queue does not have | `403 AuthenticationFailed` |
 | `spr=https` over http | `403 AuthorizationProtocolMismatch` |
@@ -184,18 +199,18 @@ leaves out come from the queue's stored access policy.
   Rules are tried in order; the first whose origin (case-sensitive, `*` or a pattern like
   `http://*.contoso.com`) and method match is the only one that counts, and every header in
   `Access-Control-Request-Headers` must be in its `AllowedHeaders` (names without case, a trailing `*` is a
-  prefix). A match is `200` with `Access-Control-Allow-Origin` (the origin, or `*` when the rule says `*`),
-  `-Allow-Methods`, `-Allow-Headers`, `-Max-Age`, and for an exact origin `-Allow-Credentials: true` and
-  `Vary: Origin`. No match, or no rules, is `403 CorsPreflightFailure`; no `Origin` or no
-  `Access-Control-Request-Method` is `400 MissingRequiredHeader`. An actual request with `Origin` gets
-  `Access-Control-Allow-Origin` and `Access-Control-Expose-Headers` from the matching rule (also on
-  errors); a GET/HEAD without a match gets `Vary: Origin`. Not copied from a recording of real Azure.
+  prefix); methods are compared as written (`get` does not match `GET`). A match is `200` with `Access-Control-Allow-Origin` (the origin, also for
+  a rule that says `*`), `-Allow-Methods`, `-Allow-Headers` (as sent), `-Max-Age` and `-Allow-Credentials: true`, and no `Vary`. No match, or no rules, is `403
+  CorsPreflightFailure` (with a `MessageDetails` element); no `Origin` or no `Access-Control-Request-Method` is `400 InvalidHeaderValue`, "A required CORS header is
+  not present.". An actual request gets `Access-Control-Allow-Origin` from the matching rule (`*` when the rule says `*`; a request with no `Origin` is matched by
+  a rule with `*`; otherwise the origin with `-Allow-Credentials: true` and, on GET and HEAD, `Vary: Origin`) and `Access-Control-Expose-Headers`: the names of the
+  rule, where a name ending in `*` stands for the headers of that answer that start with it (also on errors); a GET/HEAD that no rule matches gets `Vary: Origin`.
+  Checked against Azure in November 2026 (the rules need 5 to 25 seconds to reach every Azure front end; azemu applies them at once).
 - **Non-ASCII header values** (for example metadata): Shared Key verification reads the bytes both as
   UTF-8 and as Latin-1 (the Python and JavaScript SDKs send Latin-1 bytes and sign the UTF-8 of the
   characters; Go sends UTF-8). A correct signature then gets the service's own answer: metadata values must be
   ASCII, so `400 InvalidMetadata`, not `403 AuthenticationFailed`.
-- **`sip` (allowed IP range) in a SAS is not checked.** `sv` is not validated either,
-  nor is `x-ms-version` (the request's value is echoed).
+- **`sip` (allowed IP range)** is checked against `X-Forwarded-For`, else `127.0.0.1` (core does not hand the peer address to services). `sv` and `x-ms-version` are checked as in the list at the top of this section.
 - **Error bodies copied from recordings**: `QueueNotFound`, `QueueAlreadyExists`,
   `InvalidResourceName`, `InvalidXmlDocument` (position and reason),
   `RequestBodyTooLarge`. The wording and extra elements of the other errors

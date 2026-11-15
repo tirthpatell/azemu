@@ -2,7 +2,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::errors::{check_id, CosmosError, R};
+use crate::errors::{name_of, CosmosError, NameOf, R};
 use crate::offers::{self, Throughput};
 use crate::out::{Cx, Out};
 use crate::pk::PartitionKeyDef;
@@ -153,7 +153,10 @@ fn build(body: &Map<String, Value>, id: &str) -> R<Built> {
     props.insert("id".into(), json!(id));
     props.insert("indexingPolicy".into(), indexing_policy(body.get("indexingPolicy"))?);
     props.insert("geospatialConfig".into(), body.get("geospatialConfig").cloned().unwrap_or(json!({ "type": "Geography" })));
-    props.insert("uniqueKeyPolicy".into(), uk_json);
+    // a container made with the default policy has no unique key policy at all on Azure
+    if !matches!(body.get("uniqueKeyPolicy"), None | Some(Value::Null)) {
+        props.insert("uniqueKeyPolicy".into(), uk_json);
+    }
     props.insert("conflictResolutionPolicy".into(), conflict_policy(body.get("conflictResolutionPolicy"))?);
     props.insert("partitionKey".into(), Value::Object(pk_out));
     if let Some(t) = ttl {
@@ -176,17 +179,12 @@ fn build(body: &Map<String, Value>, id: &str) -> R<Built> {
 
 pub fn create(cx: &Cx, acct: &mut Account, db_key: &str) -> R<Out> {
     let body = cx.body_object()?;
-    let id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CosmosError::bad_request("The input content is invalid because the required properties - 'id; ' - are missing"))?
-        .to_string();
-    check_id(&id)?;
+    let id = name_of(NameOf::Container, &body)?;
     let built = build(&body, &id)?;
     let tp = offers::from_headers(cx)?;
     let db = acct.db(db_key)?;
     if db.containers.contains_key(&id) {
-        return Err(CosmosError::conflict());
+        return Err(CosmosError::resource_conflict());
     }
     let shared = db.offer.is_some();
     let (bytes, used) = rid::collection(&db.meta.rid_bytes, db.coll_seq + 1);

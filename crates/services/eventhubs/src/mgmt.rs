@@ -40,6 +40,13 @@ fn text<'a>(m: &'a Message, key: &str) -> Option<&'a str> {
     }
 }
 
+/// `$management` takes one operation, `READ`, spelled so; another one is refused with this error when the request is received
+/// (the delivery is rejected; checked in November 2026 with `DELETE`, `CREATE`, `read` and an empty operation).
+pub(crate) fn invalid_command(req: &Message) -> Option<EhError> {
+    let op = text(req, "operation").unwrap_or("");
+    (op != "READ").then(|| EhError::not_allowed(format!("Invalid command '{op}'.")))
+}
+
 impl EhConn {
     pub(crate) fn handle_request(&mut self, link: azemu_amqp::api::LinkId, session: u16, node: Node, req: Message) {
         let correlation = req.properties.as_ref().and_then(|p| p.message_id.clone());
@@ -51,6 +58,10 @@ impl EhConn {
         // Event Hubs uses `status-code` on both nodes (the SDK reads `status-code` for `$management`).
         let mut props =
             vec![(Value::str("status-code"), Value::Int(resp.status)), (Value::str("status-description"), Value::String(resp.description))];
+        if node == Node::Management && resp.status == 200 {
+            // an answer of `$management` carries the operation and the status code, nothing else (checked in November 2026)
+            props = vec![(Value::str("operation"), Value::String("READ".into())), (Value::str("status-code"), Value::Int(200))];
+        }
         if let Some(c) = resp.condition {
             props.push((Value::str("error-condition"), Value::Symbol(c.to_string())));
         }
@@ -65,11 +76,7 @@ impl EhConn {
     }
 
     fn mgmt_request(&mut self, req: &Message) -> Response {
-        let op = text(req, "operation").unwrap_or("");
         let ty = text(req, "type").unwrap_or("");
-        if !op.eq_ignore_ascii_case("READ") {
-            return Response::err(EhError::not_implemented(&format!("management operation '{op}'")));
-        }
         let Some(hub) = text(req, "name").map(str::to_string).filter(|n| !n.is_empty()) else {
             return Response::err(EhError::argument("The management request has no 'name' (the event hub)."));
         };
@@ -93,7 +100,7 @@ impl EhConn {
             ])),
             "com.microsoft:partition" => {
                 let pid = text(req, "partition").unwrap_or("");
-                let idx = match h.parse_pid(pid) {
+                let idx = match h.parse_pid(pid, false) {
                     Ok(i) => i,
                     Err(e) => return Response::err(e),
                 };
@@ -104,41 +111,37 @@ impl EhConn {
                     ("begin_sequence_number", Value::Long(p.begin_seq_reported())),
                     ("last_enqueued_sequence_number", Value::Long(p.last_seq())),
                     // The Rust SDK (`azure_messaging_eventhubs`) refuses a reply without `type` and
-                    // `last_enqueued_sequence_number_epoch`. Their values are not documented anywhere I found; the
-                    // SDK only checks that the keys exist. 0 is a guess for the epoch.
+                    // `last_enqueued_sequence_number_epoch`. Both epochs are -1 on the namespace that was tried (November 2026).
                     ("type", Value::String("com.microsoft:partition".into())),
-                    ("last_enqueued_sequence_number_epoch", Value::Long(0)),
+                    ("begin_sequence_number_epoch", Value::Long(-1)),
+                    ("last_enqueued_sequence_number_epoch", Value::Long(-1)),
                     ("last_enqueued_offset", Value::String(p.last_offset_string())),
                     ("last_enqueued_time_utc", Value::Timestamp(p.last_time_reported())),
                     ("is_partition_empty", Value::Bool(p.is_empty())),
                 ]))
             }
-            other => Response::err(EhError::not_implemented(&format!("management type '{other}'"))),
+            // Azure answers a type it does not know with 200 and no body (checked in November 2026)
+            _ => Response::ok(Value::Null),
         }
     }
 }
 
 impl EhConn {
-    /// `$cbs` `put-token`. Every credential is accepted (SAS tokens and JWTs alike). What Azure does
-    /// check is that the entity the token is for exists: a token for a missing event hub or consumer
-    /// group is answered 404, and the SDKs report that as an authentication error before they open
-    /// any link. With auto-creation on, the link attach creates the entity, so the token is accepted.
+    /// `$cbs` `put-token`. Every credential is accepted (SAS tokens and JWTs alike). Azure checks the signature, the audience and
+    /// the expiry and answers 401 `com.microsoft:auth-failed` for a bad one; the emulator knows no keys and does not. What Azure
+    /// does check, and so does the emulator, is that the event hub the token is for exists: a token for a missing one is answered
+    /// 404, and the SDKs report that as an authentication error before they open any link. A consumer group is not checked (Azure
+    /// takes one that was never created). With auto-creation on, the link attach creates the event hub, so the token is accepted.
     fn cbs_request(&mut self, req: &Message) -> Response {
         let op = text(req, "operation").unwrap_or("");
         if !op.eq_ignore_ascii_case("put-token") {
             return Response::err(EhError::not_implemented(&format!("$cbs operation '{op}'")));
         }
         if !self.shared.autocreate {
-            if let Some((hub, group)) = text(req, "name").and_then(audience_entity) {
-                let mut st = self.shared.state.lock();
-                let ns = st.resolve(&self.ns);
-                match st.hub_mut(&self.ns, &hub) {
-                    None => return Response::err(EhError::entity_not_found(&ns, &hub)),
-                    Some(h) => {
-                        if let Some(cg) = group.filter(|cg| !h.has_consumer_group(cg)) {
-                            return Response::err(EhError::entity_not_found(&ns, &format!("{}/ConsumerGroups/{cg}", h.name)));
-                        }
-                    }
+            if let Some((hub, _group)) = text(req, "name").and_then(audience_entity) {
+                let st = self.shared.state.lock();
+                if st.hub(&self.ns, &hub).is_none() {
+                    return Response::err(EhError::entity_not_found(&st.resolve(&self.ns), &hub));
                 }
             }
         }

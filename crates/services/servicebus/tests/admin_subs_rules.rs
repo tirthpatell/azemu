@@ -132,13 +132,16 @@ async fn subscription_errors() {
     assert!(r.text().contains("<Detail>The messaging entity 'default:Topic:t|S' already exists. To know more visit https://aka.ms/sbResourceMgrExceptions.  TrackingId:"), "{}", r.text());
     let r = a.sub("no-such-topic", "s", "").await;
     assert_eq!(r.status, 404);
-    assert!(r.text().contains("Entity 'default:Topic:no-such-topic' was not found."), "{}", r.text());
+    assert!(r.text().contains("The incoming request is not recognized as a namespace policy put request."), "{}", r.text());
     let r = a.get("/t/subscriptions/nope").await;
     assert_eq!(r.status, 404);
     assert!(r.text().contains("Entity 'default:Topic:t|nope' was not found."), "{}", r.text());
     assert_eq!(a.delete("/t/subscriptions/nope").await.status, 404);
     assert_eq!(a.delete("/nope/subscriptions/nope").await.status, 404);
-    assert_eq!(a.get("/nope/subscriptions").await.status, 404);
+    // a topic that is not there: the service answers a read with its list of services
+    let r = a.get("/nope/subscriptions").await;
+    assert_eq!(r.status, 200);
+    assert!(r.text().contains("Publicly Listed Services"), "{}", r.text());
     // a queue description is not a subscription description
     assert_eq!(a.create("/t/subscriptions/x", &entry("QueueDescription", "")).await.status, 400);
     // lock duration: the subscription text has no SubCode prefix
@@ -339,7 +342,8 @@ async fn rule_create_get_update_delete_errors() {
     assert_eq!(dup.status, 409);
     assert!(dup.header("etag").is_some());
     assert!(dup.text().contains("The messaging entity 'default:Topic:t|s|RULE' already exists."), "{}", dup.text());
-    assert_eq!(a.rule("t", "s", "$Default", "").await.status, 409);
+    let r = a.rule("t", "s", "$Default", "").await;
+    assert_eq!(r.status, 409, "{}", r.text());
     assert_eq!(a.rule("t", "nope", "r", "").await.status, 404);
     assert_eq!(a.rule("nope", "s", "r", "").await.status, 404);
     // update

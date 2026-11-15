@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use azemu_core::resp::Resp;
 use azemu_core::{Request, Response};
 
 use crate::{admin, errors, ns, publish, Shared};
@@ -20,13 +21,15 @@ pub async fn route(shared: &Arc<Shared>, req: &Request) -> Response {
     let method = req.method.as_str();
     let what = format!("{method} {}", req.decoded_path());
     match lower.iter().map(String::as_str).collect::<Vec<_>>().as_slice() {
-        ["api", "events"] => {
-            if method == "POST" {
-                publish::classic(shared, req)
-            } else {
-                errors::method_not_allowed(&format!("{what} (events are published with POST)"))
-            }
-        }
+        ["api", "events"] => match method {
+            "POST" => publish::classic(shared, req),
+            // what the real publish endpoint says to OPTIONS (the preflight of a browser) and to every other method
+            "OPTIONS" => Resp::new(200u16).header("Allow", "POST, OPTIONS").build(),
+            _ => errors::publish_method_not_allowed(req),
+        },
+        // the root of a topic host and `/api`: Azure has no resource there (an endpoint given to the Python client without
+        // `/api/events` ends up here)
+        [] | ["api"] => errors::no_resource(req),
         ["topics", _] if lower[1].ends_with(":publish") => {
             if method != "POST" {
                 return errors::method_not_allowed(&what);

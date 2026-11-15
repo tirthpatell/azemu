@@ -132,7 +132,7 @@ impl EhConn {
         }
         let target = match partition {
             None => SendTarget::Any,
-            Some(pid) => match st.hub(&self.ns, &hub).map(|h| h.parse_pid(&pid)) {
+            Some(pid) => match st.hub(&self.ns, &hub).map(|h| h.parse_pid(&pid, true)) {
                 Some(Ok(p)) => SendTarget::Partition(p),
                 Some(Err(e)) => return refuse(e),
                 None => return refuse(EhError::entity_not_found(&self.ns, &hub)),
@@ -166,33 +166,23 @@ impl EhConn {
             return refuse(e);
         }
         let nsk = st.resolve(&self.ns);
-        let autocreate = self.shared.autocreate;
         let Some(h) = st.hub_mut(&self.ns, &hub) else { return refuse(EhError::entity_not_found(&nsk, &hub)) };
-        let p = match h.parse_pid(&pid) {
+        let p = match h.parse_pid(&pid, true) {
             Ok(p) => p,
             Err(e) => return refuse(e),
         };
-        if !h.has_consumer_group(&cg) {
-            if !autocreate {
-                return refuse(EhError::entity_not_found(&nsk, &format!("{}/ConsumerGroups/{cg}", h.name)));
-            }
-            if h.consumer_groups.len() >= MAX_CONSUMER_GROUPS {
-                return refuse(EhError::new(
-                    condition::RESOURCE_LIMIT_EXCEEDED,
-                    403,
-                    format!("The maximum number of consumer groups of an event hub ({MAX_CONSUMER_GROUPS}) has been reached."),
-                ));
-            }
-            h.add_consumer_group(&cg);
-        }
+        // Azure takes a consumer group that was never created (checked in November 2026): the receiver gets the events, the
+        // group is not added to the event hub's list. Only the owner levels and the five-receiver limit know it by name.
         h.partitions[p].trim(now, h.retention_ms);
-        let cursor = match h.partitions[p].cursor_for(position) {
+        let tracker = format!("{nsk}:eventhub:{}~{p}", h.name);
+        let cursor = match h.partitions[p].cursor_for(position, &tracker) {
             Ok(c) => c,
             Err(e) => return refuse(e),
         };
         let hub_id = h.id;
+        let hub_name = h.name.clone();
         let reg = RecvReg { conn: self.conn_id, link: req.link, pid: p, cg: key(&cg), epoch, handle: req.handle.clone() };
-        if let Err(e) = st.register_receiver(&self.ns, &hub, reg) {
+        if let Err(e) = st.register_receiver(&self.ns, &hub, &hub_name, reg) {
             return refuse(e);
         }
         drop(st);
@@ -317,6 +307,8 @@ type Metrics = (i64, String, i64);
 fn render(ev: &Event, metrics: Option<(Metrics, i64)>) -> Vec<u8> {
     let mut m = ev.message.clone();
     let mut ann = vec![
+        // always -1 on the namespace that was tried (the epoch of the partition's sequence numbers; they are never reset)
+        (Value::sym("x-opt-sequence-number-epoch"), Value::Int(-1)),
         (Value::sym("x-opt-sequence-number"), Value::Long(ev.seq)),
         (Value::sym("x-opt-offset"), Value::String(ev.offset.to_string())),
         (Value::sym("x-opt-enqueued-time"), Value::Timestamp(ev.enqueued_ms)),
@@ -327,6 +319,7 @@ fn render(ev: &Event, metrics: Option<(Metrics, i64)>) -> Vec<u8> {
         // what the sender put in the delivery annotations is kept (Microsoft's live tests read it back)
         let mut da = m.delivery_annotations.take().unwrap_or_default();
         da.extend([
+            (Value::sym("last_enqueued_sequence_number_epoch"), Value::Int(-1)),
             (Value::sym("last_enqueued_sequence_number"), Value::Long(seq)),
             (Value::sym("last_enqueued_offset"), Value::String(offset)),
             (Value::sym("last_enqueued_time_utc"), Value::Timestamp(time)),
@@ -341,6 +334,12 @@ impl ConnectionHandler for EhConn {
     fn on_open(&mut self, open: &Open) -> Result<(), AmqpError> {
         self.ns = namespace_from_hostname(open.hostname.as_deref());
         Ok(())
+    }
+
+    /// What the Event Hubs service sends in its `open` (read from a real namespace in November 2026): frames of at most 64 KiB and an
+    /// idle timeout of 120 s, so a client sends an empty frame every minute.
+    fn open_settings(&self) -> Option<OpenSettings> {
+        Some(OpenSettings { max_frame_size: 65_536, idle_timeout: Some(std::time::Duration::from_secs(120)) })
     }
 
     fn on_attach(&mut self, req: AttachRequest) -> AttachDecision {
@@ -361,6 +360,9 @@ impl ConnectionHandler for EhConn {
         match kind {
             Kind::Request(node, session) => match Message::decode(&d.payload) {
                 Ok(m) => {
+                    if let Some(e) = crate::mgmt::invalid_command(&m).filter(|_| node == Node::Management) {
+                        return rejected(e);
+                    }
                     self.handle_request(link, session, node, m);
                     TransferAction::Settle(DeliveryState::Accepted)
                 }

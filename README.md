@@ -9,8 +9,8 @@
 
 A local emulator of Azure services, in one program. Point your Azure SDK at it and write tests against Blob, Queue, Table, Key Vault, App
 Configuration, Cosmos DB, Service Bus, Event Hubs, Event Grid and Resource Manager without an Azure account, on your machine or in CI. It is for building
-and testing code. It is not for production, and it is not a place to test security: it accepts every credential. State is in memory, or in a data directory
-if you ask. It starts in about 10 ms and uses about 15 MB when idle (release build).
+and testing code. It is not for production, and it is not a place to test security: bearer tokens and most keys and passwords are not checked (storage signatures for the
+development account are; see "Credentials are checked loosely"). State is in memory, or in a data directory if you ask. It starts in about 10 ms and uses about 15 MB when idle (release build).
 
 azemu is an independent open-source project. It is not made, sponsored or endorsed by Microsoft. Microsoft, Azure, Azure Cosmos DB, Azure Event Hubs, Azure Service Bus, Azure Key Vault and Microsoft Entra are trademarks of the Microsoft group of companies; Apache Kafka is a trademark of the Apache Software Foundation; Terraform is a trademark of HashiCorp. The names are used here only to say what azemu works with.
 
@@ -29,6 +29,9 @@ With Docker:
 docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 ghcr.io/tirthpatell/azemu:latest
 ```
 
+The container makes a new certificate authority at every start, unless a volume is mounted on `/home/azemu/.azemu`, so a client that uses https has to fetch `ca.pem` again each run:
+`curl -s http://localhost:4577/_azemu/ca.pem -o ca.pem`. To keep one authority between runs, add `-v azemu-ca:/home/azemu/.azemu` to the `docker run` line.
+
 Or without Docker: download the binary for your system from the [release page](https://github.com/tirthpatell/azemu/releases) (one file, nothing to install) and run
 `azemu`.
 
@@ -38,11 +41,11 @@ builds the image (about 3 minutes). `azemu --version` prints the version and the
 When it is ready it prints one line to standard output:
 
 ```
-azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm version=0.1.0 commit=1a2b3c4d5e6f
+azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm version=0.2.0 commit=1a2b3c4d5e6f
 ```
 
 `gateway` is the address of the main port (4577), `ca` is the certificate authority for https (see below), `services` is what is mounted. Logs go to standard
-error. Stop it with Ctrl-C or SIGTERM. **Publish a container's ports to `127.0.0.1` only**, as above: the emulator has no sign-in (see "Security").
+error. Stop it with Ctrl-C or SIGTERM. **Publish a container's ports to `127.0.0.1` only**, as above: the emulator does not check who is asking, so anyone who can reach a port can use it (see "Security").
 
 ## A first request
 
@@ -55,12 +58,13 @@ In a new project (`cargo new hello && cd hello`): `cargo add azure_core azure_id
 1. **Use https.** The Azure SDK for Rust sends a token and refuses to do so over plain http (`... must use https`). The emulator answers https on the same port.
 2. **Use a credential that does not need the Azure CLI.** `DeveloperToolsCredential`, which the crates' own READMEs use, runs the `az` program (`az not found on PATH`). `ManagedIdentityCredential`
    asks the emulator for a token when you set two variables (below). Rust has no `DefaultAzureCredential`.
-3. **Trust the emulator's certificate authority**, for this one program: put the system's certificate list and the emulator's `ca.pem` in one file and point `SSL_CERT_FILE` at it (below; the Rust SDK reads it).
+3. **Trust the emulator's certificate authority**, for this one program: put the system's certificate list and the emulator's `ca.pem` in one file and point `SSL_CERT_FILE` at it (below; the Rust SDK reads it on Linux).
+   **On macOS the variable is not read**: the SDK asks the Keychain, so trust `ca.pem` there once, or give the client the certificate in code ([`docs/rust.md`](docs/rust.md#macos); the System keychain way was run on a macOS 26 runner).
    **Without it the SDK does not fail at once**: it retries the certificate error for more than a minute (81 seconds when tried) before it reports `InvalidCertificate(UnknownIssuer)`, and the emulator
    logs nothing. `RetryOptions::none()` in the client options, as in the program below, makes it fail in milliseconds.
 
 ```bash
-cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem     # Linux; the ready line says where ca.pem is
+cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem     # Linux; the ready line says where ca.pem is. On macOS see below
 export SSL_CERT_FILE=~/.azemu/bundle.pem
 export IDENTITY_ENDPOINT=http://localhost:4577/_azemu/identity/msi/token IDENTITY_HEADER=azemu
 cargo run                                     # with the program below in src/main.rs
@@ -93,7 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Started the emulator in a container? Fetch its authority first: `mkdir -p ~/.azemu && curl -s localhost:4577/_azemu/ca.pem > ~/.azemu/ca.pem`.
+Started the emulator in a container? Fetch its authority first: `mkdir -p ~/.azemu && curl -s localhost:4577/_azemu/ca.pem > ~/.azemu/ca.pem`. The authority is new at every container start unless a volume is
+mounted on `/home/azemu/.azemu` (`-v azemu-ca:/home/azemu/.azemu`), so fetch it again each run, or mount the volume once.
 A second run says `409 ContainerAlreadyExists`, as Azure would (`curl -X POST localhost:4577/_azemu/reset` empties the emulator). Which crates and versions, the other services (Queue, Key Vault, Cosmos DB, Event Hubs, Service Bus), tests with `cargo test`
 and CI: [`docs/rust.md`](docs/rust.md). A small project with tests: [`examples/rust/`](examples/rust/README.md).
 
@@ -212,13 +217,13 @@ Three ways. The first is the default; the other two exist because the first need
 | Node | `NODE_EXTRA_CA_CERTS=/path/ca.pem` (adds to the system list) |
 | curl | `--cacert /path/ca.pem` |
 | Java | a copy of the JDK's `cacerts` with the CA added (`keytool -importcert -noprompt -alias azemu -file ca.pem -keystore my-cacerts -storepass changeit`), then `-Djavax.net.ssl.trustStore=my-cacerts -Djavax.net.ssl.trustStorePassword=changeit` |
-| Go, Rust, Terraform, and tools that read one file | `SSL_CERT_FILE` pointing at a bundle: the system list plus `ca.pem` (`cat /etc/ssl/certs/ca-certificates.crt ca.pem > bundle.pem`), for that one process. Go and Rust tried (Rust: [`docs/rust.md`](docs/rust.md); without it the Rust SDK retries the certificate error for over a minute before it reports it); .NET not tried |
+| Go, Rust, Terraform, and tools that read one file | `SSL_CERT_FILE` pointing at a bundle: the system list plus `ca.pem` (`cat /etc/ssl/certs/ca-certificates.crt ca.pem > bundle.pem`), for that one process. Go and Rust tried on Linux (Rust: [`docs/rust.md`](docs/rust.md); without it the Rust SDK retries the certificate error for over a minute before it reports it); .NET not tried. **Rust on macOS does not read `SSL_CERT_FILE`**: the CA goes in the Keychain ([`docs/rust.md`](docs/rust.md#macos); not tried, this project's machine is Linux) |
 
 ## Behaves like Azure by default
 
 Nothing below the account comes into being by being named, because on Azure it does not, and a forgotten queue is one of the bugs an emulator should catch.
-A send to a queue, topic or event hub nobody created, a reader on a consumer group nobody created, a publish to an Event Grid topic nobody created: all fail
-as they do on Azure (tried for a Service Bus queue, a Storage queue and an Event Grid topic). Create what a test needs first, the way a team does against Azure:
+A send to a queue, topic or event hub nobody created, a publish to an Event Grid topic nobody created: all fail
+as they do on Azure (tried for a Service Bus queue, a Storage queue and an Event Grid topic). (A reader on an Event Hubs consumer group nobody created works, and a Kafka producer makes its event hub: Azure does both.) Create what a test needs first, the way a team does against Azure:
 
 - with the SDK: Blob, Queue and Table create calls; the Service Bus administration client (`ServiceBusAdministrationClient.create_queue`);
 - with Resource Manager: Terraform, Bicep templates or the management SDKs (below);
@@ -235,14 +240,18 @@ are never made for you.
 
 **Credentials are checked loosely.** Precisely:
 
-- A bearer token is never decoded or checked: any token passes. A request with no credentials, where Azure would refuse one, is refused (Blob 401, Queue and Table
-  403, Key Vault, Cosmos, App Configuration, Event Grid and Resource Manager 401). Blob has three more answers, as Azure does: an anonymous read in an account
-  that does not allow public access is 409 `PublicAccessNotPermitted`, an anonymous read of a container that does not exist is 404, and an `Authorization`
-  header that cannot be read is 400 `InvalidAuthenticationInfo` ([details](docs/services/blob.md)).
-- Storage keys and SAS signatures are **verified only for the well-known development account** `devstoreaccount1`. For any other account the key is invented by the
-  emulator, so a wrong key, a changed signature, or a SAS made for another blob is accepted.
+- A bearer token is never decoded or checked: any token passes. A request with no credentials, where Azure would refuse one, is refused (Blob, Queue and Table 401 with the
+  bearer challenge, as Azure answers; Key Vault, Cosmos, App Configuration, Event Grid and Resource Manager 401). Blob has more answers, as Azure does: an anonymous read in an account
+  that does not allow public access is 409 `PublicAccessNotPermitted`, and an `Authorization` header that cannot be read is 400 `InvalidAuthenticationInfo`
+  ([details](docs/services/blob.md)).
+- What a storage service checks without a key is checked for **every** account, as Azure does (tried in November 2026): a Shared Key signature that is not base64 is 400, a SAS `sig` that is
+  empty, not base64 or not 32 bytes is 403, so is an `sv` Azure would not take or a Shared Key request more than 15 minutes old, an `x-ms-version` Azure would not take is 400, and a `sip` that is not the
+  caller is 403.
+- Storage signatures themselves (the MAC) are compared **only for the well-known development account** `devstoreaccount1`. For any other account the key is invented by the
+  emulator, so a changed signature or a SAS made for another blob is accepted if it is well formed. A signature that is made up (`sig=bad`, `replay`, `Sanitized`) is refused for every account; to replay
+  recorded traffic, which carries such signatures and old dates, start the emulator with `AZEMU_LOOSE_AUTH=1` (it checks no signature and no date, and warns at start).
 - A SAS is checked for expiry, start time, permissions, resource type and protocol for **every** account.
-- Service Bus, Event Hubs and Kafka accept every credential and mechanism. Event Grid needs a key or token but does not look at it. Cosmos and App Configuration
+- Service Bus, Event Hubs and Kafka accept every credential and mechanism. Event Grid needs a key or token; a custom topic made through Resource Manager (or given `keys` in the admin API) compares a key and a signed token with its keys and answers 401 for a wrong one, a topic without keys takes any (a bearer token is never looked at). Cosmos and App Configuration
   accept any key (the Rust Cosmos SDK checks that the key is valid base64 before it sends anything: use the well-known emulator key in [`docs/services/cosmos.md`](docs/services/cosmos.md#using-it)).
 - No role assignments exist, so a missing role, a wrong key or a wrong tenant never fails here.
 
@@ -251,6 +260,9 @@ are never made for you.
 - **Reset between tests.** `POST /_azemu/reset` empties everything. `?service=queue` empties one service, `?account=myacct` one account in every service that has
   accounts (both together are allowed; the answer lists `reset` and `notSupported`; an unknown parameter or service is a 400). Resource Manager's "account" is a
   subscription id. Tried: one blob account emptied, the other kept.
+- **Things that exist from the start.** On Azure, infrastructure code makes the blob containers, queues, tables, Cosmos databases and containers, secrets and settings; here nothing exists until
+  something creates it. `--seed seed.json` (`AZEMU_SEED`) lists them in a JSON file; they are made at start and again after every reset, and a thing that already exists is left as it is.
+  Format and an example: [`docs/seed.md`](docs/seed.md). Tried: all six kinds found with the Python SDKs, a reset and a partial reset; a restart with `--data-dir` in the Rust tests.
 - **Parallel runs** can share one emulator if each uses its own account names (any name is a fresh account) and resets only its own.
 - **Keep data between runs:** `--data-dir ~/.azemu-data`. It is saved every 15 seconds when something changed (`--save-interval`), on `POST /_azemu/save`, and on Ctrl-C
   and SIGTERM (and so on `docker stop`). **A crash loses what changed since the last save**, and services are saved at different moments, so two can be a few seconds
@@ -260,7 +272,8 @@ are never made for you.
   service and operation (`DELETE` empties the list; a summary is logged at shutdown, tried). Resource Manager *stores* a resource type that no provider emulates
   (`Microsoft.Web/sites`) and answers `Succeeded`, though nothing exists behind it: those answers carry `x-azemu-stored-only: true`, one warning is logged per type,
   they appear under `storedOnly` in the same list, and `AZEMU_ARM_STRICT=1` makes them answer 501. Tried all four.
-- **See what is running:** `GET /_azemu/health` (version, commit, services), `GET /_azemu/config` (the settings in force, where each came from, and any `AZEMU_*`
+- **See what is running:** `GET /_azemu/` lists the admin endpoints with their methods (`health`, `config`, `ca.pem`, `reset`, `save`, `unsupported`, and the `/_azemu/<service>/...` prefix of each service that has one);
+  `GET /_azemu/health` (version, commit, services), `GET /_azemu/config` (the settings in force, where each came from, and any `AZEMU_*`
   variable nobody reads: a typing mistake is also warned about at start).
 - **The log** is one line per request on standard error. At `--log-level debug` it adds the query and headers, with `Authorization`, SAS signatures and other
   credentials replaced by `<redacted>` (tried). A request refused because it carries no credentials is logged, at the default level, with the reason (`refused PUT /c1 (restype=container): no Authorization header and no SAS in the query: the Blob SDK was probably built without a credential`; tried).
@@ -309,6 +322,7 @@ are never made for you.
   and the connection string as the password. The event hub (the topic) must exist first. No transactions or compaction. Full settings: `docs/services/kafka.md`.
 - **As a stand-in for Azurite and for Microsoft's Cosmos DB emulator**, on their usual ports: `azemu --pin blob=10000 --pin queue=10001 --pin table=10002 --pin cosmos=8081`
   (or `--standard-ports`). Tried: `UseDevelopmentStorage=true` for Blob, Queue and Table, and `CosmosClient("https://localhost:8081", key, connection_verify=False)`.
+  **Moving a project from Azurite** (its options, what stays the same, what differs, the Rust SDK): [`docs/azurite.md`](docs/azurite.md).
 
 ## How it is checked
 
@@ -319,25 +333,33 @@ are never made for you.
   differ (leaving out what a server makes up: dates, ids, ETags). Scores are in [`fidelity/SCORES.md`](fidelity/SCORES.md). Read them as "how often the emulator
   answers as Azure did in the cases Microsoft recorded". They say nothing about services without recordings (Cosmos, Event Hubs, Kafka, the AMQP side of Service Bus),
   and the recordings are of correct use more than of failure.
+- **A comparison with real Azure, in November 2026.** The Python suites for Cosmos DB, Service Bus, Event Hubs and Kafka were run against real resources (a serverless Cosmos
+  account, Standard namespaces), and the same tests pass on both sides except the ones marked as a known difference
+  ([how to run a suite against Azure](tests/sdk-python/README.md#running-a-suite-against-azure)). For the HTTP services, the behaviour that had been a guess (storage credentials,
+  anonymous access and CORS; Blob, Data Lake, Key Vault, App Configuration and Event Grid details) was settled by sending the same raw request to Azure and to the emulator.
+  Where Azure answered differently the emulator was changed (`CHANGELOG.md`, "Changed to match Azure"); what was left as it is, and why, is in each service page.
+  This was one account, one region and the cheapest tiers, on those days: it is a check of the cases the tests hold, not a guarantee.
 - **Real clients of other kinds:** the Azure Functions host ([`tests/functions`](tests/functions/README.md)), Terraform ([`tests/terraform`](tests/terraform/README.md)) and a
   container test ([`tests/container`](tests/container/README.md)).
-- **The emulator's own tests:** about 2,400 unit and integration tests in the crates (`cargo test --workspace`).
+- **The emulator's own tests:** about 2,500 unit and integration tests in the crates (`cargo test --workspace`).
 
 ## How it was made
 
 Most of the code and the tests were written by AI coding agents, directed and reviewed by a person, over a few days.
 
-It has been tested extensively, on the developer's machine and without an Azure account: several thousand tests through the official Azure SDKs in six languages
+It has been tested extensively on the developer's machine: several thousand tests through the official Azure SDKs in six languages
 (Python, .NET, JavaScript, Java, Go and Rust), the Azure Functions host, Terraform's `azurerm` provider, real Kafka clients, and a replay of Microsoft's own
 recordings of real Azure traffic, in which its answers are compared with the ones Azure gave. "How it is checked" above says what each of these covers, and all of them
 are in this repository to run again.
 
-It has not been checked against a live Azure subscription. Where Azure's behaviour could not be confirmed from a recording or from Microsoft's documentation, the
-service's page says so. Treat it as a new tool: use it for development and tests, and keep a small set of tests that run against real Azure.
+Version 0.1.0 was made without an Azure account. Since version 0.2.0 parts of it have been compared with a real subscription (see above), and a good number of guesses
+turned out wrong and were corrected. Much has still not been compared: the .NET, JavaScript, Java, Go and Rust suites were not run against Azure, nor were Resource Manager,
+the Premium tiers, or anything that needs more than one region. Where Azure's behaviour could not be confirmed from the account, a recording or Microsoft's
+documentation, the service's page says so. Treat it as a new tool: use it for development and tests, and keep a small set of tests that run against real Azure.
 
 ## What it cannot tell you
 
-An emulator that is always fast, always consistent and accepts every credential cannot show the failures that come from the outside. Keep a small set of tests
+An emulator that is always fast, always consistent and checks almost no credentials cannot show the failures that come from the outside. Keep a small set of tests
 that run against real Azure.
 
 - **Throttling and slowness:** there are no 429 or 503 answers, no request units, no retry-after, and timing is not Azure's (locks, TTLs, soft delete and leases use
@@ -357,7 +379,7 @@ that run against real Azure.
 
 ## Security
 
-It has no sign-in: every program that can reach the port can read, change and wipe everything, including through `/_azemu/reset`. By default it listens on
+It has no sign-in and does not check who is asking (whatever credential a client sends, a bearer token is never looked at): every program that can reach the port can read, change and wipe everything, including through `/_azemu/reset`. By default it listens on
 loopback only, and it refuses requests that web pages in your browser make (cross-site requests and DNS rebinding). Publish container ports to `127.0.0.1` only
 (`-p 127.0.0.1:4577:4577`, never `-p 4577:4577`). With `--data-dir` the Key Vault secrets and keys, and the identity signing key, are on disk unencrypted. A certificate
 authority made with `--tls-name core.windows.net` must never be installed system-wide. Event Grid webhooks may go only to local addresses unless you say otherwise. Cosmos
@@ -378,6 +400,7 @@ stored procedures run client-written JavaScript in a separate process with limit
 --tls-name <name>     more names the certificate authority may sign for (AZEMU_TLS_NAME)
 --lenient             queues, topics, event hubs ... come into being when named (AZEMU_LENIENT=1)
 --data-dir <path>     keep state between runs (AZEMU_DATA_DIR); --save-interval <seconds>, default 15
+--seed <file>         create what a JSON file lists at start and after every reset (AZEMU_SEED); see docs/seed.md
 --allow-host <name>   serve this host name and everything under it (a hosts file for real Azure names)
 --allow-origin <o>    let web pages from this origin use the emulator; `*` turns the cross-site check off
 --allow-webhook-host <name>   let Event Grid webhooks go to this host (`*`: any)

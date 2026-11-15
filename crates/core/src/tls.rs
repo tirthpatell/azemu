@@ -436,8 +436,10 @@ impl LeafResolver {
             if refused.len() < 256 && refused.insert(key.clone()) {
                 tracing::warn!(
                     sni = name,
-                    "refusing TLS for this name: the CA is limited to localhost, *.localhost and loopback \
-                     addresses. Start azemu with --tls-name <suffix> to allow more"
+                    "a client asked for a TLS certificate for the name '{name}', which the CA may not sign for (it is limited to localhost, \
+                     *.localhost and loopback addresses, plus any --tls-name), so the handshake was refused and the client will report a \
+                     TLS error. Start azemu with --tls-name {name} (or AZEMU_TLS_NAME={name}) to allow it; a client that already trusts \
+                     an older ca.pem needs the new one (GET /_azemu/ca.pem)."
                 );
             }
             return None;
@@ -525,6 +527,49 @@ mod tests {
         std::fs::write(d.join("ca.key"), "garbage").unwrap();
         let c = Ca::load_or_create(&d).unwrap();
         assert_ne!(a.pem, c.pem);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuf(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for LogBuf {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
+        type Writer = LogBuf;
+        fn make_writer(&'a self) -> LogBuf {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn a_refused_name_is_logged_once_with_the_flag_that_allows_it() {
+        let d = tmp("refused-log");
+        let r = LeafResolver::new(Ca::load_or_create(&d).unwrap()).unwrap();
+        let buf = LogBuf::default();
+        let sub = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).finish();
+        tracing::subscriber::with_default(sub, || {
+            assert!(r.for_name("azemu").is_none());
+            assert!(r.for_name("AZEMU").is_none());
+            assert!(r.for_name("other-name").is_none());
+            assert!(r.for_name("acct.blob.localhost").is_some());
+        });
+        let bytes = buf.0.lock().unwrap().clone();
+        let out = String::from_utf8(bytes).unwrap();
+        let warns: Vec<&str> = out.lines().filter(|l| l.contains(" WARN ")).collect();
+        assert_eq!(warns.len(), 2, "one line per name, none for an allowed name: {out}");
+        assert!(
+            warns[0].contains("'azemu'") && warns[0].contains("--tls-name azemu") && warns[0].contains("AZEMU_TLS_NAME=azemu"),
+            "{}",
+            warns[0]
+        );
+        assert!(warns[1].contains("--tls-name other-name"), "{}", warns[1]);
         let _ = std::fs::remove_dir_all(&d);
     }
 

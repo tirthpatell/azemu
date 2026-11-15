@@ -158,7 +158,11 @@ async fn duplicate_name_is_409() {
     assert_eq!(r.status, 409);
     assert_eq!(r.header("content-type"), Some("application/problem+json; charset=utf-8"));
     assert_eq!(r.json()["status"], 409);
-    assert_eq!(r.json()["name"], "dup");
+    // the words and the order of the service (tried in November 2026)
+    assert_eq!(
+        r.text(),
+        r#"{"type":"https://azconfig.io/errors/already-exists","title":"The resource already exists.","status":409,"detail":""}"#
+    );
 }
 
 #[tokio::test]

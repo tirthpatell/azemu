@@ -101,8 +101,18 @@ def test_a_damaged_message_is_refused_and_nothing_is_stored(u):
     bad[30] ^= 1
     r = requests.put(u("x"), data=bytes(bad), headers=base)
     assert r.status_code == 400 and r.headers["x-ms-error-code"] == "Crc64Mismatch"
+    assert "The CRC64 value specified in the request did not match" in r.text
     r = requests.put(u("x"), data=data, headers=base)  # the plain data is not a message
-    assert r.status_code == 400 and "x-ms-structured-body" in r.text
+    assert r.status_code == 400 and r.headers["x-ms-error-code"] == "InvalidStructuredMessage"
+    assert "The Structured Message was not valid." in r.text
     r = requests.put(u("x"), data=message(data), headers={**base, "x-ms-structured-content-length": "999"})
-    assert r.status_code == 400
+    assert r.status_code == 400 and r.headers["x-ms-error-code"] == "InvalidStructuredMessage"
+    # a segment one byte short is a wrong layout, not a wrong CRC
+    short = bytearray(message(data, 4000))
+    short[15:23] = (999).to_bytes(8, "little")
+    r = requests.put(u("x"), data=bytes(short), headers=base)
+    assert r.status_code == 400 and r.headers["x-ms-error-code"] == "InvalidStructuredMessage"
+    # a body too short to be a message: the length header is refused
+    r = requests.put(u("x"), data=b"\x01\x00\x00\x00\x00", headers={**base, "x-ms-structured-content-length": "5"})
+    assert r.status_code == 400 and r.headers["x-ms-error-code"] == "InvalidHeaderValue"
     assert requests.get(u("x")).status_code == 404

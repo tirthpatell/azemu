@@ -25,7 +25,11 @@ pub fn definitions(all: &[(String, String)], names: &[String]) -> R<Vec<(String,
     for n in names {
         match all.iter().find(|(id, _)| id == n) {
             Some(d) => out.push(d.clone()),
-            None => return Err(CosmosError::bad_request(format!("The user-defined function 'udf.{n}' was not found in the container."))),
+            None => {
+                return Err(CosmosError::bad_request(format!(
+                    "The input user defined function '{n}' is not present in the collection. Ensure to pass a valid function identifier."
+                )))
+            }
         }
     }
     Ok(out)

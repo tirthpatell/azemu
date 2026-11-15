@@ -113,19 +113,23 @@ impl KeyVaultService {
         if !valid_name(name) {
             return invalid_name(name);
         }
-        let body = match body_object(req) {
+        let body = match required_body_object(req) {
             Ok(b) => b,
             Err(r) => return r,
         };
-        let value = match str_field(&body, "value") {
-            Ok(v) => v.to_string(),
-            Err(r) => return r,
+        // a number is taken as its text; no value, null, and anything else are "invalid"
+        let value = match body.get("value") {
+            Some(Value::String(v)) => v.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            _ => return invalid_property(""),
         };
         if value.len() > MAX_SECRET_BYTES {
-            return bad_parameter(&format!(
-                "The secret value is too large: {} bytes. The maximum is {MAX_SECRET_BYTES} bytes (25 KiB).",
-                value.len()
-            ));
+            return azemu_core::json_error::response_with_inner(
+                400,
+                "BadParameter",
+                &format!("Secret is beyond the maximum permitted length of {MAX_SECRET_BYTES} characters."),
+                "SecretTooLarge",
+            );
         }
         let content_type = match opt_str_field(&body, "contentType") {
             Ok(c) => c.map(String::from),
@@ -298,6 +302,8 @@ impl KeyVaultService {
         if vault.secrets.is_deleted(name) {
             vault.secrets.items.remove(&norm(name));
             no_content()
+        } else if vault.secrets.active(name).is_some() {
+            not_deleted_for_purge(Kind::Secret)
         } else {
             deleted_not_found(Kind::Secret, name)
         }
@@ -311,7 +317,11 @@ impl KeyVaultService {
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now_secs(req));
         let Some(item) = vault.secrets.items.get_mut(&norm(name)).filter(|i| i.deleted.is_some()) else {
-            return deleted_not_found(Kind::Secret, name);
+            return if vault.secrets.active(name).is_some() {
+                exists_already(Kind::Secret, name)
+            } else {
+                deleted_not_found(Kind::Secret, name)
+            };
         };
         item.deleted = None;
         let Some(latest) = item.latest() else {
@@ -394,19 +404,19 @@ impl KeyVaultService {
     }
 
     pub fn restore_secret(&self, req: &Request) -> Response {
-        let body = match body_object(req) {
+        let body = match required_body_object(req) {
             Ok(b) => b,
             Err(r) => return r,
         };
-        let text = match str_field(&body, "value") {
+        let text = match backup::value_of(&body) {
             Ok(t) => t,
             Err(r) => return r,
         };
-        let payload = match backup::decode(Kind::Secret, text) {
+        let payload = match backup::decode(Kind::Secret, &text) {
             Ok(p) => p,
             Err(r) => return r,
         };
-        let invalid = || bad_parameter("The backup blob is not valid.");
+        let invalid = backup::corrupt;
         let Some(name) = payload.get("name").and_then(|n| n.as_str()).map(String::from) else {
             return invalid();
         };

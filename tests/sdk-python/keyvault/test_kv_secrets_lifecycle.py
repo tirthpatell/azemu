@@ -212,13 +212,15 @@ def test_recover_brings_back_all_versions(secrets):
     assert {p.version for p in secrets.list_properties_of_secret_versions(name)} == versions
 
 
-def test_recover_secret_that_was_never_deleted_is_not_found(secrets):
-    # Assumed: same SecretNotFound the service uses for every missing deleted secret.
+def test_recover_secret_that_was_never_deleted_is_refused(secrets):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Secret exists already: <name>".
     name = unique("sec")
     secrets.set_secret(name, "v")
-    with pytest.raises(ResourceNotFoundError) as exc:
+    with pytest.raises(HttpResponseError) as exc:
         secrets.begin_recover_deleted_secret(name, _polling_interval=POLL)
-    assert error_code(exc.value) == "SecretNotFound"
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert exc.value.message == f"Secret exists already: {name}" or f"Secret exists already: {name}" in exc.value.message
 
 
 def test_set_secret_can_continue_after_recover(secrets):
@@ -263,10 +265,14 @@ def test_name_can_be_reused_after_purge(secrets):
 
 
 def test_purge_active_secret_does_not_delete_it(secrets):
+    # Checked against Azure in November 2026: 400 MethodNotAllowed, "Secret must be deleted prior to being purged."
     name = unique("sec")
     secrets.set_secret(name, "v")
-    with pytest.raises(ResourceNotFoundError):
+    with pytest.raises(HttpResponseError) as exc:
         secrets.purge_deleted_secret(name)
+    assert exc.value.status_code == 400
+    assert error_code(exc.value) == "MethodNotAllowed"
+    assert "Secret must be deleted prior to being purged." in exc.value.message
     assert secrets.get_secret(name).value == "v"
 
 

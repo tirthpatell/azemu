@@ -1,8 +1,8 @@
 //! `/dbs`: databases.
 
-use serde_json::{Map, Value};
+use serde_json::Map;
 
-use crate::errors::{check_id, CosmosError, R};
+use crate::errors::{name_of, CosmosError, NameOf, R};
 use crate::offers;
 use crate::out::{Cx, Out};
 use crate::query;
@@ -18,14 +18,9 @@ pub fn list_or_query(cx: &Cx, acct: &Account) -> R<Out> {
 
 pub fn create(cx: &Cx, acct: &mut Account) -> R<Out> {
     let body = cx.body_object()?;
-    let id = body
-        .get("id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| CosmosError::bad_request("The input content is invalid because the required properties - 'id; ' - are missing"))?
-        .to_string();
-    check_id(&id)?;
+    let id = name_of(NameOf::Database, &body)?;
     if acct.databases.contains_key(&id) {
-        return Err(CosmosError::conflict());
+        return Err(CosmosError::resource_conflict());
     }
     let tp = offers::from_headers(cx)?;
     let (bytes, used) = rid::database(acct.db_seq + 1);
@@ -47,15 +42,15 @@ pub fn create(cx: &Cx, acct: &mut Account) -> R<Out> {
         db.offer = Some(offers::create(acct, cx.now, &tp, db.link(), db.meta.rid.clone()));
     }
     let v = db.to_json();
-    let rid = db.meta.rid.clone();
     acct.databases.insert(id.clone(), db);
-    Ok(resource_out(201, v).paths(format!("dbs/{id}"), rid))
+    // no x-ms-content-path or x-ms-alt-content-path: Azure sends neither for a database
+    Ok(resource_out(201, v))
 }
 
 pub fn read(acct: &mut Account, key: &str) -> R<Out> {
     let db = acct.db(key)?;
     let v = db.to_json();
-    Ok(resource_out(200, v).paths(format!("dbs/{}", db.meta.id), db.meta.rid.clone()))
+    Ok(resource_out(200, v))
 }
 
 pub fn delete(acct: &mut Account, key: &str) -> R<Out> {

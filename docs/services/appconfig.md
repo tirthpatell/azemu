@@ -12,6 +12,9 @@ How to reach the emulator from a container, and how to trust the CA: `docs/reach
 **Not built.** `PATCH /kv/{key}`, CORS preflight and any other method or path answer 501 and name the operation. No throttling (429 for request
 rates) and no key or value size limit beyond the 1 MiB request limit. Tokens and HMAC signatures are never checked.
 
+**Key-values from a file.** A seed file (`--seed`, [`docs/seed.md`](../seed.md)) sets the key-values you list (`key`, optional `label`, `value`, optional `contentType`) at start and
+after every reset. A key-value that already exists (from `--data-dir`, say) is not set again, so it gets no new revision.
+
 Crate `azemu-appconfig`, service name `appconfig`, mount `AccountHost("azconfig")`. Wire format (status codes, header names, JSON field order,
 error bodies) was copied from the 304 recordings in `refs/recordings/python/sdk/appconfiguration/` and the 2024-09-01 / 2026-04-01 specs.
 
@@ -61,13 +64,26 @@ and returned untouched.
 - Lists are ordered by key (byte order), the null label first. A page has at most 100 items. A full page always has a
   `Link: <...>; rel="next"` header and `@nextLink` in the body, even when the next page turns out empty (as recorded: no look-ahead).
   The cursor `after` is base64 of `key\nlabel`.
-- The page `ETag` is a hash of the item etags; `If-None-Match` of it answers 304 (with the `Link` header, no `ETag`).
+- The page `ETag` is a hash of the item etags; `If-None-Match` of it (in quotes) answers 304 (with the `Link` header, no `ETag`). Only a value in
+  quotes (or `*`) is a condition on a list: a bare etag is passed over, as Azure does. `If-Match` on a list: `*`, the page's etag or the etag of a
+  setting on the page is 200, another quoted value is `412`.
 - Filter grammar (`key`, `label`, `name`): exact, `prefix*`, `*suffix`, `*contains*`, `*`, comma lists, `\` escapes, the null label as
   `\0` / `%00`. A `*` in the middle is a 400 `invalid-argument` with `pos`. `tags=name=value` (repeatable, all must match).
 - `/revisions` is newest first across all keys. Every write, lock and unlock is a revision; deleted settings keep theirs.
 - Newer api-versions (after 2024-09-01) add `description` to items and snapshots and the `x-ms-item-count` header on lists.
-- Auth: any `Authorization: HMAC-SHA256 ...` or `Bearer ...` is accepted. No header (or another scheme) gives 401 with
-  `WWW-Authenticate: HMAC-SHA256, Bearer`. A missing or unsupported `api-version` is a 400 (`1.0` and dates from 2022-11-01 are accepted).
+- `api-version` is checked against what Azure took in November 2026: `1.0`, `2022-11-01-preview`, `2023-10-01`, `2023-11-01`, `2024-09-01`, `2026-04-01`.
+  Another value that looks like a version (`2022-11-01`, `2025-01-01`, `2.0`) is `400` "Unsupported API version"; text that is no version is "Invalid
+  API version" (the `detail` names the request URI and the version). **No `api-version` at all is taken**, and so are `1.0` and `2022-11-01-preview`, in
+  the older shape: a list has no `etag` in its body.
+- Auth: any `Authorization: HMAC-SHA256 ...` or `Bearer ...` is accepted. No header (or another scheme) gives `401` with no body and
+  `WWW-Authenticate: HMAC-SHA256, Bearer`, as Azure does. A wrong HMAC signature or a bearer token that is not a token is `401` on Azure and passes here:
+  the emulator has no key for a store (stores come into being by being named) and no tenant to ask.
+- Errors of a request that cannot be read are `400 invalid-argument` with the parameter named and an empty `detail`: `key` for a body that is not JSON,
+  `tags` for tags of the wrong type or a `tags=` filter that is not `name=value`, `filters` for a snapshot without usable filters or with more than 3.
+  Six comma-separated values in `key` or `label`: `detail` "key(0): Too many values. Maximum supported is 5", `pos` 0. A `PUT` with another content type than
+  JSON is `415`. `$select` with a field that does not exist leaves the field out (only unknown fields: items of `{}`). A number as `value` is stored as text.
+  A `PUT` or `DELETE` of a locked key is `409` even when its `If-Match` would fail. A second snapshot of a name is `409` with `type` `.../already-exists`,
+  `title` "The resource already exists.", and an empty `detail`.
 - Every response carries `Sync-Token` (`zAJw6V16=<base64>;sn=<increasing>`), `x-ms-request-id`, `x-ms-correlation-request-id`,
   `x-ms-date`, `Strict-Transport-Security`, `Access-Control-Allow-Origin` and the echoed `x-ms-client-request-id`.
 - Snapshots: `PUT` answers 201 `provisioning` (size 0, 7-digit `created`) with `Operation-Location` and
@@ -88,7 +104,7 @@ Azure App Configuration"; REST API pages for key-values and revisions); the defa
 | Bytes of all snapshots per store | 10 MB, 500 MB, 1 GB, 4 GB by tier | 50 MB, else `429` (policy `Snapshot Storage Quota`) | `AZEMU_APPCONFIG_SNAPSHOT_MB` |
 | One snapshot | 1 MB | 1,000,000 bytes, else `400 invalid-argument` (the status is a guess: the page gives no error) | fixed |
 | Snapshots per store | no number | 10,000, else `429` (policy `Snapshot Count`; a guess) | `AZEMU_APPCONFIG_SNAPSHOTS` |
-| Comma-separated values in a `key` / `label` filter, `tags` filters | 5 | 5, else `400 invalid-argument` (the text is a guess); also in snapshot filters | fixed |
+| Comma-separated values in a `key` / `label` filter, `tags` filters | 5 | 5, else `400 invalid-argument` ("key(0): Too many values. Maximum supported is 5", as Azure says); also in snapshot filters | fixed |
 | Items per page | 100 | 100 on every list; a `Range` read on `/revisions` gets one page too (`items 0-99/total`) | fixed |
 
 How it is kept small: a snapshot holds the same stored settings as the live store (a pointer per item, not a copy), so a snapshot of unchanged
@@ -103,17 +119,19 @@ with `Accept-Datetime` look through the history (bounded by the store limit). Th
 - A ready snapshot has `size` of at least 1000 (also with no item), as recorded. `x-ms-item-count` counts only this store's items.
 
 - No throttling: the recordings contain 431 `429 too-many-requests` answers; the emulator never sends one.
-- Bodies that are not in the recordings are guesses: the 400 for a missing or unsupported `api-version`, the 401 body, the 409 for a
-  duplicate snapshot name, 400 messages for bad request bodies and bad `$select` / `tags`.
+- The answers above were tried against a free-tier store in November 2026 (24 requests in this fix, about 75 before); the rest of what is written here as "recorded" comes
+  from the recordings. The lock before `If-Match` was tried for `PUT`; `DELETE` is given the same order by analogy.
 - Revision order inside one second follows write order; real Azure sorts those by etag.
-- `Range` on `/revisions` (206 / 416 with `Content-Range`) comes from the public REST documentation, not from a recording.
+- `Range` on `/revisions` (206 / 416 with `Content-Range`): checked against Azure in November 2026 (a 206 has `Content-Range`, the page `ETag`, and
+  `Link` and `@nextLink` with the `after` cursor when more follow).
 - Assumptions not verifiable from the recordings: lock and unlock create a revision and a new etag (the etag change is recorded,
-  the revision is not); a failing `If-Match` / `If-None-Match` on a write is reported before the 409 lock; `DELETE` with `If-Match` on a
-  missing setting is 412; a snapshot filter without `label` selects the null label only; default snapshot retention is 30 days;
+  the revision is not; tried in November 2026: both make a revision and a new etag); `DELETE` with `If-Match` on a
+  missing setting is 412 (tried: also this one); a snapshot filter without `label` selects the null label only; default snapshot retention is 30 days;
   snapshot `size` is the byte total rounded up to 1000 (recorded: 1000 for one small setting).
-- `If-Match` on a list page is ignored (the recordings show a setting's etag in `If-Match` on a list answered with 200).
 - An `after` cursor the service did not issue starts from the first page instead of failing.
-- Not enforced: key and value size (Azure: 10 KB per key-value including its attributes; here only the 1 MiB request limit), 429 for request rates. Only `.` and `..` are rejected as keys. What is enforced is under "Limits".
+- Not enforced: key and value size (Azure: 10 KB per key-value including its attributes; here only the 1 MiB request limit; the free-tier store
+  answered `413` with an nginx page for a value of 12,000 bytes and took 9,000: that limit comes from the front end and may depend on the tier,
+  so it is not copied), 429 for request rates. Only `.` and `..` are rejected as keys. What is enforced is under "Limits".
 - `Accept` is ignored; the content type is always the recorded one. The label `""` is the null label.
 
 ## Keeping data between runs (`--data-dir`)

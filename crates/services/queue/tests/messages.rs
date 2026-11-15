@@ -342,7 +342,7 @@ async fn unknown_routes_and_verbs() {
     assert_eq!((r.status, error_code(&r).as_str()), (400, "InvalidQueryParameterValue"));
     // OPTIONS is the CORS preflight; without the CORS headers it is a 400
     let r = q.send("OPTIONS", "/routeq/messages", &[], "").await;
-    assert_eq!((r.status, error_code(&r).as_str()), (400, "MissingRequiredHeader"));
+    assert_eq!((r.status, error_code(&r).as_str()), (400, "InvalidHeaderValue"));
 }
 
 // --- visibility and expiry with real time (each waits at most 1.3 s) -------------------

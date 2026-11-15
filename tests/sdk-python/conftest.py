@@ -14,6 +14,11 @@ Environment overrides:
     AZEMU_BIN                path to the binary to start.
     AZEMU_STORAGE_CONN_STR   use this storage connection string as is (for
                              running the storage tests against Azurite).
+    AZEMU_AZURE=1            run against real Azure resources instead of an emulator
+                             (see README.md, "Running a suite against Azure"). No
+                             emulator is started and nothing is reset between tests;
+                             each service's helper module reads the address and the
+                             credential of its resource from AZ_* variables.
 """
 
 import os
@@ -37,6 +42,27 @@ DEV_KEY = (
 )
 
 
+# Real Azure instead of an emulator. A test that checks something only the emulator has (the admin API, reset,
+# auto-creation, a second account by name) carries the marker `emulator_only` and is skipped in this mode.
+AZURE = os.environ.get("AZEMU_AZURE") == "1"
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "emulator_only: checks something only the emulator has; skipped with AZEMU_AZURE=1")
+    config.addinivalue_line("markers", "azure_differs(reason): Azure was seen to answer differently; skipped with AZEMU_AZURE=1")
+
+
+def pytest_collection_modifyitems(config, items):
+    if not AZURE:
+        return
+    for item in items:
+        if item.get_closest_marker("emulator_only"):
+            item.add_marker(pytest.mark.skip(reason="emulator only"))
+        m = item.get_closest_marker("azure_differs")
+        if m:
+            item.add_marker(pytest.mark.skip(reason="Azure differs: " + (m.args[0] if m.args else "")))
+
+
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
@@ -46,11 +72,13 @@ def _free_port() -> int:
 class Emu:
     """A running emulator and the URLs to reach it."""
 
-    def __init__(self, port: int, ca_file: str | None, proc=None, external=False):
+    def __init__(self, port: int, ca_file: str | None, proc=None, external=False, azure=False):
         self.port = port
         self.ca_file = ca_file
         self.proc = proc
         self.external = external
+        # True when the tests run against real Azure (AZEMU_AZURE=1): there is no emulator, no admin API and no reset.
+        self.azure = azure
 
     # -- URLs ---------------------------------------------------------------
     def url(self, label: str, account: str, scheme: str = "http") -> str:
@@ -91,8 +119,8 @@ class Emu:
 
     # -- admin --------------------------------------------------------------
     def reset(self) -> None:
-        """Drop all emulator state. No-op against Azurite."""
-        if self.storage_is_external:
+        """Drop all emulator state. No-op against Azurite and against real Azure."""
+        if self.storage_is_external or self.azure:
             return
         req = urllib.request.Request(f"{self.gateway}/_azemu/reset", method="POST", data=b"")
         urllib.request.urlopen(req, timeout=10).read()
@@ -116,6 +144,10 @@ def _wait_healthy(port: int, proc, timeout: float = 20.0) -> None:
 
 @pytest.fixture(scope="session")
 def emu(azemu_service):
+    if AZURE:
+        yield Emu(0, None, external=True, azure=True)
+        return
+
     if os.environ.get("AZEMU_STORAGE_CONN_STR"):
         yield Emu(0, None, external=True)
         return

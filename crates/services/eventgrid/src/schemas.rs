@@ -52,19 +52,29 @@ pub fn parse_classic(req: &Request, input: InputSchema) -> Result<Vec<Event>, Re
         validate_ce(&ev, "").map_err(|m| errors::invalid_input(label(Schema::CloudEvents), &m))?;
         return Ok(vec![Event::new(Schema::CloudEvents, ev)]);
     }
+    if input == InputSchema::EventGrid {
+        // The content type does not matter to a topic fixed to the Event Grid schema.
+        return Ok(crate::eg_schema::parse_body(req)?.into_iter().map(|e| Event::new(Schema::EventGrid, e)).collect());
+    }
     let value: Value = serde_json::from_slice(&req.body)
         .map_err(|e| errors::invalid_input(label(input.schema().unwrap_or(Schema::EventGrid)), &format!("Invalid JSON: {e}.")))?;
     let items: Vec<Value> = match &value {
         Value::Array(a) => a.clone(),
         Value::Object(_) => vec![value.clone()],
-        _ => return Err(errors::invalid_input(label(input.schema().unwrap_or(Schema::EventGrid)), "Token Expected: StartArray.")),
+        _ => {
+            return Err(errors::invalid_input(
+                label(input.schema().unwrap_or(Schema::EventGrid)),
+                &format!("Token Expected: StartArray, Actual Token Received: {}.", token_name(&value)),
+            ))
+        }
     };
     let schema = match input.schema() {
         Some(s) => s,
         None => infer(shape, &items),
     };
-    let wrong_container =
-        |expected: &str, actual: &str| errors::invalid_input(label(schema), &format!("Token Expected: {expected}, Actual: {actual}."));
+    let wrong_container = |expected: &str, actual: &str| {
+        errors::invalid_input(label(schema), &format!("Token Expected: {expected}, Actual Token Received: {actual}."))
+    };
     match (schema, shape, &value) {
         (Schema::CloudEvents, Shape::CloudSingle, Value::Array(_)) => return Err(wrong_container("StartObject", "StartArray")),
         (Schema::CloudEvents, Shape::CloudBatch, Value::Object(_)) => return Err(wrong_container("StartArray", "StartObject")),
@@ -72,18 +82,24 @@ pub fn parse_classic(req: &Request, input: InputSchema) -> Result<Vec<Event>, Re
         _ => {}
     }
     if items.is_empty() {
-        return Err(errors::invalid_input(label(schema), "The request contains no events."));
+        return Err(errors::invalid_input(label(schema), "Token Expected: StartObject, Actual Token Received: EndArray."));
     }
     let single = matches!(value, Value::Object(_));
     let mut out = Vec::with_capacity(items.len());
     for (i, item) in items.into_iter().enumerate() {
         let path = if single { String::new() } else { format!("[{i}]") };
-        let checked = match schema {
-            Schema::EventGrid => validate_eg(&item, &path),
-            Schema::CloudEvents => validate_ce(&item, &path),
-            Schema::Custom => validate_custom(&item, &path),
+        let item = match schema {
+            // an `Auto` topic takes events of any shape, so it does not refuse properties the schema lacks
+            Schema::EventGrid => crate::eg_schema::check_event(item, false).map_err(|f| f.into_response(req))?,
+            Schema::CloudEvents => {
+                validate_ce(&item, &path).map_err(|m| errors::invalid_input(label(schema), &m))?;
+                item
+            }
+            Schema::Custom => {
+                validate_custom(&item, &path).map_err(|m| errors::invalid_input(label(schema), &m))?;
+                item
+            }
         };
-        checked.map_err(|m| errors::invalid_input(label(schema), &m))?;
         out.push(Event::new(schema, item));
     }
     Ok(out)
@@ -151,15 +167,16 @@ fn require_str(o: &Map<String, Value>, name: &str, path: &str) -> Result<(), Str
     }
 }
 
-fn object<'a>(v: &'a Value, path: &str) -> Result<&'a Map<String, Value>, String> {
-    v.as_object().ok_or_else(|| format!("Token Expected: StartObject, Actual: {}. Path '{path}'.", token_name(v)))
+fn object(v: &Value) -> Result<&Map<String, Value>, String> {
+    v.as_object().ok_or_else(|| format!("Token Expected: StartObject, Actual Token Received: {}.", token_name(v)))
 }
 
 fn token_name(v: &Value) -> &'static str {
     match v {
         Value::Null => "Null",
         Value::Bool(_) => "Boolean",
-        Value::Number(_) => "Number",
+        Value::Number(n) if n.is_f64() => "Float",
+        Value::Number(_) => "Integer",
         Value::String(_) => "String",
         Value::Array(_) => "StartArray",
         Value::Object(_) => "StartObject",
@@ -174,21 +191,8 @@ fn dotted(path: &str, name: &str) -> String {
     }
 }
 
-pub fn validate_eg(v: &Value, path: &str) -> Result<(), String> {
-    let o = object(v, path)?;
-    for name in ["id", "subject", "eventType", "eventTime", "dataVersion"] {
-        require_str(o, name, path)?;
-    }
-    if let Some(t) = o.get("eventTime").and_then(Value::as_str) {
-        if parse_iso8601(t).is_none() {
-            return Err(format!("Could not convert string to DateTime: {t}. Path '{}'.", dotted(path, "eventTime")));
-        }
-    }
-    Ok(())
-}
-
 pub fn validate_ce(v: &Value, path: &str) -> Result<(), String> {
-    let o = object(v, path)?;
+    let o = object(v)?;
     for name in ["specversion", "id", "source", "type"] {
         require_str(o, name, path)?;
     }
@@ -215,8 +219,8 @@ pub fn validate_ce(v: &Value, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn validate_custom(v: &Value, path: &str) -> Result<(), String> {
-    object(v, path).map(|_| ())
+pub fn validate_custom(v: &Value, _path: &str) -> Result<(), String> {
+    object(v).map(|_| ())
 }
 
 /// CloudEvents binary content mode: attributes in `ce-*` headers, the body is the data.
@@ -279,24 +283,6 @@ mod tests {
         assert_eq!(infer(Shape::Json, &ce), Schema::CloudEvents);
         assert_eq!(infer(Shape::Json, &custom), Schema::Custom);
         assert_eq!(infer(Shape::CloudBatch, &custom), Schema::CloudEvents);
-    }
-
-    #[test]
-    fn eg_validation() {
-        let ok = json!({"id":"1","subject":"s","eventType":"t","eventTime":"2024-05-23T22:06:35.487928Z","dataVersion":"2.0","data":{}});
-        assert!(validate_eg(&ok, "[0]").is_ok());
-        let mut no_subject = ok.clone();
-        no_subject.as_object_mut().unwrap().remove("subject");
-        let e = validate_eg(&no_subject, "[0]").unwrap_err();
-        assert!(e.contains("'subject'"), "{e}");
-        let mut bad_time = ok.clone();
-        bad_time["eventTime"] = json!("yesterday");
-        assert!(validate_eg(&bad_time, "[0]").is_err());
-        assert!(validate_eg(&json!(5), "[0]").is_err());
-        // data is optional
-        let mut no_data = ok;
-        no_data.as_object_mut().unwrap().remove("data");
-        assert!(validate_eg(&no_data, "").is_ok());
     }
 
     #[test]

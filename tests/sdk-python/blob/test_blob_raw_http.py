@@ -469,3 +469,47 @@ def test_cors_preflight_uses_service_cors_rules(service, container):
         assert bad.status_code == 403
     finally:
         service.set_service_properties(cors=[])
+
+
+# --- customer-provided keys: the codes Azure answers (November 2026) --------------------------------------------------
+
+
+def _cpk(seed):
+    key = base64.b64encode(hashlib.sha256(seed).digest()).decode()
+    sha = base64.b64encode(hashlib.sha256(base64.b64decode(key)).digest()).decode()
+    return {"x-ms-encryption-key": key, "x-ms-encryption-key-sha256": sha, "x-ms-encryption-algorithm": "AES256"}
+
+
+def test_customer_provided_key_errors(u):
+    k1, k2 = _cpk(b"one"), _cpk(b"two")
+    bt = {"x-ms-blob-type": "BlockBlob"}
+    assert requests.put(u("secret"), data=b"x", headers={**bt, **k1}).status_code == 201
+    code = lambda r: (r.status_code, r.headers.get("x-ms-error-code"))
+    assert code(requests.get(u("secret"))) == (409, "BlobUsesCustomerSpecifiedEncryption")
+    # another key
+    r = requests.get(u("secret"), headers=k2)
+    assert code(r) == (409, "BlobCustomerSpecifiedEncryptionMismatch")
+    assert "does not match the encryption used to encrypt the blob" in r.text
+    assert code(requests.head(u("secret"), headers=k2)) == (409, "BlobCustomerSpecifiedEncryptionMismatch")
+    # the hash of another key without the key does not name a key
+    assert code(requests.head(u("secret"), headers={"x-ms-encryption-key-sha256": k2["x-ms-encryption-key-sha256"]})) == (409, "BlobUsesCustomerSpecifiedEncryption")
+    assert requests.get(u("secret"), headers=k1).status_code == 200
+    # overwriting with no key or another key works
+    assert requests.put(u("secret"), data=b"y", headers=bt).status_code == 201
+    assert requests.put(u("secret"), data=b"y", headers={**bt, **k2}).status_code == 201
+    # a key for a blob that was written without one
+    assert requests.put(u("plain"), data=b"x", headers=bt).status_code == 201
+    r = requests.get(u("plain"), headers=k1)
+    assert code(r) == (409, "BlobDoesNotUseCustomerSpecifiedEncryption")
+    assert "not encrypted with customer specified encryption" in r.text
+    assert code(requests.head(u("plain"), headers=k1)) == (409, "BlobDoesNotUseCustomerSpecifiedEncryption")
+    assert code(requests.put(u("plain", comp="metadata"), headers={**k1, "x-ms-meta-a": "1"})) == (409, "BlobDoesNotUseCustomerSpecifiedEncryption")
+    # a hash without the key is accepted on a write; the blob has no key
+    assert requests.put(u("hashonly"), data=b"x", headers={**bt, "x-ms-encryption-key-sha256": k1["x-ms-encryption-key-sha256"]}).status_code == 201
+    assert requests.get(u("hashonly")).status_code == 200
+    # a hash that is not the hash of the key names the hash header
+    bad = {**k1, "x-ms-encryption-key-sha256": k2["x-ms-encryption-key-sha256"]}
+    r = requests.put(u("bad"), data=b"x", headers={**bt, **bad})
+    assert code(r) == (400, "InvalidHeaderValue")
+    assert _error(r).findtext("HeaderName") == "x-ms-encryption-key-sha256"
+    assert _error(r).findtext("HeaderValue") == k2["x-ms-encryption-key-sha256"]

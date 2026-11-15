@@ -365,13 +365,40 @@ async fn operation_cancel_delete_and_unknown_issuer_pending() {
     assert_eq!(r.status, 200);
     assert!(r.json().get("policy").is_none() && r.json().get("pending").is_none());
     assert_eq!(kv.get("/certificates/ext/ffffffffffffffffffffffffffffffff").await.status, 404);
-    // lists: the plain list leaves it out, includePending shows it, the versions list has its one version
+    // tried against Azure in November 2026: the bundle is disabled and has the dates of the certificate to come
+    assert_eq!(c["attributes"]["enabled"], false);
+    assert!(c["attributes"]["nbf"].is_i64() && c["attributes"]["exp"].as_i64() > c["attributes"]["nbf"].as_i64());
+    // lists: the plain list leaves it out, includePending shows it, the versions list is empty
     assert_eq!(kv.get("/certificates").await.json()["value"].as_array().unwrap().len(), 1);
     let l = kv.get("/certificates?includePending=true").await.json();
     assert_eq!(l["value"].as_array().unwrap().len(), 2);
     let v = kv.get("/certificates/ext/versions").await.json();
-    assert_eq!(v["value"].as_array().unwrap().len(), 1);
-    assert_eq!(v["value"][0]["id"], id);
+    assert_eq!(v["value"].as_array().unwrap().len(), 0);
+    // a second request while the first is pending is refused
+    let r =
+        kv.post("/certificates/ext/create", json!({"policy": {"x509_props": {"subject": "CN=ext"}, "issuer": {"name": "Unknown"}}})).await;
+    assert_eq!((r.status, code(&r).as_str()), (409, "Conflict"));
+    assert_eq!(
+        r.json()["error"]["message"],
+        "A new key vault certificate can not be created or imported while a pending key vault certificate's status is inProgress."
+    );
+    // a cancel keeps the request in progress and sets the flag; asking with false takes it back; deleting the request
+    // answers with the request and leaves the certificate, still without a version
+    let r = kv.call("PATCH", "/certificates/ext/pending", Some(json!({"cancellation_requested": true}))).await.json();
+    assert_eq!((r["status"].as_str(), r["cancellation_requested"].as_bool()), (Some("inProgress"), Some(true)));
+    assert!(r["status_details"].is_string());
+    let r = kv.call("PATCH", "/certificates/ext/pending", Some(json!({"cancellation_requested": false}))).await.json();
+    assert_eq!(r["cancellation_requested"], false);
+    assert_eq!(kv.call("DELETE", "/certificates/ext/pending", None).await.json()["status"], "inProgress");
+    let c = kv.get("/certificates/ext").await.json();
+    assert!(c.get("pending").is_none() && c["policy"]["issuer"]["name"] == "Unknown" && c["attributes"]["enabled"] == false);
+    // a new request is then allowed
+    assert_eq!(
+        kv.post("/certificates/ext/create", json!({"policy": {"x509_props": {"subject": "CN=ext"}, "issuer": {"name": "Unknown"}}}))
+            .await
+            .status,
+        202
+    );
     // a certificate that was never requested is still 404
     assert_eq!(kv.get("/certificates/never").await.status, 404);
     // merging a certificate for some other key is refused
@@ -591,7 +618,7 @@ async fn a_pending_certificate_can_be_deleted_and_is_listed_only_on_request() {
     assert_eq!(kv.post("/certificates/ext2/create", json!({"policy": unknown_policy("CN=ext2")})).await.status, 202);
     let d = kv.call("DELETE", "/certificates/ext2", None).await;
     assert_eq!(d.status, 200);
-    assert_eq!(d.json()["attributes"]["enabled"], true);
+    assert_eq!(d.json()["attributes"]["enabled"], false);
     assert_eq!(kv.post("/deletedcertificates/ext2/recover", json!({})).await.status, 200);
 }
 

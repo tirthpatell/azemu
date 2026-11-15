@@ -5,42 +5,74 @@ use crate::error::SqlError;
 use crate::functions;
 use crate::lexer::{tokenize, Tok, Token};
 
-const MAX_NEST: usize = 24;
-const MAX_EXPR_DEPTH: u16 = 100;
-/// Most sources a FROM clause may have (the first one plus its JOINs).
-const MAX_FROM_SOURCES: usize = 64;
+const MAX_NEST: usize = 996;
+const MAX_EXPR_DEPTH: u16 = 4096;
+/// Most JOINs a query may have, counted over the whole text (the subqueries too): Azure refuses an eleventh.
+const MAX_JOINS: usize = 10;
+/// Largest TOP, OFFSET or LIMIT count (a real account takes 2147483648 and refuses 99999999999; this is a guess between them).
+pub(crate) const MAX_COUNT: i64 = u32::MAX as i64;
 
+/// The reserved words of the language (Azure refuses them as property names after a dot, as aliases and as unquoted
+/// object keys; checked against a real account, November 2026). `LEFT` and `RIGHT` are also function names.
 const RESERVED: &[&str] = &[
-    "SELECT",
-    "FROM",
-    "WHERE",
-    "ORDER",
-    "BY",
-    "GROUP",
-    "JOIN",
-    "AS",
-    "IN",
-    "NOT",
     "AND",
-    "OR",
-    "BETWEEN",
-    "LIKE",
-    "ESCAPE",
-    "TOP",
-    "DISTINCT",
-    "VALUE",
-    "OFFSET",
-    "LIMIT",
+    "ARRAY",
+    "AS",
     "ASC",
+    "BETWEEN",
+    "BY",
+    "CASE",
+    "CAST",
+    "CONVERT",
+    "CROSS",
     "DESC",
+    "DISTINCT",
+    "ELSE",
+    "END",
+    "ESCAPE",
     "EXISTS",
-    "TRUE",
     "FALSE",
+    "FOR",
+    "FROM",
+    "GROUP",
+    "HAVING",
+    "IN",
+    "INNER",
+    "INSERT",
+    "INTO",
+    "IS",
+    "JOIN",
+    "LEFT",
+    "LIKE",
+    "LIMIT",
+    "NOT",
     "NULL",
+    "OFFSET",
+    "ON",
+    "OR",
+    "ORDER",
+    "OUTER",
+    "OVER",
+    "RIGHT",
+    "SELECT",
+    "SET",
+    "THEN",
+    "TOP",
+    "TRUE",
+    "UDF",
     "UNDEFINED",
+    "UPDATE",
+    "VALUE",
+    "WHEN",
+    "WHERE",
+    "WITH",
 ];
 
 fn is_reserved(w: &str) -> bool {
+    // `udf` is a keyword only in lower case (`UDF.f(1)` is a path, and a syntax error at the bracket)
+    if w.eq_ignore_ascii_case("udf") {
+        return w == "udf";
+    }
     RESERVED.iter().any(|r| r.eq_ignore_ascii_case(w))
 }
 
@@ -51,13 +83,15 @@ struct Parser<'s> {
     last_end: usize,
     gen: usize,
     src: &'s [char],
+    /// JOINs seen so far in the whole text.
+    joins: usize,
 }
 
 /// Parses query text into an AST (syntax and function-name checks only).
 pub(crate) fn parse_text(sql: &str) -> Result<Query, SqlError> {
     let src: Vec<char> = sql.chars().collect();
     let toks = tokenize(&src)?;
-    let mut p = Parser { toks, pos: 0, nest: 0, last_end: 0, gen: 0, src: &src };
+    let mut p = Parser { toks, pos: 0, nest: 0, last_end: 0, gen: 0, src: &src, joins: 0 };
     let q = p.parse_query()?;
     if !matches!(p.peek(), Tok::Eof) {
         return Err(p.err_here());
@@ -88,6 +122,9 @@ impl<'s> Parser<'s> {
     }
     fn err_here(&self) -> SqlError {
         let t = &self.toks[self.pos];
+        if matches!(t.tok, Tok::Eof) {
+            return SqlError::at("SC1002", "Syntax error, unexpected end-of-file.".to_string(), t.start, t.end);
+        }
         SqlError::syntax_near(&self.text(t.start, t.end), t.start, t.end)
     }
     fn is_word(&self, kw: &str) -> bool {
@@ -137,7 +174,7 @@ impl<'s> Parser<'s> {
         let depth = 1 + kind_depth(&kind);
         let span = Span { start, end: self.last_end };
         if depth > MAX_EXPR_DEPTH {
-            return Err(SqlError::limit("The query is nested too deeply.".to_string()));
+            return Err(too_complex(start, span.end));
         }
         Ok(Expr { kind, span, depth })
     }
@@ -145,7 +182,8 @@ impl<'s> Parser<'s> {
     fn enter(&mut self) -> Result<(), SqlError> {
         self.nest += 1;
         if self.nest > MAX_NEST {
-            return Err(SqlError::limit("The query is nested too deeply.".to_string()));
+            let t = &self.toks[self.pos];
+            return Err(too_complex(t.start, t.end));
         }
         Ok(())
     }
@@ -162,19 +200,10 @@ impl<'s> Parser<'s> {
     fn parse_query_inner(&mut self) -> Result<Query, SqlError> {
         let qstart = self.cur_start();
         self.expect_word("SELECT")?;
-        let mut distinct = false;
-        let mut top = None;
-        loop {
-            if self.is_word("DISTINCT") && !distinct {
-                self.advance();
-                distinct = true;
-            } else if self.is_word("TOP") && top.is_none() {
-                self.advance();
-                top = Some(self.parse_unary()?);
-            } else {
-                break;
-            }
-        }
+        let distinct = self.eat_word("DISTINCT");
+        let top_start = self.cur_start();
+        let top = if self.eat_word("TOP") { Some(self.parse_count(Count::Top)?) } else { None };
+        let top_span = top.as_ref().map(|_| Span { start: top_start, end: self.last_end });
         let items_start = self.cur_start();
         let spec = if self.eat_sym("*") {
             SelectSpec::Star
@@ -186,16 +215,20 @@ impl<'s> Parser<'s> {
             let mut items = Vec::new();
             loop {
                 let expr = self.parse_expr()?;
-                let alias = self.parse_alias()?;
-                items.push(SelectItem { expr, alias });
+                let (alias, alias_span) = match self.parse_alias()? {
+                    Some((a, sp)) => (Some(a), Some(sp)),
+                    None => (None, None),
+                };
+                items.push(SelectItem { expr, alias, alias_span });
                 if !self.eat_sym(",") {
                     break;
                 }
             }
+            check_duplicate_names(&items)?;
             SelectSpec::Items(items)
         };
         let items_span = Span { start: items_start, end: self.last_end };
-        let select = Select { distinct, top, spec, items_span };
+        let select = Select { distinct, top, top_span, spec, items_span };
 
         let from = if self.is_word("FROM") { Some(self.parse_from()?) } else { None };
         let where_clause = if self.eat_word("WHERE") { Some(self.parse_expr()?) } else { None };
@@ -211,6 +244,7 @@ impl<'s> Parser<'s> {
             }
         }
         let mut order_by = Vec::new();
+        let order_start = self.cur_start();
         if self.is_word("ORDER") {
             self.advance();
             self.expect_word("BY")?;
@@ -228,11 +262,14 @@ impl<'s> Parser<'s> {
                 }
             }
         }
+        let order_end = self.last_end;
+        let order_by_present = !order_by.is_empty();
+        let offset_start = self.cur_start();
         let offset_limit = if self.eat_word("OFFSET") {
-            let offset = self.parse_unary()?;
+            let offset = self.parse_count(Count::Offset)?;
             self.expect_word("LIMIT")?;
-            let limit = self.parse_unary()?;
-            Some(OffsetLimit { offset, limit })
+            let limit = self.parse_count(Count::Limit)?;
+            Some(OffsetLimit { offset, limit, span: Span { start: offset_start, end: self.last_end } })
         } else {
             None
         };
@@ -249,41 +286,65 @@ impl<'s> Parser<'s> {
             where_clause,
             group_by,
             order_by,
+            order_span: if order_by_present { Some(Span { start: order_start, end: order_end }) } else { None },
             offset_limit,
             is_aggregate,
             span: Span { start: qstart, end: self.last_end },
         })
     }
 
-    /// `AS name` or a bare name.
-    fn parse_alias(&mut self) -> Result<Option<String>, SqlError> {
-        if self.eat_word("AS") {
-            return match self.peek().clone() {
-                Tok::Word(w) if !is_reserved(&w) => {
-                    self.advance();
-                    Ok(Some(w))
-                }
-                _ => Err(self.err_here()),
-            };
-        }
+    /// `AS name` or a bare name, with the position of the name.
+    fn parse_alias(&mut self) -> Result<Option<(String, Span)>, SqlError> {
+        let had_as = self.eat_word("AS");
         if let Tok::Word(w) = self.peek().clone() {
             if !is_reserved(&w) {
-                self.advance();
-                return Ok(Some(w));
+                let t = self.advance();
+                return Ok(Some((w, Span { start: t.start, end: t.end })));
             }
         }
+        if had_as {
+            return Err(self.err_here());
+        }
         Ok(None)
+    }
+
+    /// The count after TOP, OFFSET or LIMIT: one number or a parameter (no sign, no expression).
+    fn parse_count(&mut self, what: Count) -> Result<Expr, SqlError> {
+        let start = self.cur_start();
+        let (lit, end) = match self.peek().clone() {
+            Tok::Int(i) => (Some(Literal::Int(i)), self.toks[self.pos].end),
+            Tok::Float(f) if what == Count::Top => (Some(Literal::Float(f)), self.toks[self.pos].end),
+            Tok::Param(_) => (None, self.toks[self.pos].end),
+            _ => return Err(self.err_here()),
+        };
+        if let Some(l) = &lit {
+            let value = match l {
+                Literal::Int(i) => Some(*i),
+                Literal::Float(f) if f.fract() == 0.0 && f.abs() < 4e18 => Some(*f as i64),
+                _ => None,
+            };
+            if !matches!(value, Some(v) if (0..=MAX_COUNT).contains(&v)) {
+                let (code, text) = what.limit_error();
+                return Err(SqlError::at(code, text.to_string(), start, end));
+            }
+        }
+        self.parse_primary()
     }
 
     fn parse_from(&mut self) -> Result<From, SqlError> {
         let start = self.cur_start();
         self.expect_word("FROM")?;
         let mut sources = vec![self.parse_source()?];
-        while self.eat_word("JOIN") {
-            // The evaluator walks the sources recursively (one level each): bound it, so that a 512 KB query of
-            // JOINs cannot overflow a thread stack. Azure documents 10 JOINs per query; this is far above any real one.
-            if sources.len() >= MAX_FROM_SOURCES {
-                return Err(SqlError::limit(format!("A query may have at most {MAX_FROM_SOURCES} sources in FROM and JOIN.")));
+        while self.is_word("JOIN") {
+            self.advance();
+            self.joins += 1;
+            if self.joins > MAX_JOINS {
+                return Err(SqlError::at(
+                    "SC3002",
+                    format!("The SQL query exceeded the maximum number of joins. The allowed limit is {MAX_JOINS}."),
+                    0,
+                    self.src.len(),
+                ));
             }
             sources.push(self.parse_source()?);
         }
@@ -293,12 +354,14 @@ impl<'s> Parser<'s> {
     fn parse_source(&mut self) -> Result<FromSource, SqlError> {
         let start = self.cur_start();
         let mut alias = None;
+        let mut alias_span = None;
         let mut iterate = false;
         if let Tok::Word(w) = self.peek().clone() {
             if !is_reserved(&w) && self.is_word_at(1, "IN") {
-                self.advance();
+                let t = self.advance();
                 self.advance();
                 alias = Some(w);
+                alias_span = Some(Span { start: t.start, end: t.end });
                 iterate = true;
             }
         }
@@ -308,14 +371,13 @@ impl<'s> Parser<'s> {
             self.expect_sym(")")?;
             SourceExpr::Subquery(Box::new(q))
         } else {
-            let e = self.parse_postfix()?;
-            if !is_path(&e) {
-                return Err(SqlError::syntax_near(&self.text(e.span.start, e.span.end), e.span.start, e.span.end));
-            }
-            SourceExpr::Expr(e)
+            SourceExpr::Expr(self.parse_path()?)
         };
         if !iterate {
-            alias = self.parse_alias()?;
+            if let Some((a, sp)) = self.parse_alias()? {
+                alias = Some(a);
+                alias_span = Some(sp);
+            }
         }
         let alias = match alias {
             Some(a) => a,
@@ -330,7 +392,55 @@ impl<'s> Parser<'s> {
                 })
             }
         };
-        Ok(FromSource { alias, iterate, source, span: Span { start, end: self.last_end } })
+        Ok(FromSource { alias, alias_span, iterate, source, span: Span { start, end: self.last_end } })
+    }
+
+    /// A path in FROM or JOIN: a name followed by `.name` and `[index]` steps, nothing else.
+    fn parse_path(&mut self) -> Result<Expr, SqlError> {
+        let start = self.cur_start();
+        let name = match self.peek().clone() {
+            Tok::Word(w) if !is_reserved(&w) => w,
+            _ => return Err(self.err_here()),
+        };
+        self.advance();
+        let mut e = self.mk(ExprKind::Ident(name), start)?;
+        loop {
+            if self.is_sym(".") {
+                self.advance();
+                e = self.property_step(e, start)?;
+            } else if self.is_sym("[") {
+                self.advance();
+                e = self.index_step(e, start)?;
+            } else {
+                return Ok(e);
+            }
+        }
+    }
+
+    /// The name after a dot (a reserved word cannot be one).
+    fn property_step(&mut self, base: Expr, start: usize) -> Result<Expr, SqlError> {
+        match self.peek().clone() {
+            Tok::Word(w) if !is_reserved(&w) => {
+                self.advance();
+                self.mk(ExprKind::Property(Box::new(base), w), start)
+            }
+            _ => Err(self.err_here()),
+        }
+    }
+
+    /// The `[index]` step; the bracket is already read. Azure takes a number, a string or a parameter there.
+    fn index_step(&mut self, base: Expr, start: usize) -> Result<Expr, SqlError> {
+        let idx = self.parse_expr()?;
+        self.expect_sym("]")?;
+        if !matches!(idx.kind, ExprKind::Literal(Literal::Int(_) | Literal::Float(_) | Literal::Str(_)) | ExprKind::Param(_)) {
+            return Err(SqlError::at(
+                "SC2990",
+                "The specified query includes 'member indexer' which is currently not supported.".to_string(),
+                start,
+                self.last_end,
+            ));
+        }
+        self.mk(ExprKind::Index(Box::new(base), Box::new(idx)), start)
     }
 
     // ---------------------------------------------------------- expressions
@@ -438,7 +548,24 @@ impl<'s> Parser<'s> {
                 left = self.mk(ExprKind::Between { expr: Box::new(left), low: Box::new(low), high: Box::new(high), negated }, start)?;
             } else if self.eat_word("LIKE") {
                 let pattern = self.parse_bitor()?;
-                let escape = if self.eat_word("ESCAPE") { Some(Box::new(self.parse_bitor()?)) } else { None };
+                let escape = if self.eat_word("ESCAPE") {
+                    let tok = self.toks[self.pos].clone();
+                    let text = match &tok.tok {
+                        Tok::Str(t) => t.clone(),
+                        _ => return Err(self.err_here()),
+                    };
+                    if text.chars().count() != 1 {
+                        return Err(SqlError::at(
+                            "SC2207",
+                            format!("The invalid escape character '{text}' was specified in a LIKE predicate."),
+                            tok.start,
+                            tok.end,
+                        ));
+                    }
+                    Some(Box::new(self.parse_primary()?))
+                } else {
+                    None
+                };
                 left = self.mk(ExprKind::Like { expr: Box::new(left), pattern: Box::new(pattern), escape, negated }, start)?;
             } else {
                 let op = match self.peek() {
@@ -538,18 +665,10 @@ impl<'s> Parser<'s> {
         loop {
             if self.is_sym(".") {
                 self.advance();
-                match self.peek().clone() {
-                    Tok::Word(w) => {
-                        self.advance();
-                        e = self.mk(ExprKind::Property(Box::new(e), w), start)?;
-                    }
-                    _ => return Err(self.err_here()),
-                }
+                e = self.property_step(e, start)?;
             } else if self.is_sym("[") {
                 self.advance();
-                let idx = self.parse_expr()?;
-                self.expect_sym("]")?;
-                e = self.mk(ExprKind::Index(Box::new(e), Box::new(idx)), start)?;
+                e = self.index_step(e, start)?;
             } else {
                 return Ok(e);
             }
@@ -606,15 +725,23 @@ impl<'s> Parser<'s> {
             }
             Tok::Sym("{") => {
                 self.advance();
-                let mut pairs = Vec::new();
+                let mut pairs: Vec<(String, Expr)> = Vec::new();
                 if !self.is_sym("}") {
                     loop {
                         let key = match self.peek().clone() {
-                            Tok::Word(w) => w,
+                            Tok::Word(w) if !is_reserved(&w) => w,
                             Tok::Str(s) => s,
                             _ => return Err(self.err_here()),
                         };
-                        self.advance();
+                        let key_tok = self.advance();
+                        if pairs.iter().any(|(k, _)| *k == key) {
+                            return Err(SqlError::at(
+                                "SC2022",
+                                format!("Object creation error, property name '{key}' specified more than once."),
+                                key_tok.start,
+                                key_tok.end,
+                            ));
+                        }
                         self.expect_sym(":")?;
                         pairs.push((key, self.parse_expr()?));
                         if !self.eat_sym(",") {
@@ -641,7 +768,7 @@ impl<'s> Parser<'s> {
         let mut e = self.mk(k, start)?;
         e.depth = e.depth.max(inner.saturating_add(1));
         if e.depth > MAX_EXPR_DEPTH {
-            return Err(SqlError::limit("The query is nested too deeply.".to_string()));
+            return Err(too_complex(start, self.last_end));
         }
         Ok(e)
     }
@@ -677,7 +804,12 @@ impl<'s> Parser<'s> {
             let v = if w == "NaN" { f64::NAN } else { f64::INFINITY };
             return self.mk(ExprKind::Literal(Literal::Float(v)), start);
         }
-        if up == "UDF" && self.is_sym_at(1, ".") {
+        if w == "udf" && !self.is_sym_at(1, ".") {
+            // the keyword is followed by `.name(`; the error is at the token after it
+            self.advance();
+            return Err(self.err_here());
+        }
+        if w == "udf" && self.is_sym_at(1, ".") {
             let name_tok = self.toks[(self.pos + 2).min(self.toks.len() - 1)].clone();
             let name = match &name_tok.tok {
                 Tok::Word(n) => n.clone(),
@@ -709,17 +841,25 @@ impl<'s> Parser<'s> {
             self.expect_sym(")")?;
             return self.mk(ExprKind::Udf { name, args }, start);
         }
+        if is_reserved(&w) && !(self.is_sym_at(1, "(") && functions::lookup(&up).is_some()) {
+            return Err(self.err_here());
+        }
         if self.is_sym_at(1, "(") {
             return self.parse_call(w, up, start);
-        }
-        if is_reserved(&w) {
-            return Err(self.err_here());
         }
         self.advance();
         self.mk(ExprKind::Ident(w), start)
     }
 
     fn parse_call(&mut self, name: String, up: String, start: usize) -> Result<Expr, SqlError> {
+        // a call counts as a level of its own on top of its arguments: Azure takes about 500 nested calls, 996 parentheses
+        self.enter()?;
+        let r = self.parse_call_inner(name, up, start);
+        self.nest -= 1;
+        r
+    }
+
+    fn parse_call_inner(&mut self, name: String, up: String, start: usize) -> Result<Expr, SqlError> {
         let name_end = self.toks[self.pos].end;
         self.advance();
         self.advance();
@@ -744,7 +884,7 @@ impl<'s> Parser<'s> {
         };
         if let Some(kind) = agg {
             if args.len() != 1 {
-                return Err(SqlError::semantic("SC2008", format!("The function '{up}' requires 1 argument(s)."), start, self.last_end));
+                return Err(SqlError::semantic("SC2050", format!("The {up} function requires 1 argument(s)."), start, self.last_end));
             }
             let arg = Box::new(args.remove(0));
             return self.mk(ExprKind::Aggregate { kind, arg }, start);
@@ -766,11 +906,11 @@ impl<'s> Parser<'s> {
             } else if spec.max == functions::VARIADIC {
                 format!("at least {}", spec.min)
             } else {
-                format!("between {} and {}", spec.min, spec.max)
+                format!("{} to {}", spec.min, spec.max)
             };
             return Err(SqlError::semantic(
-                "SC2008",
-                format!("The function '{}' requires {req} argument(s).", spec.name),
+                "SC2050",
+                format!("The {} function requires {req} argument(s).", spec.name),
                 start,
                 self.last_end,
             ));
@@ -779,19 +919,72 @@ impl<'s> Parser<'s> {
     }
 }
 
+/// Which count a number follows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Count {
+    Top,
+    Offset,
+    Limit,
+}
+
+impl Count {
+    fn limit_error(self) -> (&'static str, &'static str) {
+        match self {
+            Count::Top => ("SC2060", "The count value provided for a TOP clause must be an integer."),
+            Count::Offset => ("SC2062", "The OFFSET count value exceeds the maximum allowed value."),
+            Count::Limit => ("SC2061", "The LIMIT count value exceeds the maximum allowed value."),
+        }
+    }
+}
+
+/// What Azure answers for a query nested too deeply (`SC1030`); the kind stays a limit.
+fn too_complex(start: usize, end: usize) -> SqlError {
+    let mut e = SqlError::at(
+        "SC1030",
+        "The query is too complex to be processed. To resolve this issue, please consider breaking the query into multiple smaller queries, simplifying the complex expression, and/or using Computed Properties."
+            .to_string(),
+        start,
+        end,
+    );
+    e.kind = crate::error::ErrorKind::LimitExceeded;
+    e
+}
+
+/// Two select items with the same name are refused (`SELECT c.id, c.id`); the error sits on the name of the second.
+fn check_duplicate_names(items: &[SelectItem]) -> Result<(), SqlError> {
+    let mut seen: Vec<String> = Vec::new();
+    for it in items {
+        let (name, span) = match (&it.alias, it.alias_span) {
+            (Some(a), Some(sp)) => (a.clone(), sp),
+            _ => match &it.expr.kind {
+                ExprKind::Property(_, n) => {
+                    (n.clone(), Span { start: it.expr.span.end.saturating_sub(n.chars().count()), end: it.expr.span.end })
+                }
+                ExprKind::Index(_, i) => match &i.kind {
+                    ExprKind::Literal(Literal::Str(s)) => (s.clone(), i.span),
+                    _ => continue,
+                },
+                ExprKind::Ident(n) => (n.clone(), it.expr.span),
+                _ => continue,
+            },
+        };
+        if seen.contains(&name) {
+            return Err(SqlError::at(
+                "SC2022",
+                format!("Object creation error, property name '{name}' specified more than once."),
+                span.start,
+                span.end,
+            ));
+        }
+        seen.push(name);
+    }
+    Ok(())
+}
+
 enum SubKind {
     Scalar,
     Exists,
     Array,
-}
-
-fn is_path(e: &Expr) -> bool {
-    match &e.kind {
-        ExprKind::Ident(_) => true,
-        ExprKind::Property(b, _) => is_path(b),
-        ExprKind::Index(b, _) => is_path(b),
-        _ => false,
-    }
 }
 
 fn kind_depth(kind: &ExprKind) -> u16 {

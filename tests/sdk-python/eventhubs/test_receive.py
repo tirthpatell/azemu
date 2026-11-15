@@ -297,7 +297,7 @@ def test_two_partitions_can_be_received_on_one_client_by_two_calls(emu, hub, pro
     got = []
     t = threading.Thread(
         target=client.receive_batch, args=(lambda ctx, evs: got.extend((ctx.partition_id, e.body_as_str()) for e in evs),),
-        kwargs=dict(partition_id="1", starting_position="-1", max_wait_time=1), daemon=True,
+        kwargs=ehutil.start_kwargs(hub, dict(partition_id="1", starting_position="-1", max_wait_time=1)), daemon=True,
     )
     with Collector(client, partition_id="0", starting_position="-1", max_wait_time=1) as col:
         t.start()

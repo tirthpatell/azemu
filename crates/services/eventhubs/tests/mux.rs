@@ -199,3 +199,15 @@ async fn event_hubs_and_service_bus_share_one_port() {
     assert_eq!(r.status, 200);
     assert!(r.text().contains("mixed"), "{}", r.text());
 }
+
+#[tokio::test]
+async fn the_open_frame_of_event_hubs_has_its_own_frame_size_and_idle_timeout() {
+    // read from a real namespace (November 2026): 64 KiB frames and 120 s; the other service keeps the server's settings (1 MiB, 240 s)
+    let s = setup().await;
+    let eh = connect(s.srv.port(), "myns.eventhub.localhost").await;
+    let open = eh.peer_open.clone().unwrap();
+    assert_eq!((open.max_frame_size, open.idle_timeout), (65_536, Some(120_000)));
+    let other = connect(s.srv.port(), "myns.servicebus.windows.net").await;
+    let open = other.peer_open.clone().unwrap();
+    assert_eq!((open.max_frame_size, open.idle_timeout), (1_048_576, Some(240_000)));
+}

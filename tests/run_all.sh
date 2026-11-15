@@ -42,7 +42,7 @@ if want replay; then
   echo "== replay (exit $?)"; grep -A14 "^package" "$OUT/replay.txt" | cut -c1-112
 fi
 if want rust; then
-  (cd tests/sdk-rust && cargo test --no-fail-fast 2>&1; cd beta && cargo test --no-fail-fast 2>&1) > "$OUT/rust.txt"
+  (cd tests/sdk-rust && cargo test --no-fail-fast 2>&1; cd beta && cargo test --no-fail-fast 2>&1; cd ../older && cargo test --no-fail-fast 2>&1) > "$OUT/rust.txt"
   echo "== rust"
   awk '/^test result/ {p+=$4; f+=$6; i+=$8} END {print "passed", p, "failed", f, "ignored", i}' "$OUT/rust.txt"
   grep -E "^test .* FAILED" "$OUT/rust.txt"

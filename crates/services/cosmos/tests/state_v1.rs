@@ -142,11 +142,22 @@ async fn version_1_files_still_load() {
     assert_eq!(m["partitionKey"]["paths"], json!(["/a", "/b"]));
     assert_eq!(m["partitionKey"]["kind"], "MultiHash");
 
+    // The documents carry the time at which the fixture was written, and the container's time to live is 100,000 seconds:
+    // read today they are all expired, and rightly so. The time to live was checked above; turn it off before the first
+    // document is read, so that the test does not depend on the day it runs.
+    let mut items = c.clone();
+    items["defaultTtl"] = json!(-1);
+    let r = h.json("PUT", "dbs/fixture/colls/items", &[], &items).await;
+    assert_eq!(r.status, 200, "{}", r.text());
+
     // documents, an id with # and ?, a replace that took effect, a delete that stayed
     let r = h.req("GET", "dbs/fixture/colls/items/docs/a", &[(PK, "[\"p1\"]")], "").await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!(r.json()["n"], 10);
-    assert_eq!(h.req("GET", "dbs/fixture/colls/items/docs/USER%231%3Fx", &[(PK, "[\"p1\"]")], "").await.json()["email"], "b@x");
+    // an id with `#` cannot be reached by id any more (401, as on Azure); a query finds it
+    assert_eq!(h.req("GET", "dbs/fixture/colls/items/docs/USER%231%3Fx", &[(PK, "[\"p1\"]")], "").await.status, 401);
+    let q = h.query("fixture", "items", &[(PK, "[\"p1\"]")], json!({"query": "SELECT VALUE c.email FROM c WHERE c.id = 'USER#1?x'"})).await;
+    assert_eq!(q.json()["Documents"], json!(["b@x"]));
     assert_eq!(h.req("GET", "dbs/fixture/colls/items/docs/gone", &[(PK, "[\"p2\"]")], "").await.status, 404);
     let q = h
         .query("fixture", "items", &[("x-ms-documentdb-query-enablecrosspartition", "True")], json!({"query": "SELECT c.id FROM c"}))

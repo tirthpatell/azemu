@@ -1,17 +1,21 @@
 //! Request authentication and shared access signatures.
 //!
-//! Bearer tokens are accepted without checking. A Shared Key signature is checked for the
-//! development account only (`azemu_core::storage::sig::verify_shared_key_table`); any other
-//! account's is accepted, and `AZEMU_LOOSE_AUTH=1` turns checking off. A SAS is
-//! honoured: the signature (for the development account, whose key is known,
-//! and only when it looks like a real one), the validity
+//! Bearer tokens are accepted without checking. The form of a Shared Key or SAS signature, the date of a
+//! Shared Key request and the `sv` of a SAS are checked for every account; the signature itself only for the
+//! development account (`azemu_core::storage::sig::verify_shared_key_table`), whose key a client can know.
+//! `AZEMU_LOOSE_AUTH=1` turns all of that off. A SAS is
+//! honoured: the signature, the `sv`, the `sip`, the validity
 //! window, the protocol, the services / resource types / permissions of an
 //! account SAS, and the table, permissions, key range and stored access policy
 //! of a table SAS. Requests with no credentials are refused like Azure does.
 
 use azemu_core::storage::{
     auth::{classify, Auth, SasParams},
-    sig::{loose_auth, verify_shared_key_table, Check},
+    credentials::{
+        bad_authorization, sas_signature, sas_version_ok, sip_matches, without_credentials, BadAuthorization, Flavor, NoCredentials,
+        CHALLENGE,
+    },
+    sig::{checkable_account, loose_auth, verify_shared_key_table, Rejection},
     StorageAccounts,
 };
 use azemu_core::Request;
@@ -21,7 +25,8 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 use crate::errors::{
-    auth_failed, authorization_failure, permission_mismatch, protocol_mismatch, resource_type_mismatch, service_mismatch, ApiError, Res,
+    auth_failed, authorization_failure, invalid_authentication_info, permission_mismatch, protocol_mismatch, resource_not_found,
+    resource_type_mismatch, service_mismatch, ApiError, Res,
 };
 use crate::state::Table;
 
@@ -166,13 +171,6 @@ fn mac(key: &[u8], data: &str) -> Option<Vec<u8>> {
     Some(m.finalize().into_bytes().to_vec())
 }
 
-/// A signature is only checked when it is long enough to be a real one (a
-/// base64 SHA-256 MAC is 44 characters). Short placeholders such as
-/// `Sanitized`, as found in recorded traffic, pass unchecked.
-fn looks_real(sig: &str) -> bool {
-    sig.len() >= 32
-}
-
 fn signature_ok(accounts: &StorageAccounts, account: &str, sig: &[u8], string_to_sign: &str) -> bool {
     accounts.keys(account).iter().any(|k| B64.decode(k).ok().and_then(|key| mac(&key, string_to_sign)).is_some_and(|m| m == sig))
 }
@@ -218,43 +216,42 @@ fn table_string_to_sign(account: &str, table: &str, p: &SasParams, range: &KeyRa
     .join("\n")
 }
 
-/// The challenge a client without credentials gets from newer API versions.
+/// What a client with no credentials is told: 401 with the challenge, or for an `x-ms-version` from before Entra ID could
+/// sign in to Table (older than 2020-12-06) 404 `ResourceNotFound`.
 fn missing_credentials(req: &Request) -> ApiError {
-    let version = req.header("x-ms-version").unwrap_or("");
-    if version >= "2020-12-06" {
-        ApiError {
-            status: 401,
-            code: "InvalidAuthenticationInfo".into(),
-            message: "Server failed to authenticate the request. Please refer to the information in the www-authenticate header.".into(),
-            challenge: Some(
-                "Bearer authorization_uri=https://login.microsoftonline.com/00000000-0000-0000-0000-000000000000/oauth2/authorize resource_id=https://storage.azure.com".into(),
-            ),
-            unsupported: None,
+    match without_credentials(req, Flavor::Table) {
+        NoCredentials::NotFound => resource_not_found().credential(),
+        NoCredentials::Challenge => {
+            let mut e = ApiError::new(
+                401,
+                "NoAuthenticationInformation",
+                "Server failed to authenticate the request. Please refer to the information in the www-authenticate header.",
+            )
+            .credential();
+            e.challenge = Some(CHALLENGE.to_string());
+            e
         }
-    } else {
-        auth_failed()
     }
 }
 
 /// Work out what the request is allowed to do. `table` is the table named in
 /// the URL, if any; it is needed to check table SAS tokens and stored policies.
 pub fn authenticate(req: &Request, accounts: &StorageAccounts, table: Option<(&str, Option<&Table>)>) -> Res<Grant> {
+    match bad_authorization(req) {
+        Some(BadAuthorization::Format) => return Err(invalid_authentication_info()),
+        Some(BadAuthorization::UnknownScheme(_)) => return Err(auth_failed()),
+        None => {}
+    }
     match classify(req) {
         Auth::Bearer => Ok(Grant::Full),
-        // The signature of the well-known development account is checked (Table's own string to
-        // sign); any other account, a placeholder signature and `AZEMU_LOOSE_AUTH=1` pass.
-        Auth::SharedKey { .. } => match verify_shared_key_table(req, accounts) {
-            Check::Invalid(_) => Err(auth_failed()),
-            _ => Ok(Grant::Full),
+        // The form of the header is checked for every account; the MAC (Table's own string to sign) for the development
+        // account only. `AZEMU_LOOSE_AUTH=1` checks nothing.
+        Auth::SharedKey { .. } => match verify_shared_key_table(req, accounts).rejection() {
+            Some(Rejection::InvalidAuthenticationInfo) => Err(invalid_authentication_info()),
+            Some(Rejection::AuthenticationFailed(_)) => Err(auth_failed()),
+            None => Ok(Grant::Full),
         },
-        Auth::Anonymous => {
-            // Any Authorization header counts as credentials (loose auth); no header at all does not.
-            if req.header("authorization").is_some_and(|a| !a.trim().is_empty()) {
-                Ok(Grant::Full)
-            } else {
-                Err(missing_credentials(req))
-            }
-        }
+        Auth::Anonymous => Err(missing_credentials(req)),
         Auth::Sas(p) => sas(req, accounts, &p, table),
     }
 }
@@ -270,24 +267,27 @@ fn sas(req: &Request, accounts: &StorageAccounts, p: &SasParams, table: Option<(
         erk: req.query.get("erk").map(str::to_string),
     };
 
-    // 1. signature. Only the well-known development account has a key a client can
-    // know; for any other account name the key is made up by azemu, so a signature
-    // cannot be checked fairly and is accepted.
-    let checkable = account == azemu_core::storage::DEV_ACCOUNT && !loose_auth();
-    if let Some(sig) = p.sig.as_deref().filter(|s| checkable && looks_real(s)) {
-        let sig = B64.decode(sig).unwrap_or_default();
-        let ok = if is_account_sas {
-            let sts = account_string_to_sign(account, p, req.query.get("ses").unwrap_or(""));
-            signature_ok(accounts, account, &sig, &sts)
-        } else {
-            match table {
-                Some((name, _)) => signature_ok(accounts, account, &sig, &table_string_to_sign(account, name, p, &range)),
-                // not a table URL: a table SAS cannot be valid here anyway
-                None => false,
-            }
-        };
-        if !ok {
+    // 1. `sv` and signature. The form of both is checked for every account; the MAC only for the well-known development
+    // account, because for any other name the key is made up by azemu and a client cannot know it.
+    if !loose_auth() {
+        if !p.sv.as_deref().is_some_and(sas_version_ok) {
             return Err(auth_failed());
+        }
+        let sig = sas_signature(p.sig.as_deref().unwrap_or("")).map_err(|_| auth_failed())?;
+        if checkable_account(account) {
+            let ok = if is_account_sas {
+                let sts = account_string_to_sign(account, p, req.query.get("ses").unwrap_or(""));
+                signature_ok(accounts, account, &sig, &sts)
+            } else {
+                match table {
+                    Some((name, _)) => signature_ok(accounts, account, &sig, &table_string_to_sign(account, name, p, &range)),
+                    // not a table URL: a table SAS cannot be valid here anyway
+                    None => false,
+                }
+            };
+            if !ok {
+                return Err(auth_failed());
+            }
         }
     }
 
@@ -307,10 +307,20 @@ fn sas(req: &Request, accounts: &StorageAccounts, p: &SasParams, table: Option<(
         }
     }
 
-    // 3. validity window and protocol
+    // 3. validity window, source address and protocol. Azure answers every window that is not now, or that ends before it
+    // starts, with 403 `AuthenticationFailed`.
     let window = SasParams { st: start, se: expiry, ..Default::default() };
-    if window.expired(now) || window.not_yet_valid(now) {
-        return Err(authorization_failure());
+    let at = |v: &Option<String>| v.as_deref().and_then(azemu_core::time::parse_iso8601);
+    let inverted = at(&window.se).is_some_and(|e| e <= at(&window.st).unwrap_or(now));
+    if inverted || window.expired(now) || window.not_yet_valid(now) {
+        return Err(auth_failed());
+    }
+    if let Some(sip) = p.sip.as_deref().filter(|s| !s.is_empty()) {
+        match sip_matches(req, sip) {
+            Ok(true) => {}
+            Ok(false) => return Err(authorization_failure()),
+            Err(_) => return Err(auth_failed()),
+        }
     }
     if p.spr.as_deref().is_some_and(|s| s.eq_ignore_ascii_case("https")) && req.ctx.endpoint.scheme != "https" {
         return Err(protocol_mismatch());
@@ -374,13 +384,6 @@ mod tests {
         assert_eq!(g.check(Op::EntityAdd, Some(("x", "y"))).unwrap_err().code, "AuthorizationFailure");
         assert_eq!(g.check(Op::EntityRead, None).unwrap_err().code, "AuthorizationPermissionMismatch");
         assert!(g.check(Op::CreateTable, None).is_err());
-    }
-
-    #[test]
-    fn only_real_looking_signatures_are_checked() {
-        assert!(!looks_real("Sanitized"));
-        assert!(looks_real(&B64.encode([0u8; 32])));
-        assert!(looks_real(&"A".repeat(46)));
     }
 
     #[test]

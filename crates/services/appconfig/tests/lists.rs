@@ -202,9 +202,16 @@ async fn page_etag_conditional_requests() {
     assert_eq!(r.text(), "");
     assert_eq!(link_of(&r), Some(link.clone()));
     assert!(r.header("etag").is_none());
-    // the unquoted etag works too
+    // a bare etag is not a condition: the service passes over it (tried in November 2026)
     let r = t.call("GET", "/kv?key=et*", &[("If-None-Match", etag.trim_matches('"'))], "").await;
-    assert_eq!(r.status, 304);
+    assert_eq!(r.status, 200);
+    // If-Match: the page's etag, `*` and the etag of a setting on the page pass, another quoted value is 412, a bare one is passed over
+    assert_eq!(t.call("GET", "/kv?key=et*", &[("If-Match", &etag)], "").await.status, 200);
+    assert_eq!(t.call("GET", "/kv?key=et*", &[("If-Match", "*")], "").await.status, 200);
+    let first = p1.json()["items"][0]["etag"].as_str().unwrap().to_string();
+    assert_eq!(t.call("GET", "/kv?key=et*", &[("If-Match", &format!("\"{first}\""))], "").await.status, 200);
+    assert_eq!(t.call("GET", "/kv?key=et*", &[("If-Match", "\"nothing\"")], "").await.status, 412);
+    assert_eq!(t.call("GET", "/kv?key=et*", &[("If-Match", "nothing")], "").await.status, 200);
     // page 2 has its own etag
     let p2 = t.srv.send("GET", &format!("{}{}", t.base, link), &[AUTH], "").await;
     assert_ne!(p2.header("etag"), p1.header("etag"));
@@ -216,9 +223,9 @@ async fn page_etag_conditional_requests() {
     assert_ne!(p2b.header("etag"), p2.header("etag"));
     let r = t.srv.send("GET", &format!("{}{}", t.base, link), &[AUTH, ("If-None-Match", p2.header("etag").unwrap())], "").await;
     assert_eq!(r.status, 200);
-    // If-Match on a page is not enforced (recordings: a setting's etag in If-Match gives 200)
+    // If-Match on a page: a setting's etag gives 200 (recordings), a quoted value that is nothing on the page is 412
     let r = t.call("GET", "/kv?key=et*", &[("If-Match", "\"anything\"")], "").await;
-    assert_eq!(r.status, 200);
+    assert_eq!(r.status, 412);
 }
 
 #[tokio::test]
@@ -365,4 +372,34 @@ async fn head_for_labels_and_revisions() {
         assert_eq!(r.status, 200, "{p}");
         assert_eq!(r.text(), "");
     }
+}
+
+#[tokio::test]
+async fn filter_errors_and_a_range_read_as_azure_answers_them() {
+    let t = start().await;
+    seed(&t, "rg", 5).await;
+    // six values in a key or label filter, and a tags filter that is not name=value (tried in November 2026)
+    for (q, name, detail) in [
+        ("key=a,b,c,d,e,f", "key", "key(0): Too many values. Maximum supported is 5"),
+        ("label=a,b,c,d,e,f", "label", "label(0): Too many values. Maximum supported is 5"),
+    ] {
+        let r = t.get(&format!("/kv?{q}")).await;
+        assert_eq!(r.status, 400, "{q}");
+        let j = r.json();
+        assert_eq!((j["name"].as_str(), j["detail"].as_str(), j["pos"].as_u64()), (Some(name), Some(detail), Some(0)), "{q}");
+    }
+    let r = t.get("/kv?tags=bogus").await;
+    let j = r.json();
+    assert_eq!((r.status, j["name"].as_str(), j["detail"].as_str()), (400, Some("tags"), Some("")));
+    // a Range read of revisions links to the rest, in the body and in Link
+    let r = t.call("GET", "/revisions?key=rg*", &[("Range", "items=0-1")], "").await;
+    assert_eq!(r.status, 206);
+    let j = r.json();
+    assert_eq!(j["items"].as_array().unwrap().len(), 2);
+    let next = j["@nextLink"].as_str().unwrap();
+    assert!(next.starts_with("/revisions?") && next.contains("after="), "{next}");
+    assert_eq!(link_of(&r).as_deref(), Some(next));
+    // the last page of the range has no link
+    let r = t.call("GET", "/revisions?key=rg*", &[("Range", "items=0-4")], "").await;
+    assert!(r.json().get("@nextLink").is_none());
 }

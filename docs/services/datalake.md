@@ -43,15 +43,29 @@ path listing, user delegation keys), so both endpoints must be reachable on the 
 **The JavaScript client needs another host form.** `@azure/storage-file-datalake` turns a `dfs` URL into its blob URL only
 for host names it knows (`dfs.core.windows.net` and the other Azure clouds). With `http://{acct}.dfs.core.localhost:{port}` it
 sends the calls that need the blob endpoint (create / delete / exists / list / properties of a file system, leases, metadata,
-user delegation keys) to the `dfs` host, and the emulator answers 501 for them. Use
+user delegation keys) to the `dfs` host, and the emulator answers `400` for them, as Azure does (next paragraph). Use
 `http://{acct}.dfs.core.windows.net.localhost:{port}`: the SDK maps it to `{acct}.blob.core.windows.net.localhost`, and the
 emulator routes both hosts (the service is picked by the second label, anything after it is ignored). The Python and Go clients
 do not have this limit.
 
-Why a blob-only operation on a `dfs` host is 501 and not served: Microsoft says that on a hierarchical namespace account "services,
-tools, and applications can use either endpoint", but does not list which Blob operations the `dfs` host accepts, and no recording
-shows one. The Data Lake SDKs all send blob-only operations to the blob host, which is why they derive that host. So the emulator
-keeps its own answer (`501 NotImplemented`, message naming the request) instead of guessing what Azure does.
+**Blob-only operations on the `dfs` host.** Microsoft says that on a hierarchical namespace account "services, tools, and applications can use
+either endpoint", but does not list which Blob operations the `dfs` host accepts. The Data Lake SDKs all send them to the blob host. What the host
+answers was tried in November 2026 (43 requests, JSON errors, never a 501) and the emulator answers the same:
+
+| Request on the `dfs` host | Answer |
+|---|---|
+| `HEAD` of a file or directory, `GET` of a path with no `resource`, `GET ?comp=metadata`, `?comp=blocklist`, `?comp=tags` | `200`, served (Azure sends fewer blob headers than the emulator does: no `x-ms-blob-type`; not copied) |
+| `restype=container`: List Blobs, Get Container Properties, Get Container ACL, Create Container | `400 InvalidQueryParameterValue` (Create Container makes nothing) |
+| `GET` of the account root with `comp=list`, `restype=service`, `comp=blobs`, and `POST ?restype=service&comp=userdelegationkey` | `400 InvalidUri` |
+| a `PUT` or `POST` on a path with no `resource` or `action` (Put Blob, Put Block, Snapshot, Set Metadata, Set Tier, Lease), and `PUT` of the account root | `400 MissingRequiredHeader` |
+| `POST ?comp=query` on a path | `400 MissingRequiredHeader` with `detail.HeaderName` `x-ms-lease-action`: the host reads a `POST` as a lease. Quick query is a Blob endpoint operation only (the SDKs already send it there). It used to be served on both |
+
+One exception, which Azure cannot have: on a pinned or standard `dfs` port, where the account is in the path (`http://127.0.0.1:<port>/devstoreaccount1`), a Data Lake
+SDK cannot work out a Blob address and sends its container calls to the same one. There `PUT`, `HEAD` and `DELETE` of `/{fs}?restype=container` are taken as create,
+properties and delete of the filesystem, as in version 0.1.0 (the JavaScript suite creates a filesystem this way). The other rows hold there too, so calls that need the Blob
+endpoint (List deleted paths, quick query) need the host-name form or the blob port.
+
+Anything else the emulator does not know is still `501` in the dfs error form, naming the request.
 
 ## The hierarchical model
 
@@ -89,7 +103,6 @@ keeps its own answer (`501 NotImplemented`, message naming the request) instead 
 | List FileSystems | `GET /?resource=account` | built (`prefix`, `maxResults`, `continuation`) |
 | Create / Get properties / Set properties / Delete FileSystem | `PUT`/`HEAD`/`PATCH`/`DELETE /{fs}` (`?resource=filesystem`) | built (`x-ms-properties`, conditions, `x-ms-namespace-enabled`) |
 | List Paths | `GET /{fs}?resource=filesystem&recursive&directory&maxResults&continuation&upn&beginFrom` | built |
-| List Blobs (hierarchy) on the dfs endpoint | `GET /{fs}?restype=container&comp=list` | built (same as Blob) |
 | Create file / directory | `PUT /{fs}/{path}?resource=file\|directory` | built (conditions, `x-ms-properties`, permissions, umask, ACL, owner, group, lease (`x-ms-proposed-lease-id`), expiry, content headers, CPK, `x-ms-encryption-context`) |
 | Rename (`legacy`, `posix`) | `PUT /{fs}/{dest}` + `x-ms-rename-source` | built (file or directory tree in one step, across filesystems; source and destination conditions, source lease) |
 | Delete | `DELETE /{fs}/{path}?recursive&continuation&paginated` | built (soft delete when the account's delete retention is on) |
@@ -105,7 +118,7 @@ keeps its own answer (`501 NotImplemented`, message naming the request) instead 
 | Undelete path | `PUT ?comp=undelete` + `x-ms-undelete-source` (both endpoints) | built |
 | List deleted paths | `GET /{fs}?restype=container&comp=list&showonly=deleted` (blob endpoint) | built |
 | Get Account Information | `?restype=account&comp=properties` | built (`x-ms-is-hns-enabled`) |
-| Query (quick query) | `POST /{fs}/{path}?comp=query` (both endpoints; the SDKs send it to the blob endpoint) | built: CSV and JSON in, CSV and JSON out, the Avro answer; Parquet input and Arrow output answer 501 (`docs/services/blob-query.md`). On the dfs endpoint errors are JSON; the answer carries `x-ms-resource-type: file` |
+| Query (quick query) | `POST /{fs}/{path}?comp=query` on the blob endpoint (the SDKs send it there) | built: CSV and JSON in, CSV and JSON out, the Avro answer (`docs/services/blob-query.md`); the answer carries `x-ms-resource-type: file`. The dfs host has no query (`400 MissingRequiredHeader`) |
 | Create Container Session | `POST ?comp=session` | 501 (as in Blob) |
 | Anything else | | 501 `NotImplemented` in the dfs JSON error form, the message names the request |
 
@@ -133,9 +146,9 @@ Key caller is the superuser, auth is loose).
   entries, the mask and default entries listed (the three access base entries stay).
 * Setting the ACL does not change the ETag or Last-Modified (as recorded).
 * **Limits.** An access ACL and a default ACL each hold at most 32 entries (base entries, mask and named
-  entries all count; "effectively 28 named"), from the Microsoft Learn access control article. More is `400 InvalidHeaderValue`
-  with `x-ms-acl` as the header and a message that says so (the real error code is not documented anywhere in Microsoft's documentation; this
-  one is a guess; the header value is cut to 200 characters in the answer). In a recursive change a path that would end above the
+  entries all count; "effectively 28 named"), from the Microsoft Learn access control article; 32 entries are accepted and 33 refused (tried against Azure in November 2026).
+  More is `400 TooManyAclEntries` ("The number of access control entries is more than allowed."); an entry that cannot be read is `400 InvaldAccessControlList`
+  (the spelling is Azure's) with "The access control list value is invalid."; the header value is not sent back. In a recursive change a path that would end above the
   limit is left as it is and listed in `failedEntries` (`name`, `type`, `errorMessage`). A list of more than 64 entries is refused
   without being parsed to the end. A directory's default ACL is not copied into every child: `DfsAttrs::acl` is an
   `Arc<Vec<Entry>>` and children made from the same default ACL with the same requested permissions get the same `Arc`
@@ -148,10 +161,15 @@ One function (`crates/services/blob/src/names.rs`) judges names for both endpoin
 (below U+0020) and no U+FFFD (what a name that is not valid UTF-8 turns into, so two bad names cannot become one; U+FFFF is
 accepted, as the recording `test_list_encoded_blobs` shows), at most 254 path segments in a flat container and 61 in a
 hierarchical one (the REST naming page: 63 including account and container), and no `.` or `..` segment in a hierarchical
-container. A bad name is `400 InvalidResourceName`. On the Blob endpoint a write into a hierarchical container (Put Blob, Put
-Block, Put Block List, Copy Blob, Put Blob From URL) is `409 PathConflict` when a parent is a file or when the name is a
-directory. The Data Lake error table describes `PathConflict` as "the specified path, or an element of the path, exists and its
-resource type is invalid for this operation"; what a real account answers on the Blob endpoint for this case is not recorded (a guess).
+container. A bad name is `400 InvalidResourceName`. A name of 62 segments is `409 PathIsTooDeep` ("This operation is not permitted as the path is too deep."; tried on the Blob
+endpoint, the Data Lake endpoint is given the same code). `PathConflict` is the Data Lake endpoint's code (a file in the way of a create, a rename or an append); a real
+account never answers it on the Blob endpoint. There a write into a hierarchical container answers, as tried on Azure in November 2026:
+
+| Write on the Blob endpoint | Parent is a file | Name is a directory |
+|---|---|---|
+| Put Blob, Copy Blob (Put Blob From URL as Put Blob: not tried with a readable source) | `404 BlobNotFound` | `409 OperationNotAllowedInCurrentState` |
+| Put Block | `409 OperationNotAllowedInCurrentState` | `409 OperationNotAllowedInCurrentState` |
+| Put Block List | `409 OperationNotAllowedInCurrentState` | `400 OperationNotSupportedOnDirectory` |
 
 ### Replacing and moving paths
 
@@ -181,7 +199,7 @@ Like Blob (`docs/services/blob.md`): signatures are checked for `devstoreaccount
 (expiry, start, protocol, IP, stored policy, resource type, permissions). Data Lake letters:
 `m` move (rename accepts `m`, `c` or `w`), `e` execute (read or get status accept `r` or `e`), `o`
 (change owner or group), `p` (change permissions or ACL; a service SAS without them gets
-`AuthorizationPermissionMismatch`). With no credentials the answer is `401 NoAuthenticationInformation`
+`AuthorizationPermissionMismatch`). The form of a signature, the date of a Shared Key request, `sv` and `sip` are checked as on Blob (see "Auth" in [`blob.md`](blob.md#auth)); `AZEMU_LOOSE_AUTH=1` turns the checks of signatures and dates off. With no credentials the answer is `401 NoAuthenticationInformation`
 as JSON (reads of paths in a container with public access are allowed).
 
 ## Known differences from Azure
@@ -190,7 +208,7 @@ as JSON (reads of paths in a container with public access are allowed).
   a real account is hierarchical as a whole.
 * Create over an existing path overwrites it (a directory keeps its children). Rename needs the
   destination's parent to exist (`404 RenameDestinationParentPathNotFound`), unlike a create. The codes
-  for a few unrecorded cases come from the REST documentation, not from recordings: `PathConflict`,
+  for a few unrecorded cases come from the REST documentation, not from recordings: `PathConflict` on the Data Lake endpoint,
   `DirectoryNotEmpty`, `InvalidFlushPosition`, `SourcePathNotFound`, `SourceConditionNotMet`,
   `RenameDestinationParentPathNotFound`.
 * `x-ms-lease-renewed` of `auto-renew` is always `false`.
@@ -203,7 +221,7 @@ as JSON (reads of paths in a container with public access are allowed).
 * Owner and group are `$superuser` whoever calls (no Azure AD identity is available).
 * Expired paths (`x-ms-expiry-time`) disappear lazily on the next request that looks at them.
 * `Content-MD5` / CRC64 of a flushed file are not computed.
-* Container sessions are not built; neither is Blob's Rename Container. Quick query is built for CSV and JSON (`docs/services/blob-query.md`); a `dfs` POST with `comp=query` is answered like the blob one, which Azure documents only for the blob endpoint.
+* Container sessions are not built; neither is Blob's Rename Container. Quick query is built for CSV and JSON (`docs/services/blob-query.md`) on the blob endpoint only; a `dfs` POST with `comp=query` is `400 MissingRequiredHeader`, as on Azure.
 * Append Data hashes its body (`Content-MD5`, `x-ms-content-crc64`) before the state lock is taken, and
   a read is joined after it is released, like the Blob endpoint.
   One exception is left: Flush Data with appended pieces that overlap what is already committed (an

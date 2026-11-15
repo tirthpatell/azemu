@@ -60,10 +60,12 @@ fn existing_etag(ns: &Namespace, name: &str) -> Option<String> {
 }
 
 pub fn put(shared: &Shared, cx: &Cx, name: &str) -> ApiResult<Response> {
-    let root = xml::parse(&cx.req.body).ok_or_else(ApiError::bad_request)?;
-    let desc = settings::description(&root).ok_or_else(ApiError::bad_request)?;
+    let not_recognized = || ApiError::new(ErrKind::NotRecognized);
+    let root = xml::parse(&cx.req.body).ok_or_else(not_recognized)?;
+    let desc = settings::description(&root).ok_or_else(not_recognized)?;
     let kind = settings::kind_of(desc).filter(|k| *k != Kind::Subscription).ok_or_else(ApiError::bad_request)?;
     let update = cx.req.header("if-match").is_some();
+    check_name(cx, name, "")?;
 
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
@@ -71,7 +73,19 @@ pub fn put(shared: &Shared, cx: &Cx, name: &str) -> ApiResult<Response> {
         Kind::Queue => ns.queue(name).map(|q| q.core.settings.clone()),
         _ => ns.topic(name).map(|t| t.settings.clone()),
     };
-    let parsed = settings::parse(desc, &Opts { kind, api: &cx.api, existing: if update { old.as_ref() } else { None }, now: cx.now });
+    let id = format!("{}:{}:{name}", cx.account, kind.label());
+    let parsed = settings::parse(
+        desc,
+        &Opts {
+            kind,
+            api: &cx.api,
+            existing: if update { old.as_ref() } else { None },
+            now: cx.now,
+            namespace: Some(&*ns),
+            id: &id,
+            standard: settings::standard_tier(),
+        },
+    );
     let mut new = match (parsed, &old) {
         (Ok(s), _) => s,
         // The real service sends the ETag of the existing entity with a refused update.
@@ -81,6 +95,9 @@ pub fn put(shared: &Shared, cx: &Cx, name: &str) -> ApiResult<Response> {
 
     if update {
         let old = old.ok_or_else(|| ApiError::new(ErrKind::NotFoundOperation))?;
+        if !etag_matches(cx, old.updated_ms) {
+            return Err(ApiError::new(ErrKind::PreconditionFailed).with_etag(etag_of(old.updated_ms)));
+        }
         if let Some(p) = settings::immutable_change(kind, &old, &new) {
             let msg = format!("The value for the {p} property of an existing {} cannot be changed.", kind.label());
             return Err(ApiError::bad(msg, true).with_etag(etag_of(old.updated_ms)));
@@ -137,15 +154,63 @@ pub fn delete(shared: &Shared, cx: &Cx, name: &str) -> ApiResult<Response> {
     Err(ApiError::new(ErrKind::NoService))
 }
 
+/// Does the `If-Match` of an update name this version of the entity? `*` matches any (the ETag may be quoted).
+pub fn etag_matches(cx: &Cx, updated_ms: i64) -> bool {
+    match cx.req.header("if-match").map(str::trim) {
+        Some("*") | None => true,
+        Some(v) => v.trim_start_matches("W/").trim_matches('"') == etag_of(updated_ms),
+    }
+}
+
+/// The name of a queue, topic, subscription or rule: letters, digits, `.`, `-` and `_`; at most 260 characters (50 for a subscription or a
+/// rule). `kind` is `Subscription` or `Rule` for those, empty for a queue or topic. The texts are the service's.
+pub fn check_name(cx: &Cx, name: &str, kind: &str) -> ApiResult<()> {
+    let nested = !kind.is_empty();
+    if kind == "Rule" && name == crate::rules::DEFAULT_RULE_NAME {
+        return Ok(());
+    }
+    if name.starts_with('$') {
+        // a name that starts with `$` is a system name (the service lower-cases `$DeadLetterQueue` in its text)
+        let shown = if name.eq_ignore_ascii_case("$DeadLetterQueue") { name.to_lowercase() } else { name.to_string() };
+        return Err(ApiError::bad_raw(if nested {
+            format!("BR0012The specified name (\"{shown}\") is not valid.\r\nParameter name: entityName.")
+        } else {
+            format!("SubCode=40000. The specified name (\"{shown}\") is not valid.\r\nParameter name: entityName ExceptionDescription: The specified name (\"{shown}\") is not valid.\r\nParameter name: entityName.")
+        }));
+    }
+    if nested && name.chars().count() > 50 {
+        return Err(ApiError::bad_raw(format!("The entity name '{kind}' cannot exceed '50' characters.\r\nParameter name: entityName.")));
+    }
+    if !name.is_ascii() {
+        return Err(ApiError::bad_raw("Incorrect request Uri format."));
+    }
+    if name.chars().any(|c| !(c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '/'))) {
+        let q = cx.req.query.raw();
+        let tail = if q.is_empty() { String::new() } else { format!("?{q}") };
+        let (prefix, url) = if nested {
+            ("", format!("sb://{}{}{tail}", cx.authority, cx.req.path.replace("%2F", "/")))
+        } else {
+            ("SubCode=40000. ", format!("{}{}{tail}", cx.base, cx.req.path))
+        };
+        return Err(ApiError::bad_raw(format!(
+            "{prefix}'{url}' contains character(s) that is not allowed by Service Bus. Entity segments can contain only letters, numbers, periods (.), hyphens (-), and underscores (_). To know more visit https://aka.ms/sbResourceMgrExceptions. ."
+        )));
+    }
+    Ok(())
+}
+
 /// `$skip` and `$top` of a list request.
 pub fn paging(cx: &Cx) -> ApiResult<(usize, usize)> {
-    let num = |name: &str, default: usize| -> ApiResult<usize> {
+    let num = |name: &str, label: &str, default: usize| -> ApiResult<usize> {
         match cx.req.query.get(name) {
             None => Ok(default),
-            Some(v) => v.trim().parse::<usize>().map_err(|_| ApiError::bad_request()),
+            Some(v) => v
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| ApiError::bad_raw(format!("Parameter '{label}' should be non-negative integer.\r\nParameter name: {label}."))),
         }
     };
-    Ok((num("$skip", 0)?, num("$top", 100)?))
+    Ok((num("$skip", "skip", 0)?, num("$top", "top", 100)?))
 }
 
 /// The `next` link of a full page.

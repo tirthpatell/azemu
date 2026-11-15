@@ -426,6 +426,10 @@ fn scan_headers(dir: &Path) -> BTreeMap<String, ManifestFile> {
     out
 }
 
+/// How often and how long `take_lock` waits for a lock that is held: 300 ms in all.
+const LOCK_RETRIES: u32 = 10;
+const LOCK_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(30);
+
 /// Take the OS lock on `<root>/LOCK` and write our process id into it. The lock goes away with the
 /// process, so a lock file left by a process that died is simply taken over.
 fn take_lock(root: &Path) -> Result<fs::File> {
@@ -437,7 +441,17 @@ fn take_lock(root: &Path) -> Result<fs::File> {
         .truncate(false)
         .open(&path)
         .with_context(|| format!("the data directory {} cannot be written (cannot open {})", root.display(), path.display()))?;
-    match f.try_lock() {
+    // The holder may be on its way out: an emulator that is stopping, or a child process that was being started
+    // while the lock was held and has it for an instant. Wait a little before saying the directory is in use.
+    let mut tried = f.try_lock();
+    for _ in 0..LOCK_RETRIES {
+        if !matches!(tried, Err(fs::TryLockError::WouldBlock)) {
+            break;
+        }
+        std::thread::sleep(LOCK_RETRY_PAUSE);
+        tried = f.try_lock();
+    }
+    match tried {
         Ok(()) => {}
         Err(fs::TryLockError::WouldBlock) => {
             let mut who = String::new();

@@ -12,7 +12,7 @@ use bytes::Bytes;
 use super::groups::{Committed, JoinRequest, SyncRequest, MAX_GROUP_ID_BYTES, MAX_OFFSET_METADATA_BYTES};
 use super::KafkaConfig;
 use crate::amqp_conn::namespace_from_hostname;
-use crate::model::{DEFAULT_PARTITIONS, DEFAULT_RETENTION_MS, MAX_MESSAGE_SIZE};
+use crate::model::{KAFKA_DEFAULT_PARTITIONS, KAFKA_DEFAULT_RETENTION_MS};
 use crate::state::{now_ms, Shared, DEFAULT_NAMESPACE};
 
 pub struct Broker {
@@ -144,8 +144,10 @@ impl Broker {
     }
 
     pub fn api_versions(&self, error: i16) -> Struct {
-        let keys: Vec<Struct> =
-            api::SERVED.iter().map(|a| Struct::new().with("ApiKey", a.key).with("MinVersion", a.min).with("MaxVersion", a.max)).collect();
+        let keys: Vec<Struct> = api::SERVED
+            .iter()
+            .map(|a| Struct::new().with("ApiKey", a.key).with("MinVersion", a.min).with("MaxVersion", api::advertised_max(a)))
+            .collect();
         Struct::new().with("ErrorCode", error).with("ApiKeys", keys).with("ThrottleTimeMs", 0)
     }
 
@@ -158,7 +160,11 @@ impl Broker {
 
     fn metadata(&self, c: &Conn, b: &Struct) -> Struct {
         let ns = c.namespace();
-        let allow_auto = b.bool("AllowAutoTopicCreation");
+        // a request before version 4 has no such field and allows it
+        let allow_auto = match b.get("AllowAutoTopicCreation") {
+            Value::Null => true,
+            v => v.as_bool(),
+        };
         let now = now_ms();
         let mut topics = Vec::new();
         {
@@ -187,10 +193,16 @@ impl Broker {
                         topics.push(topic_error(&name, err::INVALID_TOPIC_EXCEPTION));
                         continue;
                     }
-                    if self.shared.autocreate && allow_auto {
-                        if st.ensure_hub(&ns, &name, true, now).is_err() {
-                            topics.push(topic_error(&name, err::UNKNOWN_TOPIC_OR_PARTITION));
-                            continue;
+                    // Azure makes the event hub when a producer or an admin client names a topic that is not there (the request
+                    // allows it; a consumer's does not), with one partition and 7 days of retention (November 2026). It is not
+                    // switched by AZEMU_EVENTHUBS_AUTOCREATE, which is about AMQP.
+                    if allow_auto {
+                        match st.create_hub(&ns, &name, KAFKA_DEFAULT_PARTITIONS, KAFKA_DEFAULT_RETENTION_MS, now) {
+                            Ok(h) => h.autocreated = true,
+                            Err(_) => {
+                                topics.push(topic_error(&name, err::UNKNOWN_TOPIC_OR_PARTITION));
+                                continue;
+                            }
                         }
                     } else {
                         topics.push(topic_error(&name, err::UNKNOWN_TOPIC_OR_PARTITION));
@@ -214,8 +226,9 @@ impl Broker {
                             .with("PartitionIndex", i)
                             .with("LeaderId", 0)
                             .with("LeaderEpoch", 0)
-                            .with("ReplicaNodes", vec![0i32])
-                            .with("IsrNodes", vec![0i32])
+                            // Azure lists no replicas and no in-sync replicas (November 2026)
+                            .with("ReplicaNodes", Vec::<i32>::new())
+                            .with("IsrNodes", Vec::<i32>::new())
                             .with("OfflineReplicas", Vec::<i32>::new())
                     })
                     .collect();
@@ -473,7 +486,11 @@ impl Broker {
         match b.get("Topics") {
             Value::Null => {
                 let mut by_topic: Vec<(String, Vec<Struct>)> = Vec::new();
-                for (t, p, cm) in self.shared.kafka.all_offsets(&ns, group) {
+                // the offsets of every partition are those of a group that has members; a group whose last member left is forgotten,
+                // although a request that names the partitions still gets its commits (November 2026)
+                let has_members = self.shared.kafka.describe(&ns, group).is_some_and(|g| !g.members.is_empty());
+                let all = if has_members { self.shared.kafka.all_offsets(&ns, group) } else { Vec::new() };
+                for (t, p, cm) in all {
                     match by_topic.last_mut() {
                         Some((n, v)) if *n == t => v.push(part(p, Some(cm))),
                         _ => by_topic.push((t, vec![part(p, Some(cm))])),
@@ -517,7 +534,7 @@ impl Broker {
                 );
                 continue;
             }
-            match self.shared.kafka.describe(&ns, &id) {
+            match self.shared.kafka.describe(&ns, &id).filter(|g| !g.members.is_empty()) {
                 None => out.push(
                     Struct::new()
                         .with("ErrorCode", 0)
@@ -564,6 +581,8 @@ impl Broker {
             .kafka
             .list(&c.namespace())
             .into_iter()
+            // Azure forgets a group when its last member has left (November 2026)
+            .filter(|g| !g.members.is_empty())
             .filter(|g| filter.is_empty() || filter.iter().any(|f| f.eq_ignore_ascii_case(g.state)))
             .map(|g| Struct::new().with("GroupId", g.group).with("ProtocolType", g.protocol_type).with("GroupState", g.state))
             .collect();
@@ -580,11 +599,13 @@ impl Broker {
         for t in b.structs("Topics") {
             let name = t.str("Name").unwrap_or("").to_string();
             let mut parts = t.i32("NumPartitions");
-            let mut retention_ms = DEFAULT_RETENTION_MS;
+            let mut retention_ms = KAFKA_DEFAULT_RETENTION_MS;
             let mut problem: Option<(i16, String)> = None;
             if !valid_topic_name(&name) {
+                // `INVALID_CONFIG`, not `INVALID_TOPIC_EXCEPTION`: what Azure answers for a name with a space, 300 characters, `..` or a
+                // letter that is not ASCII (November 2026)
                 problem = Some((
-                    err::INVALID_TOPIC_EXCEPTION,
+                    err::INVALID_CONFIG,
                     format!("Topic name '{name}' is invalid: use letters, digits, '.', '_' and '-', at most 249 characters"),
                 ));
             } else if parts == 0 || parts < -1 {
@@ -598,12 +619,14 @@ impl Broker {
                 ));
             }
             if parts == -1 {
-                parts = DEFAULT_PARTITIONS as i32;
+                parts = KAFKA_DEFAULT_PARTITIONS as i32;
             }
             if problem.is_none() {
                 for cfg in t.structs("Configs") {
                     let (k, val) = (cfg.str("Name").unwrap_or(""), cfg.str("Value"));
                     match k {
+                        // Azure Standard makes a compacted event hub for this (Microsoft documents compaction for Premium and Dedicated);
+                        // the emulator does not compact, so it refuses instead of storing a setting it does not keep
                         "cleanup.policy" if val.is_some_and(|v| v.contains("compact")) => {
                             problem = Some((err::INVALID_CONFIG, "Log compaction is not built (cleanup.policy=compact)".to_string()));
                         }
@@ -624,7 +647,7 @@ impl Broker {
                 let mut st = self.shared.state.lock();
                 if let Err(e) = st.create_hub(&ns, &name, parts as u32, retention_ms, now) {
                     problem = Some(if e.condition == crate::errors::ENTITY_ALREADY_EXISTS {
-                        (err::TOPIC_ALREADY_EXISTS, format!("Topic '{name}' already exists."))
+                        (err::TOPIC_ALREADY_EXISTS, already_exists_text(&name))
                     } else if e.condition == crate::errors::ARGUMENT_OUT_OF_RANGE && e.description.contains("PartitionCount") {
                         (err::INVALID_PARTITIONS, e.description)
                     } else {
@@ -632,19 +655,20 @@ impl Broker {
                     });
                 }
             } else if problem.is_none() && validate_only && self.shared.state.lock().hub(&ns, &name).is_some() {
-                problem = Some((err::TOPIC_ALREADY_EXISTS, format!("Topic '{name}' already exists.")));
+                problem = Some((err::TOPIC_ALREADY_EXISTS, already_exists_text(&name)));
             }
             let ok = problem.is_none();
-            let configs: Vec<Struct> = [
-                ("retention.ms", retention_ms.to_string()),
-                ("cleanup.policy", "delete".to_string()),
-                ("max.message.bytes", MAX_MESSAGE_SIZE.to_string()),
-            ]
-            .into_iter()
-            .map(|(k, v)| {
-                Struct::new().with("Name", k).with("Value", v).with("ReadOnly", false).with("ConfigSource", 5).with("IsSensitive", false)
-            })
-            .collect();
+            let configs: Vec<Struct> = topic_settings(retention_ms)
+                .into_iter()
+                .map(|(k, v, _)| {
+                    Struct::new()
+                        .with("Name", k)
+                        .with("Value", v)
+                        .with("ReadOnly", false)
+                        .with("ConfigSource", 5)
+                        .with("IsSensitive", false)
+                })
+                .collect();
             results.push(
                 Struct::new()
                     .with("Name", name)
@@ -682,15 +706,15 @@ impl Broker {
             .structs("Topics")
             .map(|t| {
                 let name = t.str("Name").unwrap_or("").to_string();
+                // Azure answers INVALID_REQUEST for the same count and for more (November 2026): the count of an event hub cannot be changed
                 let (code, msg) = match st.hub(&ns, &name) {
                     None => (err::UNKNOWN_TOPIC_OR_PARTITION, "This server does not host this topic-partition.".to_string()),
                     Some(h) if t.i32("Count") as usize == h.partitions.len() => {
-                        (err::INVALID_PARTITIONS, format!("Topic already has {} partitions.", h.partitions.len()))
+                        (err::INVALID_REQUEST, format!("Topic already has {} partitions.", h.partitions.len()))
                     }
-                    Some(_) => (
-                        err::INVALID_PARTITIONS,
-                        "The partition count of an event hub cannot be changed after it was created (not built).".to_string(),
-                    ),
+                    Some(_) => {
+                        (err::INVALID_REQUEST, "The partition count of an event hub cannot be changed after it was created.".to_string())
+                    }
                 };
                 Struct::new().with("Name", name).with("ErrorCode", code).with("ErrorMessage", msg)
             })
@@ -711,32 +735,12 @@ impl Broker {
             };
             // (name, value, config type: 1 boolean, 2 string, 3 int, 5 long, 7 list)
             let (code, msg, entries): ConfigAnswer = match rtype {
+                // A topic that does not exist is described as a topic with no settings, no error and nothing created (November 2026).
                 2 => match st.hub(&ns, &name) {
-                    None => (err::UNKNOWN_TOPIC_OR_PARTITION, Some("This server does not host this topic-partition.".into()), vec![]),
-                    Some(h) => (
-                        0,
-                        None,
-                        vec![
-                            ("cleanup.policy", "delete".into(), 7),
-                            ("retention.ms", h.retention_ms.to_string(), 5),
-                            ("max.message.bytes", MAX_MESSAGE_SIZE.to_string(), 3),
-                            ("message.timestamp.type", "CreateTime".into(), 2),
-                            ("compression.type", "producer".into(), 2),
-                            ("min.insync.replicas", "1".into(), 3),
-                        ],
-                    ),
+                    None => (0, None, vec![]),
+                    Some(h) => (0, None, topic_settings(h.retention_ms)),
                 },
-                4 => (
-                    0,
-                    None,
-                    vec![
-                        ("auto.create.topics.enable", self.shared.autocreate.to_string(), 1),
-                        ("num.partitions", DEFAULT_PARTITIONS.to_string(), 3),
-                        ("message.max.bytes", MAX_MESSAGE_SIZE.to_string(), 3),
-                        ("group.min.session.timeout.ms", super::groups::MIN_SESSION_TIMEOUT_MS.to_string(), 3),
-                        ("group.max.session.timeout.ms", super::groups::MAX_SESSION_TIMEOUT_MS.to_string(), 3),
-                    ],
-                ),
+                4 => (err::INVALID_REQUEST, Some("Broker configuration reads are not supported on this cluster.".into()), vec![]),
                 _ => (err::INVALID_REQUEST, Some(format!("resource type {rtype} is not built")), vec![]),
             };
             let configs: Vec<Struct> = entries
@@ -766,6 +770,22 @@ impl Broker {
         }
         Struct::new().with("ThrottleTimeMs", 0).with("Results", results)
     }
+}
+
+/// The settings Azure lists for a topic (November 2026): the cleanup policy, how far a record's time may be from the broker's, which
+/// time a record carries, and the retention. (name, value, config type: 2 string, 5 long, 7 list)
+fn topic_settings(retention_ms: i64) -> Vec<(&'static str, String, i8)> {
+    vec![
+        ("cleanup.policy", "delete".into(), 7),
+        ("message.timestamp.difference.max.ms", "7776000000".into(), 5),
+        ("message.timestamp.type", "LogAppendTime".into(), 2),
+        ("retention.ms", retention_ms.to_string(), 5),
+    ]
+}
+
+/// The text Azure gives for a topic that exists (the trailing space is Azure's).
+fn already_exists_text(name: &str) -> String {
+    format!("The messaging entity '{name}' already exists. To know more visit https://aka.ms/sbResourceMgrExceptions. ")
 }
 
 /// (error code, message, [(config name, value, config type)])

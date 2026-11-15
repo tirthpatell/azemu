@@ -6,12 +6,13 @@ webhooks (the validation handshake, retries, dead-lettering) and to a Storage qu
 events of other emulated services (Blob Storage, Data Lake, Key Vault, App Configuration: `docs/services/storage-events.md`).
 
 **How to reach it.** `http(s)://{topic}.eventgrid.localhost:4577/api/events` (the topic is the first label of the host; a namespace host is the namespace).
-With `--standard-ports`: `https://azemu:10012/api/events`, which serves one topic named by the host label (`default` for `localhost`). Any key, SAS
-token or bearer token is accepted, but a request with none gets 401. Topics and subscriptions must be created first: through the admin API
+With `--standard-ports`: `https://azemu:10012/api/events`, which serves one topic named by the host label (`default` for `localhost`). A topic that has no
+access keys takes any key, SAS token or bearer token, but a request with none gets 401. A topic made through Resource Manager (or given `keys` in the admin API or the config file) compares the key or
+the signed token with its keys, as Azure does ("Authentication" below); a bearer token is never looked at. Topics and subscriptions must be created first: through the admin API
 (`/_azemu/eventgrid`), a JSON file (`AZEMU_EVENTGRID_CONFIG`) or ARM; with `--lenient` a topic named by a publish is made on first use.
 
-**Not built.** Regions, keys and `provisioningState` of topics made outside ARM, the 64 KB event rule, range checks on lock
-durations, a blob dead-letter destination, `api-version` validation. Retry waits are much shorter than Azure's schedule. Webhooks are limited to local targets
+**Not built.** Regions and `provisioningState` of topics made outside ARM (and their keys, unless you give them), the 64 KB event rule, range checks on lock
+durations, a blob dead-letter destination, `api-version` validation of the namespace API. Retry waits are much shorter than Azure's schedule. Webhooks are limited to local targets
 unless `--allow-webhook-host` says otherwise.
 
 Crate `azemu-eventgrid` (lib + binary `azemu-eventgrid`). Mounts: `Mount::AccountHost("eventgrid")` and `Mount::PathPrefix("/_azemu/eventgrid")` (the admin API).
@@ -39,7 +40,7 @@ Only the first two labels matter, so a real-looking host also works.
 from azure.core.credentials import AzureKeyCredential
 from azure.eventgrid import EventGridPublisherClient, EventGridConsumerClient, EventGridEvent
 
-key = AzureKeyCredential("anything")           # any key, SAS token or bearer token is accepted
+key = AzureKeyCredential("anything")           # a topic with no keys takes any key; one with keys needs one of them
 
 # custom topic or domain (Event Grid Basic): the endpoint includes /api/events
 pub = EventGridPublisherClient("http://mytopic.eventgrid.localhost:4577/api/events", key)
@@ -80,17 +81,51 @@ that the Python Basic client (`EventGridPublisherClient` without `namespace_topi
 
 ### Authentication
 
-Presence only. A request needs one of `aeg-sas-key`, `aeg-sas-token` or `Authorization`
-(`SharedAccessKey`, `SharedAccessSignature` or `Bearer`); its value is never checked. A request with none
-gets `401` with the recorded error body (`Unauthorized`, with a `details` entry).
+What a custom topic does on `POST /api/events` was tried against a real topic in November 2026. Order: `api-version`, then the credential, then the size and the body.
+
+* **Which keys a topic has.** A topic made through Resource Manager has `key1` and `key2` (what `listKeys` gives; `regenerateKey` replaces one, at once). The admin
+  API takes `"keys": ["…", "…"]` in `PUT /topics/{name}` (given again, they replace the old ones; `[]` takes them away; left out, they stay), and the config file `"keys"` on a
+  topic. They are saved with `--data-dir`, in `eventgrid.state` (which is not encrypted). **A topic with no keys (made by the admin API without them, by the config
+  file, or by auto-creation) has nothing to compare with and takes any key, token or signed token, as before.** Domains and namespaces have no keys here.
+* **`aeg-sas-key`** (looked at first): the value (trimmed) must be a key of the topic. A key that is not: `401 Unauthorized` "The request authorization key is not
+  authorized for <HOST>." (the host name in capitals), with "This is due to the reason: The input is not a valid Base-64 string…" added when the value is not base64. An empty
+  value is `400 BadRequest` (inner `InvalidSas`) "Request must have a value for aeg-sas-key.".
+* **`aeg-sas-token`**, or `Authorization: SharedAccessSignature <token>`: `r=<resource>&e=<expiry>&s=<signature>`, the signature being the HMAC-SHA256, under the
+  base64-decoded key, of the text before `&s=` (what the SDKs' `generate_sas` writes). `r` and `e` are read only from that signed text; `s` must be the last
+  pair, and a name that comes twice is refused. A token that cannot be read is `400` (inner `InvalidSas`) "Invalid value in aeg-sas-token. Valid format
+  :r=UrlEncodedResource&e=UrlEncodedUtcExpiration&s=UrlEncodedSignature. Input sas string: …" ("Malformed value" when there is no `=` at all). An expiry
+  less than five minutes away is `401` "Expired. e:… must be greater than … and have at least 00:10:00 of remaining timespan. There is an additional 00:05:00 grace
+  period for clock skew . aeg-sas-token."; a resource of another host is "The authorization signature does not apply to resource: …"; a signature none of the keys made is
+  "Invalid signature. The request authorization signature was not signed with any of the topic keys." (The order of these checks, and the five minutes, are what the
+  tries showed; Azure's answer for a token with duplicate names was not tried.)
+* **`Authorization: Bearer <token>`**: **never checked**, as everywhere in azemu (there is no Entra tenant to ask; no role assignments either). `Bearer` with no token is
+  `401` "Unable to read access token.". Any other scheme, `SharedAccessKey` included, is `401` "Request has an unsupported Authorization scheme (must be
+  SharedAccessSignature or Bearer)." (`SharedAccessKey` is the scheme of namespaces; the namespace endpoints here only check that a credential is present).
+* No credential: `401` "Request must contain one of the following authorization signature: aeg-sas-token, aeg-sas-key.". Every message of the topic ends with the sentence
+  "Report '<request id>:<n>:<time> (UTC)' to our forums for assistance or raise a support ticket." and the `details` list repeats code and message.
+* **`api-version`**: `2018-01-01` (also `2018-1-1`), or a value that is not a version at all (`banana`), or none, is taken; any other value that starts like a version
+  (`2099-01-01`, `2018-01-01-preview`, `2`) is `400 UnsupportedApiVersion` "The HTTP resource that matches the request URI '<url>' does not support the API version '…'."
+  with `"innerError": null`, before the key is looked at.
 
 ### Classic publish details
 
-* Body limit: 1,536,000 bytes (as recorded: `413 RequestEntityTooLarge`, details `PayloadTooLarge`).
-* Event Grid schema: `id`, `subject`, `eventType`, `eventTime` (must parse), `dataVersion` are required, `data`
-  is optional. A missing field is `400 BadRequest` with a message in Event Grid's form
-  ("This resource is configured to receive event in 'EventGridEvent' schema. ... Required property
-  'subject' not found in JSON. Path '[0]'.") and `details[0].code = InputJsonInvalid`.
+* Body limit: 1,536,000 bytes (as recorded: `413 RequestEntityTooLarge`, details `PayloadTooLarge`). One event may be at most 1,049,430 bytes (its JSON text): more is
+  `413` "The maximum size for the JSON content (1049600) has been exceeded." (found by trying; the 170 bytes to the 1,049,600 are what the service adds to an event). A
+  request of several events can be larger in all, up to the body limit.
+* Event Grid schema (a topic whose input schema is `EventGridSchema`, as one made through Resource Manager is; checked against Azure in November 2026). The body must be an array
+  (text that is not JSON: "Unexpected character encountered while parsing value: g. …"; cut short: "Unexpected end when reading JSON."; an object, `null`, a number:
+  "This resource is configured to receive event in 'EventGridEvent' schema. The JSON received does not conform to the expected schema. Token Expected: StartArray, Actual Token Received: StartObject."; `[]`:
+  "Token Expected: StartObject, Actual Token Received: EndArray."). The events are looked at one after the other, each in two steps. Step one reads the properties in the order they were
+  written and stops at the first problem: a property the schema does not have ("This resource is configured for 'EventGridEvent' schema. Received unexpected property 'color' in JSON which
+  does not conform to the expected schema."; the names the schema has are `id`, `topic`, `subject`, `data`, `eventType`, `eventTime`, `metadataVersion`, `dataVersion`), an object or an array where
+  text goes ("Error reading string. Unexpected token: StartObject. Path 'subject'."), an `eventTime` that is not a date ("The event time property 'eventTime' was not a valid date/time."; a date
+  without a zone, only a date, with a space instead of the `T`, in lower case, are dates). Step two needs `subject`, `eventType`, `id`, `eventTime`, in that order, not empty and not blank
+  ("This resource is configured for 'EventGridEvent' schema and requires 'subject' property to be set."). `dataVersion` and `data` are optional. Names are not case sensitive; a number or a
+  `true` where text goes is taken as text. The content type is not looked at. A `topic` property must be empty or the topic's own resource id (only a topic made through
+  Resource Manager knows that id; else `401` "Property 'topic' was found to be set to '…', but was expected to either be null/empty or be set to …"). A topic that works the schema out from
+  the events (`Auto`, as an admin-API topic does by default) uses the same rules except that it does not refuse a property the schema lacks.
+* Other paths of a topic host: `OPTIONS /api/events` is `200` (`Allow: POST, OPTIONS`); another method is `405` (`Allow: OPTIONS, POST`; the message is only "." and the report sentence);
+  `POST /` and `POST /api` are `404` "No HTTP resource was found that matches the request URI '…'." (inner `ResourceNotFound`). `/api/events/` and `/api/Events` are the publish endpoint.
 * CloudEvents: `specversion` must be `1.0`; `id`, `source`, `type` required; `data` and `data_base64` are exclusive;
   `time` must parse. `application/cloudevents-batch+json` needs an array, `application/cloudevents+json` an object.
 * A topic created by publishing has input schema `Auto`: the schema is worked out from the content type and the first event
@@ -189,7 +224,7 @@ Under `/_azemu/eventgrid` on the gateway (any host) or a pinned listener. JSON i
 |---|---|
 | `GET /` | settings and every topic |
 | `GET /topics` | `{"value":[{name, kind, subscriptions, published, …}]}` (`kind`: `custom`, `domain`, `domainTopic`, `namespaceTopic`) |
-| `PUT /topics/{name}` | create (201) or update (200) a **custom topic**. Body `{"kind":"custom"\|"domain"\|"namespace","inputSchema":"Auto"}` |
+| `PUT /topics/{name}` | create (201) or update (200) a **custom topic**. Body `{"kind":"custom"\|"domain"\|"namespace","inputSchema":"Auto","keys":["…","…"]}` (`keys`: see "Authentication") |
 | `PUT /topics/{name}?namespace=N` | create the namespace topic `name` in namespace `N` (created if new). With body `kind: "namespace"` and no parameter, `N` is `default` |
 | `PUT /topics/{name}?domain=D` | create the domain topic `name` in domain `D` (created if new) |
 | `GET` / `DELETE /topics/{name}` (same parameters) | read / delete. Without a parameter, `name` is a custom topic or domain, else a topic of the namespace `default` |
@@ -297,7 +332,7 @@ PUT /_azemu/eventgrid/sources/storage/acct/subscriptions/orders
 ```json
 {
   "topics": [
-    { "name": "orders", "inputSchema": "EventGridSchema",
+    { "name": "orders", "inputSchema": "EventGridSchema", "keys": ["<base64 key>"],
       "subscriptions": [
         { "name": "to-hook", "webhookUrl": "http://localhost:7071/api/hook",
           "filter": { "includedEventTypes": ["Order.Created"] } } ] } ],
@@ -348,23 +383,21 @@ next round, receivers waiting on its pull subscriptions return, and the other ho
 
 ## Known differences from Azure
 
-* Credentials are only checked for presence. Nothing is signed or verified.
+* Keys are compared only for topics that have them (made through Resource Manager, or given `keys`); a bearer token is never verified; the namespace endpoints check only that a credential is there.
 * Sources (storage account, key vault, store) have no system topic resource of their own here; the ARM layer adds that.
 * Topics, subscriptions and namespaces made through the admin API or the config file are not ARM resources: no resource ids to list (events carry a made-up
   `/subscriptions/00000000-…/providers/Microsoft.EventGrid/…` topic id), no regions, no keys, no `provisioningState`. Topics made through ARM carry their real ARM id.
-* The exact texts of validation errors are written in Event Grid's style from memory and the one recorded error; only the 401
-  and 413 bodies are copied from recordings. Codes and statuses are what the recordings and the spec give.
-* The 64 KB event size rule and the one-event-per-1 MB limit are not applied; only the request body limit is (1,536,000 bytes classic,
-  1,048,576 bytes namespace publish).
+* The texts of the errors of a classic publish to a topic fixed to the Event Grid schema were tried against Azure in November 2026 ("Authentication" and "Classic publish details"). Not
+  tried: topics with the CloudEvents or custom schema (their texts are written in Event Grid's style from memory), JSON cut short in the middle of an event (the text says only "Unexpected end when reading
+  JSON.", Azure names the path), and the same checks on a domain. The tries used one topic in one region.
+* The 64 KB event size rule (billing) is not applied. The 1,049,430 byte limit of one event applies to a classic publish; the namespace publish has only its body limit (1,048,576 bytes).
 * `maxWaitTime` below 10 seconds and release delays other than 0/10/60/600/3600 are accepted; lock duration, time to live and retry
   policy values are not range-checked beyond being positive.
 * Event type filters are case-insensitive (assumed). Missing-key behaviour of negative advanced filters follows the documentation as read.
 * Dead letters stay in memory on the subscription (no blob destination). Push delivery is one event per request (one message for a queue, topic or hub). Retry waits are much
   shorter than Azure's 10 s to 12 h schedule by default.
-* No `api-version` validation: any version is accepted on both APIs.
+* `api-version` is checked on the classic publish only (see "Authentication"); the namespace API takes any version.
 * State lives in memory and is lost on restart unless `--data-dir` is set (the config file is reloaded either way).
-* A POST to the root of a topic host (an endpoint given to the Python Basic client without `/api/events`) is `501`, where Azure
-  answers an error of its own.
 
 ## Keeping data between runs
 

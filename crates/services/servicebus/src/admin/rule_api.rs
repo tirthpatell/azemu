@@ -2,7 +2,7 @@
 
 use azemu_core::Response;
 
-use super::entities::{next_link, paging};
+use super::entities::{check_name, next_link, paging};
 use super::error::{ApiError, ApiResult, ErrKind};
 use super::render::{self, Entry, CT_ENTRY, CT_FEED};
 use super::subs::entity_id;
@@ -31,9 +31,16 @@ fn rule_id(cx: &Cx, topic: &str, sub: &str, rule: &str) -> String {
     format!("{}:Topic:{topic}|{sub}|{rule}", cx.account)
 }
 
-fn find_sub<'a>(shared_ns: &'a mut crate::state::Namespace, cx: &Cx, topic: &str, sub: &str) -> ApiResult<&'a mut Subscription> {
-    let t = shared_ns.topic_mut(topic).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, "")))?;
-    t.subs.get_mut(&key(sub)).ok_or_else(|| ApiError::not_found_entity(entity_id(cx, topic, sub)))
+/// The subscription a rule request is about. `Err(None)`: the topic is not there (the service answers a read with its list of services, and
+/// a write with "not recognized"); `Err(Some(e))`: the subscription is not there.
+fn find_sub<'a>(
+    shared_ns: &'a mut crate::state::Namespace,
+    cx: &Cx,
+    topic: &str,
+    sub: &str,
+) -> Result<&'a mut Subscription, Option<ApiError>> {
+    let t = shared_ns.topic_mut(topic).ok_or(None)?;
+    t.subs.get_mut(&key(sub)).ok_or_else(|| Some(ApiError::not_found_entity(entity_id(cx, topic, sub))))
 }
 
 fn pos(sub: &Subscription, name: &str) -> Option<usize> {
@@ -42,24 +49,38 @@ fn pos(sub: &Subscription, name: &str) -> Option<usize> {
 
 pub fn get(shared: &Shared, cx: &Cx, topic: &str, sub: &str, name: &str) -> ApiResult<Response> {
     let mut st = shared.state.lock();
-    let s = find_sub(st.ns(&cx.account), cx, topic, sub)?;
+    let s = match find_sub(st.ns(&cx.account), cx, topic, sub) {
+        Ok(s) => s,
+        Err(None) => return Ok(super::misc::root_feed(cx)),
+        Err(Some(e)) => return Err(e),
+    };
     let i = pos(s, name).ok_or_else(|| ApiError::not_found_entity(rule_id(cx, topic, sub, name)))?;
     let rule = &s.rules[i];
     Ok(render::respond(200, CT_ENTRY, Some(&etag_of(rule.created_ms)), rule_entry(cx, topic, sub, rule, true, true)))
 }
 
 pub fn put(shared: &Shared, cx: &Cx, topic: &str, sub: &str, name: &str) -> ApiResult<Response> {
-    let root = xml::parse(&cx.req.body).ok_or_else(ApiError::bad_request)?;
+    let not_recognized = || ApiError::new(ErrKind::NotRecognized);
+    let root = xml::parse(&cx.req.body).ok_or_else(not_recognized)?;
     let content = root.child("content");
-    let desc = content
-        .and_then(|c| c.child("RuleDescription"))
-        .or_else(|| (root.name == "RuleDescription").then_some(&root))
-        .ok_or_else(ApiError::bad_request)?;
+    let desc = content.and_then(|c| c.child("RuleDescription")).or_else(|| (root.name == "RuleDescription").then_some(&root)).ok_or_else(
+        || match content.and_then(|c| c.children.iter().find(|n| n.name.ends_with("Description"))) {
+            // the description of another kind of entity is a description, but not one of a rule
+            Some(_) => ApiError::bad_request(),
+            None => not_recognized(),
+        },
+    )?;
+    check_name(cx, name, "Rule")?;
     let update = cx.req.header("if-match").is_some();
     let id = || rule_id(cx, topic, sub, name);
 
     let mut st = shared.state.lock();
-    let s = find_sub(st.ns(&cx.account), cx, topic, sub)?;
+    let s = match find_sub(st.ns(&cx.account), cx, topic, sub) {
+        Ok(s) => s,
+        // a rule of a topic that is not there: not recognized; of a subscription that is not there: not found, named with the rule
+        Err(None) => return Err(not_recognized()),
+        Err(Some(_)) => return Err(ApiError::new(ErrKind::NotFoundMessaging(rule_id(cx, topic, sub, name)))),
+    };
     let existing = pos(s, name);
     let mut rule = rule_xml::parse(name, desc, cx.now)?;
     if update {
@@ -83,7 +104,7 @@ pub fn delete(shared: &Shared, cx: &Cx, topic: &str, sub: &str, name: &str) -> A
     let mut st = shared.state.lock();
     let ns = st.ns(&cx.account);
     let s = ns.topic_mut(topic).and_then(|t| t.subs.get_mut(&key(sub))).ok_or_else(|| ApiError::new(ErrKind::NoService))?;
-    let i = pos(s, name).ok_or_else(|| ApiError::new(ErrKind::NoService))?;
+    let i = pos(s, name).ok_or_else(|| ApiError::new(ErrKind::NotFoundMessaging(rule_id(cx, topic, sub, name))))?;
     let rule = s.rules.remove(i);
     Ok(render::ok_empty(&etag_of(rule.created_ms)))
 }
@@ -91,7 +112,11 @@ pub fn delete(shared: &Shared, cx: &Cx, topic: &str, sub: &str, name: &str) -> A
 pub fn list(shared: &Shared, cx: &Cx, topic: &str, sub: &str) -> ApiResult<Response> {
     let (skip, top) = paging(cx)?;
     let mut st = shared.state.lock();
-    let s = find_sub(st.ns(&cx.account), cx, topic, sub)?;
+    let s = match find_sub(st.ns(&cx.account), cx, topic, sub) {
+        Ok(s) => s,
+        Err(None) => return Ok(super::misc::root_feed(cx)),
+        Err(Some(e)) => return Err(e),
+    };
     let entries: String = s.rules.iter().skip(skip).take(top).map(|r| rule_entry(cx, topic, sub, r, false, true)).collect();
     let body = render::feed(cx, "Rules", next_link(cx, skip, top, s.rules.len()), &entries);
     Ok(render::respond(200, CT_FEED, Some(&etag_of(cx.now)), body))

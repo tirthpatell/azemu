@@ -249,9 +249,13 @@ fn rsa_alg_or_err(m: &KeyMaterial) -> CResult<&Arc<PrivateKey>> {
 }
 
 pub fn sign(m: &KeyMaterial, alg: &str, digest: &[u8]) -> CResult<Vec<u8>> {
-    let want = sign_digest_len(alg).ok_or_else(|| CryptoError::Algorithm(format!("unknown signature algorithm '{alg}'")))?;
+    let want = sign_digest_len(alg).ok_or_else(|| CryptoError::Algorithm(format!("Invalid algorithm: {alg}")))?;
     if digest.len() != want {
-        return Err(CryptoError::Input(format!("the digest must be {want} bytes for {alg}, got {}", digest.len())));
+        // the words of the service (tried against Azure in November 2026)
+        return Err(CryptoError::Input(format!(
+            "Invalid length of 'value': {} bytes. {alg} requires {want} bytes, encoded with base64url.",
+            digest.len()
+        )));
     }
     if alg.starts_with("ES") {
         return ec_sign(m, alg, digest);
@@ -269,9 +273,9 @@ pub fn sign(m: &KeyMaterial, alg: &str, digest: &[u8]) -> CResult<Vec<u8>> {
 }
 
 pub fn verify(m: &KeyMaterial, alg: &str, digest: &[u8], signature: &[u8]) -> CResult<bool> {
-    let want = sign_digest_len(alg).ok_or_else(|| CryptoError::Algorithm(format!("unknown signature algorithm '{alg}'")))?;
+    let want = sign_digest_len(alg).ok_or_else(|| CryptoError::Algorithm(format!("Invalid algorithm: {alg}")))?;
     if digest.len() != want {
-        return Err(CryptoError::Input(format!("the digest must be {want} bytes for {alg}, got {}", digest.len())));
+        return Err(CryptoError::Input("Bad Hash.\r\n".into()));
     }
     if alg.starts_with("ES") {
         return ec_verify(m, alg, digest, signature);
@@ -342,23 +346,26 @@ pub fn rsa_encrypt(m: &KeyMaterial, alg: &str, data: &[u8]) -> CResult<Vec<u8>> 
         "RSA1_5" => public.pkcs1v15_encrypt(data),
         "RSA-OAEP" => public.oaep_encrypt::<Sha1>(data),
         "RSA-OAEP-256" => public.oaep_encrypt::<Sha256>(data),
-        _ => return Err(CryptoError::Algorithm(format!("unknown encryption algorithm '{alg}'"))),
+        _ => return Err(CryptoError::Algorithm(format!("Invalid algorithm: {alg}"))),
     };
-    r.map_err(|e| CryptoError::Input(format!("the data cannot be encrypted with this key and algorithm: {e}")))
+    // the only way RSA encryption fails is data that does not fit in the key
+    r.map_err(|_| CryptoError::Input("Bad Length.\r\n".into()))
 }
 
 pub fn rsa_decrypt(m: &KeyMaterial, alg: &str, data: &[u8]) -> CResult<Vec<u8>> {
     let key = rsa_alg_or_err(m)?;
+    const BAD_PADDING: &str = "Error occurred while decoding OAEP padding.";
+    // a ciphertext of the wrong length and one that does not decrypt are the same answer
     if data.len() != key.size() {
-        return Err(CryptoError::Input(format!("the ciphertext must be {} bytes for this key, got {}", key.size(), data.len())));
+        return Err(CryptoError::Failed(BAD_PADDING.into()));
     }
     let r = match alg {
         "RSA1_5" => key.pkcs1v15_decrypt(data),
         "RSA-OAEP" => key.oaep_decrypt::<Sha1>(data),
         "RSA-OAEP-256" => key.oaep_decrypt::<Sha256>(data),
-        _ => return Err(CryptoError::Algorithm(format!("unknown encryption algorithm '{alg}'"))),
+        _ => return Err(CryptoError::Algorithm(format!("Invalid algorithm: {alg}"))),
     };
-    r.map_err(|_| CryptoError::Failed("the ciphertext could not be decrypted with this key and algorithm".into()))
+    r.map_err(|_| CryptoError::Failed(BAD_PADDING.into()))
 }
 
 #[cfg(test)]

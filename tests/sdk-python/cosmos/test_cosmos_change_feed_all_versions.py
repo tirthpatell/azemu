@@ -32,6 +32,8 @@ def ops(items):
     return [i["metadata"]["operationType"] for i in items]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_every_version_and_the_delete_are_returned_in_order(container):
     cont = start(container)
     container.create_item({"id": "a", "pk": "p", "v": 1})
@@ -58,6 +60,8 @@ def test_latest_version_mode_shows_neither_intermediate_versions_nor_deletes(con
     assert [(i["id"], i.get("v")) for i in items] == [("a", 2)]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_documents_written_before_the_start_are_not_in_the_feed(container):
     container.create_item({"id": "old", "pk": "p"})
     cont = start(container)
@@ -66,6 +70,8 @@ def test_documents_written_before_the_start_are_not_in_the_feed(container):
     assert [i["current"]["id"] for i in items] == ["new"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_create_item_shape(container):
     cont = start(container)
     container.create_item({"id": "a", "pk": "p", "v": 1})
@@ -80,6 +86,8 @@ def test_create_item_shape(container):
     assert "previousImageLSN" not in meta
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_replace_points_at_the_previous_change(container):
     cont = start(container)
     container.create_item({"id": "a", "pk": "p"})
@@ -92,6 +100,8 @@ def test_replace_points_at_the_previous_change(container):
     assert "previous" not in replaced  # Azure offers no previous image
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_upsert_of_an_existing_item_is_a_replace(container):
     cont = start(container)
     container.upsert_item({"id": "a", "pk": "p", "v": 1})
@@ -99,6 +109,8 @@ def test_upsert_of_an_existing_item_is_a_replace(container):
     assert ops(read(container, continuation=cont)[0]) == ["create", "replace"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_patch_is_a_replace(container):
     cont = start(container)
     container.create_item({"id": "a", "pk": "p", "v": 1})
@@ -108,6 +120,8 @@ def test_patch_is_a_replace(container):
     assert items[1]["current"]["v"] == 6
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_delete_has_no_current_and_names_the_item(container):
     cont = start(container)
     container.create_item({"id": "a", "pk": "p"})
@@ -123,6 +137,8 @@ def test_delete_has_no_current_and_names_the_item(container):
     assert meta["crts"] > 1_000_000_000
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_nothing_new_returns_nothing_and_the_continuation_still_works(container):
     cont = start(container)
     assert read(container, continuation=cont)[0] == []
@@ -135,6 +151,8 @@ def test_nothing_new_returns_nothing_and_the_continuation_still_works(container)
     assert [i["current"]["id"] for i in items] == ["b"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_paging_with_max_item_count(container):
     cont = start(container)
     for i in range(7):
@@ -155,6 +173,8 @@ def test_paging_with_max_item_count(container):
     assert seen == [f"i{i}" for i in range(7)]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_partition_key_scopes_the_feed(container):
     _, cont = read(container, start_time="Now", partition_key="q")
     container.create_item({"id": "a", "pk": "p"})
@@ -163,6 +183,8 @@ def test_partition_key_scopes_the_feed(container):
     assert [i["current"]["id"] for i in items] == ["b"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_feed_range_scopes_the_feed(container):
     (rng,) = list(container.read_feed_ranges())
     cont = start(container)
@@ -186,6 +208,8 @@ def test_service_refuses_a_read_without_start_point(endpoint, ca_file, db, conta
     assert r.status_code == 400, r.text
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_ttl_expiry_is_a_delete_with_the_flag(make_container):
     c = make_container("/pk", default_ttl=-1)
     cont = start(c)
@@ -197,6 +221,8 @@ def test_ttl_expiry_is_a_delete_with_the_flag(make_container):
     assert items[1]["metadata"]["id"] == "x"
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_a_batch_shows_its_changes_and_an_undone_batch_shows_nothing(container):
     cont = start(container)
     with pytest.raises(Exception):
@@ -211,6 +237,8 @@ def test_a_batch_shows_its_changes_and_an_undone_batch_shows_nothing(container):
     assert [i["current"]["id"] for i in items] == ["b1", "b2"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_two_readers_have_independent_positions(container):
     c1 = start(container)
     container.create_item({"id": "a", "pk": "p"})
@@ -222,6 +250,8 @@ def test_two_readers_have_independent_positions(container):
     assert [i["current"]["id"] for i in second] == ["b"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_delete_all_items_by_partition_key_is_in_the_feed_as_deletes(container):
     container.create_item({"id": "a", "pk": "p"})
     cont = start(container)
@@ -230,6 +260,8 @@ def test_delete_all_items_by_partition_key_is_in_the_feed_as_deletes(container):
     assert ops(items) == ["delete"]
 
 
+# The test account does not have the account feature 'all versions and deletes' (a 400 "must be enabled"), so the mode cannot be tried.
+@pytest.mark.emulator_only
 def test_replace_with_a_changed_partition_key_value_is_a_delete_and_a_create(container):
     # a different partition key value is a different item: it is created, the old one stays
     cont = start(container)

@@ -170,7 +170,7 @@ fn truncated_valid_filters() {
 
 const VALID_ACTIONS: &[&str] = &[
     "SET quantity = quantity / 2; REMOVE priority;SET sys.CorrelationId = 'low';",
-    "SET a = 1, b = a + 2, [c d] = 'x''y' REMOVE e",
+    "SET a = 1; SET b = a + 2; SET [c d] = 'x''y' REMOVE e",
     "SET t = p('b') + newid(); SET u = -(a % 3) * @p",
 ];
 

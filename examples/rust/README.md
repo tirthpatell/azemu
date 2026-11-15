@@ -27,6 +27,9 @@ SSL_CERT_FILE=~/.azemu/bundle.pem AZURE_COSMOS_BINARY_ENCODING_ENABLED=false COS
 IDENTITY_ENDPOINT=http://localhost:4577/_azemu/identity/msi/token IDENTITY_HEADER=azemu cargo run --bin hello
 ```
 
+These commands are for Linux. On macOS the crates ask the Keychain and do not read `SSL_CERT_FILE`: see
+[`docs/rust.md`](../../docs/rust.md#macos).
+
 It prints the blob, the queue message and the secret it wrote, and the result of the Cosmos DB queries. A second run says `409 ContainerAlreadyExists` until you `curl -X POST localhost:4577/_azemu/reset`.
 
 ## In your own project
@@ -35,7 +38,7 @@ The testkit is a path dependency here so that the example works from a checkout.
 
 ```toml
 [dev-dependencies]
-azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.1.0" }
+azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.2.0" }
 ```
 
 CI for such a project: [`examples/ci/github-actions-rust.yml`](../ci/github-actions-rust.yml).

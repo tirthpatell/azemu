@@ -46,8 +46,11 @@ async fn the_headers_must_agree_with_each_other() {
     assert_eq!((r.status, code(&r).as_str()), (400, "MissingRequiredHeader"));
     let r = put(&env, &[("x-ms-encryption-key", &k.0), ("x-ms-encryption-key-sha256", &k.1)]).await;
     assert_eq!((r.status, code(&r).as_str()), (400, "MissingRequiredHeader"));
+    // the hash without the key is accepted on a write and the blob has no key (Azure, November 2026)
     let r = put(&env, &[("x-ms-encryption-key-sha256", &k.1)]).await;
-    assert_eq!((r.status, code(&r).as_str()), (400, "MissingRequiredHeader"));
+    assert_eq!(r.status, 201, "{}", r.text());
+    assert_eq!(env.send("GET", "/cont1/b", &[], "").await.status, 200, "the blob was written without a key");
+    assert_eq!(env.send("DELETE", "/cont1/b", &[], "").await.status, 202);
     let r =
         put(&env, &[("x-ms-encryption-key", &k.0), ("x-ms-encryption-key-sha256", &k.1), ("x-ms-encryption-algorithm", "AES128")]).await;
     assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
@@ -55,13 +58,13 @@ async fn the_headers_must_agree_with_each_other() {
     let r =
         put(&env, &[("x-ms-encryption-key", &short), ("x-ms-encryption-key-sha256", &k.1), ("x-ms-encryption-algorithm", "AES256")]).await;
     assert_eq!((r.status, code(&r).as_str()), (400, "InvalidHeaderValue"));
-    // nothing was written by any of them; a consistent set works
+    // nothing was written by the refused ones; a consistent set works
     assert_eq!(env.send("GET", "/cont1/b", &[], "").await.status, 404);
     let r = put(&env, &headers(&k, &[])).await;
     assert_eq!(r.status, 201, "{}", r.text());
     assert_eq!(r.header("x-ms-request-server-encrypted"), Some("true"));
     assert_eq!(r.header("x-ms-encryption-key-sha256"), Some(k.1.as_str()));
-    // the headers are checked on reads too, even for a blob without a key
+    // the headers are checked on reads too
     let r = env
         .send(
             "GET",
@@ -88,15 +91,35 @@ async fn a_blob_written_with_a_key_needs_that_key() {
         let none = env.send(method, path, &[], "").await;
         assert_eq!((none.status, code(&none).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"), "{method} {path} without a key");
         let wrong = env.send(method, path, &headers(&k2, &[]), "").await;
-        assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"), "{method} {path} with another key");
+        assert_eq!(
+            (wrong.status, code(&wrong).as_str()),
+            (409, "BlobCustomerSpecifiedEncryptionMismatch"),
+            "{method} {path} with another key"
+        );
     }
     let wrong = env.send("GET", "/cont1/secret", &headers(&k2, &[]), "").await;
-    assert!(wrong.text().contains("not the one it was written with"), "{}", wrong.text());
-    // the hash alone names the key too (property requests send no key)
-    let hash_only = env.send("HEAD", "/cont1/secret", &[("x-ms-encryption-key-sha256", &k1.1)], "").await;
-    assert_eq!(hash_only.status, 200);
-    let hash_wrong = env.send("HEAD", "/cont1/secret", &[("x-ms-encryption-key-sha256", &k2.1)], "").await;
-    assert_eq!(hash_wrong.status, 409);
+    assert!(wrong.text().contains("does not match the encryption used to encrypt the blob"), "{}", wrong.text());
+    // the hash alone is not the key: Azure answers `BlobUsesCustomerSpecifiedEncryption` for the hash of another key
+    // (checked in November 2026); the hash of the right key alone was not tried and gets the same answer here
+    for h in [&k1.1, &k2.1] {
+        let hash_only = env.send("HEAD", "/cont1/secret", &[("x-ms-encryption-key-sha256", h)], "").await;
+        assert_eq!((hash_only.status, code(&hash_only).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"));
+    }
+    // a key sent for a blob that was written without one
+    env.put_blob("cont1", "plain0", "x").await;
+    for (method, path, extra) in [
+        ("GET", "/cont1/plain0", vec![]),
+        ("HEAD", "/cont1/plain0", vec![]),
+        ("PUT", "/cont1/plain0?comp=metadata", vec![("x-ms-meta-a", "1")]),
+    ] {
+        let r = env.send(method, path, &headers(&k1, &extra), "").await;
+        assert_eq!((r.status, code(&r).as_str()), (409, "BlobDoesNotUseCustomerSpecifiedEncryption"), "{method} {path}");
+    }
+    // overwriting a plain blob with a key is fine, and so is overwriting a key blob with none or with another key
+    assert_eq!(env.send("PUT", "/cont1/plain0", &headers(&k1, &[("x-ms-blob-type", "BlockBlob")]), "y").await.status, 201);
+    assert_eq!(env.send("PUT", "/cont1/plain0", &[("x-ms-blob-type", "BlockBlob")], "y").await.status, 201);
+    assert_eq!(env.send("PUT", "/cont1/plain0", &headers(&k1, &[("x-ms-blob-type", "BlockBlob")]), "y").await.status, 201);
+    assert_eq!(env.send("PUT", "/cont1/plain0", &headers(&k2, &[("x-ms-blob-type", "BlockBlob")]), "y").await.status, 201);
 
     // writes to the blob: another key and no key are refused, its key works (Put Block, metadata, properties)
     let blk = B64.encode("blk000000001");
@@ -108,7 +131,7 @@ async fn a_blob_written_with_a_key_needs_that_key() {
         let none = env.send(method, &path, &extra, "x").await;
         assert_eq!((none.status, code(&none).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"), "{what} without a key");
         let wrong = env.send(method, &path, &headers(&k2, &extra), "x").await;
-        assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"), "{what} with another key");
+        assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobCustomerSpecifiedEncryptionMismatch"), "{what} with another key");
         let ok = env.send(method, &path, &headers(&k1, &extra), "x").await;
         assert!(ok.status == 200 || ok.status == 201, "{what} with its key: {} {}", ok.status, ok.text());
     }
@@ -127,7 +150,7 @@ async fn append_and_page_blobs_check_the_key_too() {
     let r = env.send("PUT", "/cont1/log", &headers(&k1, &[("x-ms-blob-type", "AppendBlob")]), "").await;
     assert_eq!(r.status, 201, "{}", r.text());
     let wrong = env.send("PUT", "/cont1/log?comp=appendblock", &headers(&k2, &[]), "line").await;
-    assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"));
+    assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobCustomerSpecifiedEncryptionMismatch"));
     let ok = env.send("PUT", "/cont1/log?comp=appendblock", &headers(&k1, &[]), "line").await;
     assert_eq!(ok.status, 201, "{}", ok.text());
     let r = env.send("PUT", "/cont1/pg", &headers(&k1, &[("x-ms-blob-type", "PageBlob"), ("x-ms-blob-content-length", "512")]), "").await;
@@ -136,7 +159,7 @@ async fn append_and_page_blobs_check_the_key_too() {
     let wrong = env
         .send("PUT", "/cont1/pg?comp=page", &headers(&k2, &[("x-ms-page-write", "update"), ("x-ms-range", "bytes=0-511")]), page.clone())
         .await;
-    assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobUsesCustomerSpecifiedEncryption"));
+    assert_eq!((wrong.status, code(&wrong).as_str()), (409, "BlobCustomerSpecifiedEncryptionMismatch"));
     let ok =
         env.send("PUT", "/cont1/pg?comp=page", &headers(&k1, &[("x-ms-page-write", "update"), ("x-ms-range", "bytes=0-511")]), page).await;
     assert_eq!(ok.status, 201, "{}", ok.text());

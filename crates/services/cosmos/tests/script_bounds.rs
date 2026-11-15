@@ -112,7 +112,8 @@ async fn a_script_that_never_calls_back_or_finishes_its_promise_just_ends() {
     let h = start_with(quick()).await;
     let r = run(&h, "function () { new Promise(function () {}); __.readDocuments(__.getSelfLink(), function () {}); }").await;
     assert_eq!(r.status, 200, "{}", r.text());
-    assert!(r.body.is_empty(), "no body was set");
+    // Azure answers an empty JSON string when the script set no body
+    assert_eq!(r.text(), "\"\"", "no body was set");
 }
 
 #[tokio::test]

@@ -12,6 +12,7 @@ cargo test                      # all test binaries, runs against a copy of the 
 cargo test --test eventhubs     # one binary
 cargo test -- --ignored         # run only the tests that show a known emulator difference (they fail)
 (cd beta && cargo test)         # the second project, with the beta crates (own target directory)
+(cd older && cargo test)        # the third project, with the older versions that projects are often pinned to (own target directory)
 ```
 
 Needs `target/debug/azemu` in the repository root (`cargo build -p azemu` there). To get a stable target while
@@ -20,7 +21,7 @@ The first build needs the network (crates.io) and takes several minutes; the tar
 and the OpenSSL development headers (`libssl-dev` on Debian and Ubuntu), because the Event Hubs crate links OpenSSL.
 
 Every test binary starts its own emulator on a free port with a temporary certificate directory, waits for `/_azemu/health`, builds a CA
-bundle (system list plus the emulator's CA, written to the temporary directory) and points rustls at it with `SSL_CERT_FILE`, and stops the
+bundle (system list plus the emulator's CA, written to the temporary directory) and points rustls at it with `SSL_CERT_FILE` (Linux; see the TLS paragraph below for macOS), and stops the
 emulator when the binary exits. Tests share that emulator and use unique names (`uniq()`), so they run in parallel.
 
 Environment: `AZEMU_GATEWAY=http://127.0.0.1:4577` (use a running emulator; `AZEMU_CA_FILE` its `ca.pem`), `AZEMU_BIN` (binary to start),
@@ -42,7 +43,11 @@ in one graph. `tests/sdk-rust` uses the stable `azure_core` 1.1.0 set (Cosmos is
 Event Hubs 0.16.0 with `azure_core_amqp` 1.2.0-beta.1). The legacy `azure_data_tables` 0.21 (2024) covers Table, over plain http with Shared Key.
 Service Bus, Event Grid, App Configuration and Resource Manager have no usable official crate, so these suites do not cover them.
 
-TLS: reqwest 0.13 with rustls and `rustls-platform-verifier` for the current crates; `SSL_CERT_FILE` is honoured. The Event Hubs 0.15
+`older/` is a third project with the versions that a project is often pinned to: `azure_core`, `azure_identity` and `azure_storage_blob` 1.0.0 and `azure_data_cosmos` 0.36.0 (with the
+transitive crates at their newest compatible versions, as `cargo` picks them; see `older/Cargo.lock`). It does not share `src/lib.rs` with the others, because that file uses parts of `azure_core` that are newer
+than 1.0.0; `older/tests/common/mod.rs` does the same job (it also makes the account SAS). It needs no OpenSSL.
+
+TLS: reqwest 0.13 with rustls and `rustls-platform-verifier` for the current crates; `SSL_CERT_FILE` is honoured on Linux (on macOS the platform verifier asks the Keychain instead, so these suites need the authority trusted there: [`docs/rust.md`](../../docs/rust.md#macos), and the manual `macos-rust` job in `.github/workflows/ci.yml`). The Event Hubs 0.15
 crate also links OpenSSL (`libssl.so.3`; fe2o3-amqp prefers native-tls when both stacks are enabled, so AMQP-in-TLS goes through
 OpenSSL, which also honours `SSL_CERT_FILE`; this is read from the fe2o3-amqp source and `ldd`, not otherwise verified); building it needs OpenSSL development headers. The
 legacy table crate uses reqwest 0.12 with rustls and bundled roots, over HTTP only. Event Hubs 0.16.0 moves to rustls (aws-lc-rs).
@@ -61,6 +66,8 @@ legacy table crate uses reqwest 0.12 with rustls and bundled roots, over HTTP on
 | `tests/eventhubs.rs` | 42 | hub and partition properties, send (single, batch, partition id, partition key), receive from earliest, latest, sequence number, offset, enqueued time, consumer groups. Each receiving test runs twice: through `azure_core_amqp` and through the Event Hubs SDK's own receiver |
 | `beta/tests/blob_beta.rs` | 7 | blob 1.2.0-beta.1: Arrow-or-XML listing, hierarchical listing with a delimiter, async copy |
 | `beta/tests/eventhubs_beta.rs` | 6 | Event Hubs 0.16.0: connection string, WebSocket transport, buffered producer; send checked through the admin API. Each test creates its hub first (`create_eventhub` in `src/lib.rs`, shared with the main project) |
+| `older/tests/blob_older.rs` | 6 | blob 1.0.0: create, upload, download, list and delete with `ManagedIdentityCredential` and with a fixed token over https, and with an account SAS signed with the development key over plain http and no credential; the refusals (a credential over http by the client, a wrong signature 403, no credential 401) |
+| `older/tests/cosmos_older.rs` | 6 | Cosmos DB 0.36.0 with a key: database and container made by raw REST, then upsert, read, patch, query (one partition and across), 404, 409; and one test with the crate's own `create_database` and `create_container` |
 
 Ignored tests carry `#[ignore = "azemu: ..."]` with the reason (at present one: Cosmos binary-encoded item bodies, which are not built). `cargo test -- --ignored` runs them.
 

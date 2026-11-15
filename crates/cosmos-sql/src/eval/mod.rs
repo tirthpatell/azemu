@@ -24,7 +24,6 @@ pub(crate) struct Ctx {
     bytes_used: Cell<usize>,
     /// Set by a function whose result would be larger than one value may be (`value_too_big`).
     overflow: Cell<bool>,
-    pub order_by_excludes_undefined: bool,
     regexes: RefCell<HashMap<(String, String), Option<regex::Regex>>>,
     udf: Option<Box<dyn crate::UdfHost>>,
 }
@@ -55,7 +54,6 @@ impl Ctx {
             bytes_max: opts.max_bytes,
             bytes_used: Cell::new(0),
             overflow: Cell::new(false),
-            order_by_excludes_undefined: opts.order_by_excludes_undefined,
             regexes: RefCell::new(HashMap::new()),
             udf: opts.udf.as_ref().map(|f| f.make()),
         }
@@ -127,7 +125,8 @@ impl Ctx {
     pub fn check_room(&self, size: usize) -> Result<(), SqlError> {
         if size > self.bytes_left() {
             return Err(SqlError::limit(format!(
-                "The query builds a value larger than {} MB, which is more than the emulator allows for one query.",
+                "The query builds a value larger than {} MB, which is more than the emulator allows for one query's memory. \
+                 Narrow it with a WHERE clause or a smaller TOP, or avoid a large ORDER BY, GROUP BY, DISTINCT or JOIN.",
                 self.bytes_max / (1024 * 1024)
             )));
         }
@@ -223,10 +222,8 @@ impl Ctx {
     pub fn eval(&self, e: &Expr, env: &Env, grp: Option<&GroupCtx>) -> Result<Val, SqlError> {
         match &e.kind {
             ExprKind::Literal(l) => Ok(literal(l)),
-            ExprKind::Param(name) => match self.params.get(name) {
-                Some(v) => Ok(v.clone()),
-                None => Err(SqlError::eval(format!("Parameter '@{name}' is not defined."))),
-            },
+            // a parameter the request did not supply is undefined (Azure answers no error)
+            ExprKind::Param(name) => Ok(self.params.get(name).cloned().unwrap_or(Val::Undefined)),
             ExprKind::Ident(name) => match env.lookup(name) {
                 Some(v) => Ok(v.forced()),
                 None => Err(SqlError::semantic("SC2001", format!("Identifier '{name}' could not be resolved."), e.span.start, e.span.end)),
@@ -310,6 +307,7 @@ impl Ctx {
             ExprKind::Like { expr, pattern, escape, negated } => {
                 let x = self.eval(expr, env, grp)?;
                 let p = self.eval(pattern, env, grp)?;
+                // the parser only lets a one character string literal through
                 let esc = match escape {
                     None => None,
                     Some(e) => match self.eval(e, env, grp)? {
@@ -322,8 +320,8 @@ impl Ctx {
                     _ => Val::Undefined,
                 })
             }
+            // anything but `true` (undefined, null, a number, a string) takes the second branch
             ExprKind::Ternary(c, a, b) => match self.eval(c, env, grp)? {
-                Val::Undefined => Ok(Val::Undefined),
                 Val::Bool(true) => self.eval(a, env, grp),
                 _ => self.eval(b, env, grp),
             },
@@ -374,6 +372,10 @@ impl Ctx {
                         e.span.start + 4 + name.chars().count(),
                     ));
                 };
+                // Azure does not call a function that is given an undefined argument: the result is undefined (checked in November 2026)
+                if vals.iter().any(Option::is_none) {
+                    return Ok(Val::Undefined);
+                }
                 match host.call(name, &vals).map_err(SqlError::udf)? {
                     Some(v) => Ok(Val::from_json(&v)),
                     None => Ok(Val::Undefined),

@@ -31,17 +31,20 @@ from ehutil import AsyncCollector, Collector, KEY, KEY_NAME, bodies, host, send_
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WS = TransportType.AmqpOverWebsocket
-TLS_MODES = pytest.mark.parametrize("tls", [False, True], ids=["ws", "wss"])
+# Azure serves WebSocket only over TLS (port 443): the plain `ws` variants are about the emulator
+TLS_MODES = pytest.mark.parametrize("tls", [pytest.param(False, id="ws", marks=pytest.mark.emulator_only), pytest.param(True, id="wss")])
 
 
 @pytest.fixture(autouse=True)
 def _needs_ca(emu):
-    if not emu.ca_file:
+    if not emu.ca_file and not emu.azure:
         pytest.skip("no CA file: the emulator under test was not started by the fixture (set AZEMU_CA_FILE)")
 
 
 # -- clients -------------------------------------------------------------------------------------------------------
 def ws_kwargs(emu, namespace=ehutil.NAMESPACE, tls=False, **extra):
+    if emu.azure:  # wss to port 443 of the namespace's host name; nothing to point at
+        return {**ehutil.CLIENT_KW, "transport_type": WS, **extra}
     kw = {
         **ehutil.CLIENT_KW,
         "transport_type": WS,
@@ -55,7 +58,7 @@ def ws_kwargs(emu, namespace=ehutil.NAMESPACE, tls=False, **extra):
 
 def _make(cls_producer, cls_consumer, emu, hub, kind, group, namespace, tls, extra):
     kw = ws_kwargs(emu, namespace, tls, **extra)
-    if tls:
+    if tls or emu.azure:
         # TLS: namespace name + credential (no UseDevelopmentEmulator, so the SDK uses wss://)
         fqns = host(emu, namespace).split(":")[0]
         cred = AzureNamedKeyCredential(KEY_NAME, KEY)
@@ -98,11 +101,11 @@ def test_management_operations_over_websocket(emu, hub, track, tls):
     p = track(ws_producer(emu, hub, tls=tls))
     assert p.get_partition_ids() == ["0", "1", "2", "3"]
     assert p.get_eventhub_properties()["eventhub_name"] == hub
-    assert p.get_partition_properties("1")["is_empty"] is True
+    before = p.get_partition_properties("1")["last_enqueued_sequence_number"]  # -1 in an empty partition
     send_n(p, 2, partition_id="1")
     props = p.get_partition_properties("1")
     assert props["is_empty"] is False
-    assert props["last_enqueued_sequence_number"] == 1
+    assert props["last_enqueued_sequence_number"] == before + 2
 
 
 @TLS_MODES
@@ -171,12 +174,18 @@ def test_consumer_close_ends_the_receive_loop(emu, hub1, track):
 
 def test_wss_with_an_untrusted_ca_is_refused(emu, hub, track):
     kw = ws_kwargs(emu, tls=True, retry_total=0, auth_timeout=5)
-    kw.pop("connection_verify")
+    kw.pop("connection_verify", None)
+    if emu.azure:  # Azure's certificate is checked against a CA that did not sign it
+        import tempfile
+        from sdk_dial_probe import make_ca
+
+        kw["connection_verify"] = make_ca(tempfile.mkdtemp(prefix="azemu-ca-"))[0]
     p = track(EventHubProducerClient(host(emu).split(":")[0], hub, AzureNamedKeyCredential(KEY_NAME, KEY), **kw))
     with pytest.raises(EventHubError):
         p.get_partition_ids()
 
 
+@pytest.mark.emulator_only  # needs a local port with nothing on it
 def test_ws_to_a_port_with_nothing_listening_fails(emu, hub, track):
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -225,6 +234,8 @@ async def test_async_large_event_over_websocket(emu, hub1):
 class _Unified:
     """Just enough of the `emu` fixture for ehutil: port, CA file, URLs."""
 
+    azure = False
+
     def __init__(self, port, ca_file):
         self.port = port
         self.ca_file = ca_file
@@ -266,6 +277,7 @@ def unified():
                 proc.kill()
 
 
+@pytest.mark.emulator_only
 @TLS_MODES
 def test_unified_binary_event_hubs_over_websocket(unified, track, tls):
     hub = ehutil.uniq("uhub")
@@ -277,6 +289,7 @@ def test_unified_binary_event_hubs_over_websocket(unified, track, tls):
         assert bodies(col.wait_events(2)) == sent
 
 
+@pytest.mark.emulator_only
 def test_unified_binary_picks_event_hubs_from_the_open_frame_not_the_http_host(unified, track):
     # the WebSocket request goes to 127.0.0.1 (the Host header says so); only the AMQP open frame names the namespace
     hub = ehutil.uniq("uhub")

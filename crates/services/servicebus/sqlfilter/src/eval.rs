@@ -14,7 +14,7 @@ pub(crate) struct Ctx<'a> {
 /// System property names. A missing property with one of these names is
 /// simply unset (unknown); a missing property with any other `sys.` name
 /// does not exist at all, which Service Bus treats as an error.
-const KNOWN_SYS: &[&str] = &[
+pub const KNOWN_SYS: &[&str] = &[
     "MessageId",
     "CorrelationId",
     "Label",
@@ -114,7 +114,7 @@ pub(crate) fn eval(e: &Expr, cx: &Ctx) -> Result<Val, EvalError> {
             };
             match op {
                 BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem => arith(*op, &a, &b),
-                _ => Ok(from_tri(compare(*op, &a, &b))),
+                _ => Ok(from_tri(compare(*op, &a, &b)?)),
             }
         }
         Expr::In { expr, list, negated } => {
@@ -124,7 +124,7 @@ pub(crate) fn eval(e: &Expr, cx: &Ctx) -> Result<Val, EvalError> {
             let mut found = false;
             for item in list {
                 if let Some(v) = eval(item, cx)? {
-                    if compare(BinOp::Eq, &left, &v) == Some(true) {
+                    if compare(BinOp::Eq, &left, &v)? == Some(true) {
                         found = true;
                         break;
                     }

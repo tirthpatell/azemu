@@ -72,6 +72,32 @@ impl EventGrid {
         Ok(())
     }
 
+    /// Declare the topic (or update it) on the Event Grid service: its input schema, its resource id and its two keys.
+    async fn send_topic(&self, cx: &Cx<'_>, name: &str, schema: &str, res_id: &str, keys: &Value) -> ArmResult<()> {
+        let Some(eg) = self.b.eventgrid_service() else { return Ok(()) };
+        let suffix = cx.port_suffix();
+        let path = format!("/_azemu/eventgrid/topics/{name}");
+        let body = json!({"kind": "custom", "inputSchema": schema, "resourceId": res_id, "keys": [keys["key1"], keys["key2"]]});
+        let r = call(
+            &eg,
+            Call {
+                method: "PUT",
+                path: &path,
+                query: "",
+                headers: vec![("Content-Type", "application/json".into())],
+                body: body.to_string().into_bytes(),
+                label: "eventgrid",
+                account: "",
+                port_suffix: &suffix,
+            },
+        )
+        .await;
+        if r.status().as_u16() >= 400 {
+            return Err(dp_error(&r));
+        }
+        Ok(())
+    }
+
     fn keys(&self, res: &Stored) -> Value {
         let seed = res.id.to_ascii_lowercase();
         json!({
@@ -141,28 +167,9 @@ impl Provider for EventGrid {
         if !existed {
             p.insert("metricResourceId".into(), json!(uuid::Uuid::new_v4().to_string()));
         }
-        if let Some(eg) = self.b.eventgrid_service() {
-            let suffix = cx.port_suffix();
-            let path = format!("/_azemu/eventgrid/topics/{}", res.name());
-            let r = call(
-                &eg,
-                Call {
-                    method: "PUT",
-                    path: &path,
-                    query: "",
-                    headers: vec![("Content-Type", "application/json".into())],
-                    body: json!({"kind": "custom", "inputSchema": schema, "resourceId": res_id}).to_string().into_bytes(),
-                    label: "eventgrid",
-                    account: "",
-                    port_suffix: &suffix,
-                },
-            )
-            .await;
-            if r.status().as_u16() >= 400 {
-                return Err(dp_error(&r));
-            }
-        }
-        Ok(())
+        // the keys ride along: the service compares what a publisher sends with them
+        let keys = self.keys(res);
+        self.send_topic(cx, res.name(), &schema, &res_id, &keys).await
     }
 
     async fn delete(&self, cx: &Cx<'_>, res: &Stored, _force: bool) -> ArmResult<()> {
@@ -225,7 +232,11 @@ impl Provider for EventGrid {
                 }
                 bump_generation(cx, &res.id, &which);
                 let fresh = cx.inner.state.lock().resources.get(&crate::state::key(&res.id)).cloned().unwrap_or_else(|| res.clone());
-                Ok(Some(util::json_ok(200, &self.keys(&fresh))))
+                let keys = self.keys(&fresh);
+                // the service takes the new key from now on
+                let schema = fresh.prop_str("inputSchema").unwrap_or("EventGridSchema").to_string();
+                self.send_topic(cx, fresh.name(), &schema, &fresh.id, &keys).await?;
+                Ok(Some(util::json_ok(200, &keys)))
             }
             _ => Ok(None),
         }

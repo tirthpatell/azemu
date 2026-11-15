@@ -1,0 +1,10 @@
+{
+  "blob": { "devstoreaccount1": { "containers": ["uploads"] } },
+  "queue": { "devstoreaccount1": { "queues": ["jobs"] } },
+  "cosmos": {
+    "azemu": {
+      "databases": [{ "id": "app", "containers": [{ "id": "items", "partitionKey": "/tenantId" }] }]
+    }
+  },
+  "keyvault": { "azemu": { "secrets": { "db-password": "local-only-password" } } }
+}

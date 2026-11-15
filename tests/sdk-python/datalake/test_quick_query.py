@@ -55,7 +55,9 @@ def test_json_file(fs):
     j = DelimitedJsonDialect()
     r = f.query_file("SELECT name from DataLakeStorage WHERE id >= 1", file_format=j, output_format=j)
     assert r.readall() == b'{"name":"owner"}\n{"name":"mouse"}\n'
-    assert list(f.query_file("SELECT COUNT(*) FROM BlobStorage", file_format=j, output_format=DelimitedTextDialect()).records()) == [b"3", b""]
+    # an aggregate is answered as an empty data record, a progress message and then the result record (Azure, November 2026),
+    # so the SDK's `records()` yields an empty first item
+    assert list(f.query_file("SELECT COUNT(*) FROM BlobStorage", file_format=j, output_format=DelimitedTextDialect()).records()) == [b"", b"3", b""]
 
 
 def test_errors_reach_the_handler(fs):
@@ -81,7 +83,8 @@ def test_a_directory_has_no_rows(fs):
 
 
 def test_the_same_data_through_the_dfs_endpoint(fs, emu, csv_file):
-    """The dfs endpoint answers POST ?comp=query too (not used by the SDKs, which send it to the blob endpoint)."""
+    """The dfs endpoint has no query: it reads a POST as a lease and wants `x-ms-lease-action` (Azure, November 2026). The SDKs
+    send the query to the blob endpoint, which serves the same file."""
     from azure.storage.blob import generate_container_sas, ContainerSasPermissions
     from datetime import datetime, timedelta, timezone
     from dlutil import DEV_ACCOUNT, DEV_KEY
@@ -93,8 +96,18 @@ def test_the_same_data_through_the_dfs_endpoint(fs, emu, csv_file):
     body = (
         "<QueryRequest><QueryType>SQL</QueryType><Expression>SELECT _1 FROM BlobStorage</Expression></QueryRequest>"
     )
-    url = f"{emu.url('dfs', DEV_ACCOUNT)}/{fs.file_system_name}/dir/data.csv?comp=query&{sas}"
+    # the dfs host reads the POST as a lease, which needs the write permission
+    wsas = generate_container_sas(
+        DEV_ACCOUNT, fs.file_system_name, DEV_KEY,
+        permission=ContainerSasPermissions(read=True, list=True, write=True), expiry=datetime.now(timezone.utc) + timedelta(hours=1),
+    )
+    url = f"{emu.url('dfs', DEV_ACCOUNT)}/{fs.file_system_name}/dir/data.csv?comp=query&{wsas}"
     r = requests.post(url, data=body, headers={"Content-Type": "application/xml"})
+    assert r.status_code == 400, r.text
+    assert r.json()["error"]["code"] == "MissingRequiredHeader"
+    assert r.json()["error"]["detail"] == {"HeaderName": "x-ms-lease-action"}
+    blob_url = f"{emu.url('blob', DEV_ACCOUNT)}/{fs.file_system_name}/dir/data.csv?comp=query&{sas}"
+    r = requests.post(blob_url, data=body, headers={"Content-Type": "application/xml"})
     assert r.status_code == 200, r.text
     assert r.headers["Content-Type"] == "avro/binary"
     assert r.content[:4] == b"Obj\x01"

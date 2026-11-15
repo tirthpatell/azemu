@@ -174,8 +174,12 @@ describe('user-defined functions', () => {
     assert.deepEqual(where.resources.map((d) => d.id).sort(), ['i2', 'i3']);
     const select = await c.items.query('SELECT t.id, udf.Tax(t.income) AS tax FROM t').fetchAll();
     assert.deepEqual(select.resources.map((d) => d.tax).sort((a, b) => a - b), [50, 1000, 28000, 40000]);
-    const e = await rejection(() => c.items.query('SELECT VALUE udf.Tax(t.nothing) FROM t', { partitionKey: 'a' }).fetchAll());
+    // a function is not called when an argument is undefined: no row, no error (Azure, checked in November 2026)
+    const none = await c.items.query('SELECT VALUE udf.Tax(t.nothing) FROM t', { partitionKey: 'a' }).fetchAll();
+    assert.deepEqual(none.resources, []);
+    await c.scripts.userDefinedFunctions.create({ id: 'boom', body: "function boom(x) { throw 'bad input'; }" });
+    const e = await rejection(() => c.items.query('SELECT VALUE udf.boom(t.income) FROM t', { partitionKey: 'a' }).fetchAll());
     assert.equal(e.code, 400);
-    assert.match(e.message, /no input/);
+    assert.match(e.message, /bad input/);
   });
 });

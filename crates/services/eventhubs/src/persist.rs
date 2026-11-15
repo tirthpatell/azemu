@@ -99,6 +99,9 @@ struct EventD {
     /// The AMQP encoding of the message as it was stored (without the annotations only the broker sets).
     message: Bytes,
     size: usize,
+    /// Written through the Kafka endpoint (files from before this field was added hold events that came in over AMQP).
+    #[serde(default)]
+    kafka: bool,
 }
 
 struct EventsOut(Vec<Arc<Event>>);
@@ -115,6 +118,7 @@ impl Serialize for EventsOut {
                 partition_key: e.partition_key.clone(),
                 message: Bytes::from(e.message.encode()),
                 size: e.size,
+                kafka: e.kafka,
             })?;
         }
         seq.end()
@@ -409,6 +413,7 @@ fn fill_partition(p: &mut Partition, f: PartIn) -> Result<(), String> {
             partition_key: e.partition_key,
             message,
             size: e.size,
+            kafka: e.kafka,
         }));
     }
     let next_seq = events.back().map(|e| e.seq + 1).unwrap_or(0).max(f.next_seq);

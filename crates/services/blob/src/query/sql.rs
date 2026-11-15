@@ -15,23 +15,42 @@ use super::value::{CastType, Value};
 pub const MAX_DEPTH: u32 = 100;
 pub const MAX_NODES: usize = 100_000;
 
+/// What kind of refusal a bad expression is. Azure answers every one of them `400 ErrorProcessingQueryExpression`, but the
+/// message differs: a syntax error repeats the expression, the others say what is wrong.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ErrKind {
+    /// "Syntax error in query: <expression>".
+    Syntax,
+    /// A name after `FROM` that is not `BlobStorage`: the message depends on the input format.
+    Table,
+    /// A word where a column name is read (an unknown date part is one): the message depends on the header row.
+    Column,
+    /// A fixed message.
+    Other(&'static str),
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SqlError {
     pub message: String,
     /// Character offset in the expression.
     pub pos: usize,
+    pub kind: ErrKind,
 }
 
 pub(super) type R<T> = Result<T, SqlError>;
 
 pub(super) fn err<T>(pos: usize, message: impl Into<String>) -> R<T> {
-    Err(SqlError { message: message.into(), pos })
+    Err(SqlError { message: message.into(), pos, kind: ErrKind::Syntax })
+}
+
+fn err_kind<T>(pos: usize, message: impl Into<String>, kind: ErrKind) -> R<T> {
+    Err(SqlError { message: message.into(), pos, kind })
 }
 
 // ---------------------------------------------------------------- parser
 const RESERVED: &[&str] = &[
     "SELECT", "FROM", "WHERE", "LIMIT", "AS", "AND", "OR", "NOT", "IS", "NULL", "MISSING", "BETWEEN", "IN", "LIKE", "ESCAPE", "CAST",
-    "TRUE", "FALSE", "LEADING", "TRAILING", "BOTH", "FOR",
+    "TRUE", "FALSE", "LEADING", "TRAILING", "BOTH", "FOR", "DISTINCT",
 ];
 
 struct Parser<'a> {
@@ -42,7 +61,6 @@ struct Parser<'a> {
     nest: u32,
     nodes: usize,
     saw_agg: bool,
-    alias: Option<String>,
 }
 
 /// An expression and the depth of its tree.
@@ -54,7 +72,7 @@ fn bx(e: PE) -> (Box<Expr>, u32) {
 
 pub fn parse(text: &str) -> R<Select> {
     let toks = lex(text)?;
-    let mut p = Parser { text, toks, p: 0, nest: 0, nodes: 0, saw_agg: false, alias: None };
+    let mut p = Parser { text, toks, p: 0, nest: 0, nodes: 0, saw_agg: false };
     p.select()
 }
 
@@ -192,7 +210,7 @@ impl<'a> Parser<'a> {
         };
         self.p = from_at;
         self.expect_kw("FROM")?;
-        let from = self.table()?;
+        let (from, has_path) = self.table()?;
         let after_table = self.p;
         self.p = list_start;
         let projection = self.projection(from_at)?;
@@ -223,31 +241,35 @@ impl<'a> Parser<'a> {
         if !matches!(self.tok(), Tok::Eof) {
             return self.unexpected("Unexpected text after the end of the statement");
         }
+        // Azure takes one aggregate as the whole select list: `COUNT(*), MAX(x)`, `COUNT(*), name` and `COUNT(*) + 1` are
+        // syntax errors there (checked against Azure in November 2026)
         let aggregate = match &projection {
             Projection::Star => false,
             Projection::List(items) => {
                 let aggs = items.iter().filter(|i| matches!(i.expr, Expr::Agg(..))).count();
-                if aggs > 0 && aggs != items.len() {
-                    return err(0, "A SELECT list is either aggregates only or no aggregates at all.");
-                }
-                if self.saw_agg && aggs == 0 {
-                    return err(0, "An aggregate function can only be a whole select item.");
+                if (aggs > 0 && items.len() > 1) || (self.saw_agg && aggs == 0) {
+                    return err(0, "An aggregate must be the only item of the SELECT list.");
                 }
                 aggs > 0
             }
         };
-        Ok(Select { projection, from, filter, limit, aggregate })
+        Ok(Select { projection, from, has_path, filter, limit, aggregate })
     }
 
-    /// `BlobStorage[[*]][.path][alias]`
-    fn table(&mut self) -> R<Vec<FromStep>> {
+    /// `BlobStorage[[*]][.path]`; the second value is whether a path was written at all (`[*]` alone gives no steps).
+    fn table(&mut self) -> R<(Vec<FromStep>, bool)> {
         let mut steps = Vec::new();
+        let mut has_path = false;
         match self.tok().clone() {
             Tok::Ident(s) if s.eq_ignore_ascii_case("BlobStorage") => self.bump(),
             Tok::Ident(s) if s.eq_ignore_ascii_case("sys") => return err(self.pos(), "sys.split is not built in this emulator."),
+            Tok::Ident(_) | Tok::Quoted(_) => return err_kind(self.pos(), "Expected BlobStorage", ErrKind::Table),
             _ => return self.unexpected("Expected BlobStorage"),
         }
         loop {
+            if self.is_sym("[") || self.is_sym(".") {
+                has_path = true;
+            }
             if self.eat_sym("[") {
                 match self.tok().clone() {
                     Tok::Sym("*") => {
@@ -274,18 +296,7 @@ impl<'a> Parser<'a> {
                 return err(self.pos(), "The path in FROM is too long.");
             }
         }
-        // `FROM BlobStorage s`, `FROM BlobStorage AS s`
-        self.eat_kw("AS");
-        if let Tok::Ident(s) = self.tok().clone() {
-            if !RESERVED.iter().any(|k| k.eq_ignore_ascii_case(&s)) {
-                self.alias = Some(s);
-                self.bump();
-            }
-        } else if let Tok::Quoted(s) = self.tok().clone() {
-            self.alias = Some(s);
-            self.bump();
-        }
-        Ok(steps)
+        Ok((steps, has_path))
     }
 
     fn projection(&mut self, end: usize) -> R<Projection> {
@@ -300,7 +311,14 @@ impl<'a> Parser<'a> {
             let stop = self.toks[self.p - 1].end;
             let mut alias = None;
             if self.eat_kw("AS") {
-                alias = Some(self.ident_name()?.0);
+                // `AS "n m"` is a syntax error on Azure: an alias is a plain word
+                match self.tok().clone() {
+                    Tok::Ident(s) if !RESERVED.iter().any(|k| k.eq_ignore_ascii_case(&s)) => {
+                        self.bump();
+                        alias = Some(s);
+                    }
+                    _ => return self.unexpected("Expected a name after AS"),
+                }
             } else if let Tok::Ident(s) = self.tok().clone() {
                 if !RESERVED.iter().any(|k| k.eq_ignore_ascii_case(&s)) {
                     alias = Some(s);
@@ -386,13 +404,10 @@ impl<'a> Parser<'a> {
         if self.eat_kw("IS") {
             let neg = self.eat_kw("NOT");
             let (e, d) = bx(l);
-            if self.eat_kw("NULL") {
-                return self.mk(Expr::IsNull { e, neg }, d);
-            }
             if self.eat_kw("MISSING") {
                 return self.mk(Expr::IsMissing { e, neg }, d);
             }
-            return self.unexpected("Expected NULL or MISSING after IS");
+            return self.unexpected("Expected MISSING after IS");
         }
         let neg = if self.is_kw("NOT")
             && matches!(self.toks.get(self.p + 1).map(|t| &t.tok), Some(Tok::Ident(s)) if ["BETWEEN", "IN", "LIKE"].iter().any(|k| k.eq_ignore_ascii_case(s)))
@@ -431,6 +446,15 @@ impl<'a> Parser<'a> {
             if self.eat_kw("ESCAPE") {
                 let e = self.additive()?;
                 d = d.max(e.1);
+                if let Expr::Lit(Value::Str(c)) = &e.0 {
+                    if c.chars().count() != 1 {
+                        return err_kind(
+                            self.pos(),
+                            "ESCAPE takes a single character.",
+                            ErrKind::Other("An invalid escape character was specified in the LIKE predicate."),
+                        );
+                    }
+                }
                 esc = Some(Box::new(e.0));
             }
             return self.mk(Expr::Like { e: Box::new(l.0), pat: Box::new(pat.0), esc, neg }, d);
@@ -447,7 +471,6 @@ impl<'a> Parser<'a> {
             let op = match self.tok() {
                 Tok::Sym("+") => BinOp::Add,
                 Tok::Sym("-") => BinOp::Sub,
-                Tok::Sym("||") => BinOp::Concat,
                 _ => return Ok(l),
             };
             self.bump();
@@ -553,11 +576,10 @@ impl<'a> Parser<'a> {
                 return err(self.pos(), "The field path is too long.");
             }
         }
-        // `alias.name` and `BlobStorage.name`: the table name is not a field
+        // `BlobStorage.name`: the table name is not a field
         if steps.len() > 1 {
             if let Step::Field { name, quoted: false } = &steps[0] {
-                let is_alias = self.alias.as_deref().map(|a| a.eq_ignore_ascii_case(name)).unwrap_or(false);
-                if is_alias || name.eq_ignore_ascii_case("BlobStorage") {
+                if name.eq_ignore_ascii_case("BlobStorage") {
                     steps.remove(0);
                 }
             }
@@ -570,10 +592,14 @@ impl<'a> Parser<'a> {
                     d.parse::<usize>().ok()
                 }
             }) {
-                if n == 0 {
-                    return err(self.pos(), "Column ordinals start at _1.");
+                // `_0` is not an ordinal: Azure reads it as a column name (and refuses it without a header row)
+                if n > 0 {
+                    // `_1.a` is a syntax error on Azure
+                    if steps.len() > 1 {
+                        return err(self.pos(), "A column position cannot have a path after it.");
+                    }
+                    steps[0] = Step::Ordinal(n);
                 }
-                steps[0] = Step::Ordinal(n);
             }
         }
         self.mk(Expr::Ref(steps), 0)
@@ -589,7 +615,8 @@ impl<'a> Parser<'a> {
                 self.bump();
                 Ok(p)
             }
-            None => err(self.pos(), format!("'{name}' is not a date part (year, month, day, hour, minute, second).")),
+            // Azure reads the word as a column name
+            None => err_kind(self.pos(), format!("'{name}' is not a date part (year, month, day, hour, minute, second)."), ErrKind::Column),
         }
     }
 
@@ -697,7 +724,7 @@ impl<'a> Parser<'a> {
                     chars = first;
                     e = self.expr()?;
                 } else {
-                    e = first.ok_or_else(|| SqlError { message: "TRIM needs a value.".into(), pos: self.pos() })?;
+                    e = first.ok_or_else(|| SqlError { message: "TRIM needs a value.".into(), pos: self.pos(), kind: ErrKind::Syntax })?;
                 }
                 self.expect_sym(")")?;
                 let d = e.1.max(chars.as_ref().map(|c| c.1).unwrap_or(0));
@@ -705,16 +732,10 @@ impl<'a> Parser<'a> {
             }
             "SUBSTRING" => {
                 self.expect_sym("(")?;
+                // `SUBSTRING(s FROM n [FOR m])` is a syntax error on Azure; only the comma form is read
                 let mut args = vec![self.expr()?];
-                if self.eat_kw("FROM") {
+                while self.eat_sym(",") {
                     args.push(self.expr()?);
-                    if self.eat_kw("FOR") {
-                        args.push(self.expr()?);
-                    }
-                } else {
-                    while self.eat_sym(",") {
-                        args.push(self.expr()?);
-                    }
                 }
                 self.expect_sym(")")?;
                 self.func(FuncId::Substring, None, args, 2, 3, name)

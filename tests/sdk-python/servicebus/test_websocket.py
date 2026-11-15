@@ -35,6 +35,10 @@ from sbutil import async_drain, body_of, bodies, drain_bodies, drain_sub, receiv
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WS = TransportType.AmqpOverWebsocket
 
+# Every test here points the SDK at the emulator's own port (`custom_endpoint_address`) or starts the unified binary.
+# Real Service Bus takes WebSocket only on 443 of the namespace host, so none of it runs against Azure.
+pytestmark = pytest.mark.emulator_only
+
 
 @pytest.fixture(autouse=True)
 def _needs_ca(emu):

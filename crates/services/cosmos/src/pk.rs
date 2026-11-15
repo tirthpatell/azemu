@@ -57,7 +57,10 @@ impl PkComp {
             }
             Value::String(s) => {
                 if s.len() > MAX_PK_VALUE_BYTES {
-                    return Err(CosmosError::bad_request(format!("Partition key reached maximum size of {MAX_PK_VALUE_BYTES} bytes.")));
+                    return Err(CosmosError::bad_request(format!(
+                        "Supplied partition key length {} is bigger than maximum allowed {MAX_PK_VALUE_BYTES}.",
+                        s.len()
+                    )));
                 }
                 PkComp::Str(s.clone())
             }
@@ -186,7 +189,8 @@ impl PartitionKeyDef {
 /// Parses `x-ms-documentdb-partitionkey`: a JSON array of values. `[{}]` is the undefined
 /// partition, `[]` means no partition key.
 pub fn parse_header(raw: &str) -> R<PkValue> {
-    let v: Value = serde_json::from_str(raw).map_err(|_| CosmosError::bad_request("The partition key header is not valid JSON."))?;
+    let v: Value =
+        serde_json::from_str(raw).map_err(|_| CosmosError::plain(400, "BadRequest", format!("Partition key {raw} is invalid.")))?;
     match v {
         Value::Array(a) => a.iter().map(PkComp::from_json).collect(),
         other => Ok(vec![PkComp::from_json(&other)?]),

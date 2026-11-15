@@ -26,10 +26,8 @@ mod util;
 pub(crate) use deleted::{list_deleted, undelete as undelete_path};
 /// The Data Lake service: `http://{account}.dfs.core.localhost:{port}/{filesystem}/{path}`.
 /// Created with `BlobService::datalake()`; it shares the Blob service's data.
-pub(crate) use errors::into_response as error_response;
 pub(crate) use expiry::set_expiry;
 pub(crate) use rename::parse_source as rename_source;
-pub(crate) use router::SERVER;
 
 pub struct DataLakeService {
     pub(crate) shared: Arc<Shared>,
@@ -91,7 +89,7 @@ impl Service for DataLakeService {
         true
     }
 
-    /// Reads only: a `POST` here is a query or a lease, and the two cannot be told apart from the path.
+    /// Reads only: a `POST` here is a lease.
     fn abort_on_disconnect(&self, method: &azemu_core::http::Method, _path: &str) -> bool {
         *method == azemu_core::http::Method::GET
     }

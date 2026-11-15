@@ -199,8 +199,8 @@ fn the_largest_accepted_queries_run_on_a_small_stack() {
         ("correlated join subqueries", |n| {
             format!("SELECT VALUE {}c.x{} FROM c", "ARRAY(SELECT VALUE x FROM x IN c.a WHERE ".repeat(n), ")".repeat(n))
         }),
-        ("from subqueries", |n| format!("{}c{}", "SELECT * FROM (".repeat(n), ") ".repeat(n))),
-        ("negation", |n| format!("SELECT VALUE {}c.x FROM c", "-".repeat(n))),
+        ("from subqueries", |n| format!("{}SELECT * FROM c{}", "SELECT * FROM (".repeat(n), ") ".repeat(n))),
+        ("negation", |n| format!("SELECT VALUE {}c.x FROM c", "- ".repeat(n))),
         ("not", |n| format!("SELECT VALUE {}true FROM c", "NOT ".repeat(n))),
         ("sum chain", |n| format!("SELECT VALUE c.x{} FROM c", " + c.x".repeat(n))),
         ("ternary", |n| format!("SELECT VALUE {}1 FROM c", "true ? 1 : ".repeat(n))),
@@ -211,9 +211,9 @@ fn the_largest_accepted_queries_run_on_a_small_stack() {
         ("in lists", |n| format!("SELECT VALUE c.x IN ({}1{}) FROM c", "[".repeat(n), "]".repeat(n))),
     ];
     for (name, shape) in shapes {
-        // largest n that parses (the limits are well below 200)
+        // the shapes up to 60 levels (the limits are above that; `deep_queries_azure_accepts_run` goes further)
         let mut best = 0;
-        for n in 1..200 {
+        for n in 1..60 {
             let sql = shape(n);
             if on_small_stack(move || parse(&sql).is_ok()) {
                 best = n;
@@ -231,13 +231,14 @@ fn the_largest_accepted_queries_run_on_a_small_stack() {
 
 #[test]
 fn a_query_of_thousands_of_joins_is_refused_not_a_stack_overflow() {
-    // 400 KB of JOINs: the evaluator is recursive over the sources, so the parser stops far below that
+    // 400 KB of JOINs: Azure allows ten, whatever the text size, and says so on the whole query
     let joins = " JOIN a IN c.x".repeat(30_000);
     let sql = format!("SELECT VALUE 1 FROM c{joins}");
     assert!(sql.len() < 512 * 1024);
+    let len = sql.chars().count();
     let e = run(sql).unwrap_err();
-    assert_eq!(e.kind, ErrorKind::LimitExceeded);
-    // 64 sources, each with one row, run 64 levels deep on a small stack
+    assert_eq!((e.code.as_str(), e.start, e.end), ("SC3002", 0, len));
+    // ten JOINs, each with one row, run on a small stack; the eleventh is refused
     let deep = |joins: usize| {
         on_small_stack(move || {
             let docs = vec![json!({"one": [1]})];
@@ -245,6 +246,22 @@ fn a_query_of_thousands_of_joins_is_refused_not_a_stack_overflow() {
             parse(&format!("SELECT VALUE 1 FROM c{sql}"))?.execute(&docs, &Params::new(), &EvalOptions::default())
         })
     };
-    assert_eq!(deep(63).unwrap(), vec![json!(1)]);
-    assert_eq!(deep(64).unwrap_err().kind, ErrorKind::LimitExceeded);
+    assert_eq!(deep(10).unwrap(), vec![json!(1)]);
+    assert_eq!(deep(11).unwrap_err().code, "SC3002");
+}
+
+/// Azure takes 300 nested parentheses and a chain of 3000 terms; so does this (the work runs on a big stack once the text is long).
+#[test]
+fn deep_queries_azure_accepts_run() {
+    let parens = format!("SELECT VALUE {}1{} FROM c", "(".repeat(250), ")".repeat(250));
+    assert_eq!(run(parens).expect("250 levels"), vec![json!(1)]);
+    let chain = format!("SELECT VALUE 1{} FROM c", " + 1".repeat(3000));
+    assert_eq!(run(chain).expect("3000 terms"), vec![json!(3001)]);
+    let ands = format!("SELECT VALUE c.x FROM c WHERE true{}", " AND true".repeat(3000));
+    assert_eq!(run(ands).expect("3000 AND terms"), vec![json!(1)]);
+    let coalesce = format!("SELECT VALUE {}7 FROM c", "c.q ?? ".repeat(150));
+    assert_eq!(run(coalesce).expect("150 ??"), vec![json!(7)]);
+    // too deep: SC1030, as on Azure
+    let e = run(format!("SELECT VALUE {}1{} FROM c", "(".repeat(2000), ")".repeat(2000))).unwrap_err();
+    assert_eq!(e.code, "SC1030");
 }

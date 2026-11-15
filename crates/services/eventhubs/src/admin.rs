@@ -123,7 +123,7 @@ fn handle_inner(shared: &Shared, req: Request) -> Response {
             let nsk = st.resolve(ns);
             let Some(h) = st.hub_mut(ns, hub) else { return not_found(&nsk, &format!("The event hub '{hub}'")) };
             h.trim_all(now_ms());
-            match h.parse_pid(pid) {
+            match h.parse_pid(pid, false) {
                 Ok(i) => ok(partition_json(i, &h.partitions[i])),
                 Err(_) => not_found(&nsk, &format!("The partition '{pid}' of '{hub}'")),
             }

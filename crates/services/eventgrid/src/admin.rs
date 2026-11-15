@@ -250,6 +250,11 @@ fn put_topic(shared: &Arc<Shared>, req: &Request, name: &str) -> Response {
     if let (Some(id), Some(h)) = (given_resource_id, st.host_mut(&host_name)) {
         h.resource_id = Some(id);
     }
+    if let (Some(keys), true) = (cfg.keys.clone(), topic.is_none() && host_kind == TopicKind::Custom) {
+        if let Some(h) = st.host_mut(&host_name) {
+            h.keys = keys.into_iter().map(|k| k.trim().to_string()).filter(|k| !k.is_empty()).collect();
+        }
+    }
     let scope = Scope { host: key(&host_name), topic: topic.map(key), kind: host_kind };
     json_resp(if created { 201 } else { 200 }, &topic_view(&st, &scope))
 }

@@ -19,11 +19,13 @@ from ehutil import Collector, KEY, KEY_NAME, bodies, host, make_consumer, make_p
 
 @pytest.fixture(autouse=True)
 def _needs_ca(emu):
-    if not emu.ca_file:
+    if not emu.ca_file and not emu.azure:
         pytest.skip("no CA file: the emulator under test was not started by the fixture (set AZEMU_CA_FILE)")
 
 
 def tls_kwargs(emu, namespace=ehutil.NAMESPACE, **extra):
+    if emu.azure:  # the namespace's own host name, TLS on port 5671, the system's certificate authorities
+        return dict(transport_type=TransportType.Amqp, **{**ehutil.CLIENT_KW, **extra})
     return dict(
         custom_endpoint_address=f"sb://{host(emu, namespace)}", transport_type=TransportType.Amqp, connection_verify=emu.ca_file,
         **{**ehutil.CLIENT_KW, **extra},
@@ -80,6 +82,7 @@ def test_tls_consumer_receives_events_sent_over_plain_amqp(emu, hub, producer):
         assert bodies(col.wait_events(3)) == sent
 
 
+@pytest.mark.emulator_only  # a second namespace by name
 def test_tls_client_for_another_namespace(emu, track):
     name = ehutil.uniq("tlsns")
     ehutil.admin_create_hub(emu, name, partitions=2, namespace="other")
@@ -94,6 +97,6 @@ def test_tls_with_an_untrusted_ca_is_refused(emu, hub, track):
         other_ca, _, _ = make_ca(d)
         p = track(EventHubProducerClient(
             host(emu).split(":")[0], hub, AzureNamedKeyCredential(KEY_NAME, KEY),
-            **{**tls_kwargs(emu), "connection_verify": other_ca}))
+            **{**tls_kwargs(emu, retry_total=0), "connection_verify": other_ca}))
         with pytest.raises(EventHubError):
             p.get_partition_ids()

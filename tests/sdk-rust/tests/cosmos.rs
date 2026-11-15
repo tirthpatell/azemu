@@ -594,8 +594,10 @@ async fn autoscale_throughput_reports_the_maximum() {
 // ---- limits and validation -----------------------------------------------------------------
 
 #[tokio::test]
-async fn item_id_with_a_slash_is_400() {
-    // Azure's service refuses '/' and backslash in an item id; '?' and '#' are accepted (database and container names refuse them).
+async fn item_id_with_a_slash_is_refused_by_the_sdk_before_it_is_sent() {
+    // The Rust SDK refuses '/', backslash, '?' and '#' in an item id itself ("document name is unsafe for Cosmos resource
+    // addressing"). Azure's service accepts '/' and backslash on create (201) and answers 401 to a request by id
+    // (checked in November 2026; the Python and Go suites send such ids themselves).
     let (_c, _db, items) = container().await;
     for bad in ["a/b", "a\\b"] {
         let r = items.create_item("p1", bad, json!({"id": bad, "pk": "p1"}), None).await;

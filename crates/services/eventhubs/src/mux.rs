@@ -138,6 +138,13 @@ impl ConnectionHandler for MuxHandler {
         Ok(())
     }
 
+    fn open_settings(&self) -> Option<OpenSettings> {
+        match self.primary {
+            Side::EventHubs => self.eventhubs.as_ref()?.open_settings(),
+            Side::Other => self.other.as_ref()?.open_settings(),
+        }
+    }
+
     fn on_attach(&mut self, req: AttachRequest) -> AttachDecision {
         let raw = match req.local_role() {
             Role::Receiver => req.attach.target.as_ref().and_then(|t| t.address()).unwrap_or_default().to_string(),

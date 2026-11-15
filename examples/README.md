@@ -24,11 +24,13 @@ docker build -f Dockerfile.dev -t azemu:dev ~/.cache/azemu-image
 | `common/` | `check.py`: a client that writes and reads one Blob, one Queue message and one Key Vault secret through the Python SDKs, and fetches the emulator's CA from the emulator. Used by both examples. |
 | `compose/` | `compose.yaml`: the emulator and that client in one Compose project, the client reaching the emulator by the service name `azemu`. `cd examples/compose && docker compose up --build --abort-on-container-exit --exit-code-from client`. |
 | `ci/` | `gitlab-ci.yml` (the emulator as a `services:` entry with the alias `azemu`) and `github-actions.yml` (a service container with published ports, reached on `localhost`). `check.sh gitlab` and `check.sh github` reproduce both arrangements on one machine with Docker. |
+| `seed/` | `compose.yaml`, `seed.json`, `check.py`: the emulator started with `AZEMU_SEED=/seed.json` (the file mounted into the container), and a client that finds a blob container, a queue, a Cosmos database and container and a secret that nothing created but the seed ([`docs/seed.md`](../docs/seed.md)). `cd examples/seed && docker compose up --build --abort-on-container-exit --exit-code-from client` |
 | `rust/` | a small Rust project: Blob, Queue, Key Vault and Cosmos DB through the Azure SDK for Rust, a program, and tests that start the emulator themselves (`cargo test`). Not Docker: it needs the `azemu` binary. [`rust/README.md`](rust/README.md), and [`docs/rust.md`](../docs/rust.md) for the reasons. |
 | `ci/github-actions-rust.yml` | GitHub Actions for a Rust project whose tests start azemu: installs it from a tag with `cargo install --git`, caches it, runs `cargo test`; the release archive and the image as commented alternatives. |
 
 Expected result: `docker compose up ... --exit-code-from client` ends with exit 0 and three `ok` lines; `examples/ci/check.sh gitlab` and `check.sh github` each print three `ok` lines and
-exit 0. The two YAML files for the CI systems are meant for those systems; `check.sh` reproduces the arrangement they describe on one machine with Docker. `tests/container/run.sh` is the bigger test of the same idea (eleven services).
+exit 0. The two YAML files for the CI systems are meant for those systems; `check.sh` reproduces the arrangement they describe on one machine with Docker. `tests/container/run.sh` is the bigger test of the same idea (eleven services). `seed/` ends with exit 0 and four `ok` lines. **Run:** `seed/` was run once with the image of `Dockerfile.dev` around a debug
+build (the release image of the `Dockerfile` was not built for it): four `ok` lines, exit 0. The rest of this directory was not run again for this entry.
 
 Things the examples rely on, so they are not surprises:
 

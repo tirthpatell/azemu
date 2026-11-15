@@ -23,10 +23,10 @@ async fn path_style_account_on_a_pinned_dfs_port() {
         .expect("start");
     let dfs_addr = emu.pinned_addr("dfs").expect("dfs address");
     let blob_addr = emu.pinned_addr("blob").expect("blob address");
-    let d = format!("http://{dfs_addr}/devstoreaccount1");
-    let b = format!("http://{blob_addr}/devstoreaccount1");
+    let d = format!("http://{dfs_addr}/pinacct");
+    let b = format!("http://{blob_addr}/pinacct");
     let c = Client::new();
-    let auth = [("Authorization", "SharedKey devstoreaccount1:c2ln")];
+    let auth = [("Authorization", "SharedKey pinacct:c2ln")];
 
     assert_eq!(c.send("PUT", &format!("{d}/pfs?resource=filesystem"), &auth, "").await.status, 201);
     assert_eq!(c.send("PUT", &format!("{d}/pfs/dir/file.txt?resource=file"), &auth, "").await.status, 201);
@@ -44,16 +44,26 @@ async fn path_style_account_on_a_pinned_dfs_port() {
     let r = c.send("GET", &format!("http://{dfs_addr}/other/pfs?resource=filesystem&recursive=true"), &auth, "").await;
     assert_eq!(r.status, 404);
     // the pinned port also answers on the account-less root (default account)
-    let r = c.send("GET", &format!("http://{dfs_addr}/?resource=account"), &auth, "").await;
+    // (the default account is the development account, whose signatures are compared: a bearer token is not)
+    let bearer = [("Authorization", "Bearer token")];
+    assert_eq!(c.send("PUT", &format!("http://{dfs_addr}/devstoreaccount1/dflt?resource=filesystem"), &bearer, "").await.status, 201);
+    let r = c.send("GET", &format!("http://{dfs_addr}/?resource=account"), &bearer, "").await;
     assert_eq!(r.status, 200);
-    assert_eq!(r.json()["filesystems"][0]["name"], "pfs");
+    assert_eq!(r.json()["filesystems"][0]["name"], "dflt");
     // rename with a path-style source: the header names /filesystem/path
     let r = c.send("PUT", &format!("{d}/pfs/renamed?mode=legacy"), &[auth[0], ("x-ms-rename-source", "/pfs/dir")], "").await;
     assert_eq!(r.status, 201, "{}", r.text());
     assert_eq!(c.send("GET", &format!("{b}/pfs/renamed/file.txt"), &auth, "").await.text(), "pinned");
+    // The Data Lake SDKs cannot work out a Blob address from a path-style one, so they send their container calls here:
+    // create, properties and delete of a filesystem are taken (on a `dfs` host name they are refused, as on Azure).
+    assert_eq!(c.send("PUT", &format!("{d}/sdkfs?restype=container"), &auth, "").await.status, 201);
+    assert_eq!(c.send("HEAD", &format!("{d}/sdkfs?restype=container"), &auth, "").await.status, 200);
+    assert_eq!(c.send("HEAD", &format!("{b}/sdkfs?restype=container"), &auth, "").await.status, 200);
+    assert_eq!(c.send("DELETE", &format!("{d}/sdkfs?restype=container"), &auth, "").await.status, 202);
+    assert_eq!(c.send("HEAD", &format!("{b}/sdkfs?restype=container"), &auth, "").await.status, 404);
     // URLs in blob listings are the path-style URLs
     let r = c.send("GET", &format!("{b}/pfs?restype=container&comp=list"), &auth, "").await;
-    assert!(r.text().contains(&format!("ServiceEndpoint=\"http://{blob_addr}/devstoreaccount1/\"")), "{}", r.text());
+    assert!(r.text().contains(&format!("ServiceEndpoint=\"http://{blob_addr}/pinacct/\"")), "{}", r.text());
 }
 
 #[tokio::test]

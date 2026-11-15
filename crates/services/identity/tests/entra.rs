@@ -158,3 +158,68 @@ async fn authorize_redirects_with_a_code_that_redeems() {
     let r = srv.send("GET", &format!("{}/contoso/oauth2/v2.0/authorize?client_id=a", login(&srv)), &[], "").await;
     assert_eq!(r.status, 400);
 }
+
+/// The Rust `azure_identity` credentials build `<authority host>/{tenant}/oauth2/v2.0/token` and drop a path in the
+/// authority, so the paths must also answer at the root of a host that names no service.
+#[tokio::test]
+async fn entra_paths_answer_at_the_root_of_localhost_an_ip_and_a_bare_name() {
+    let srv = server().await;
+    let port = srv.port();
+    // a bare name (a Compose service name) cannot be checked by TLS here, so it goes over http
+    for base in [format!("https://localhost:{port}"), format!("https://127.0.0.1:{port}"), format!("http://azemu:{port}")] {
+        let host = base.as_str();
+        let r = srv.send("GET", &format!("{base}/contoso/v2.0/.well-known/openid-configuration"), &[], "").await;
+        assert_eq!(r.status, 200, "{host}");
+        let d = r.json();
+        assert_eq!(d["token_endpoint"], format!("{base}/contoso/oauth2/v2.0/token"), "{host}");
+        assert_eq!(d["jwks_uri"], format!("{base}/contoso/discovery/v2.0/keys"), "{host}");
+        assert!(d["issuer"].as_str().unwrap().starts_with(&format!("{base}/")), "{host}: {}", d["issuer"]);
+        let form = "grant_type=client_credentials&client_id=app-1&client_secret=x&scope=https%3A%2F%2Fstorage.azure.com%2F.default";
+        let r = post_form(&srv, &format!("{base}/contoso/oauth2/v2.0/token"), form).await;
+        assert_eq!(r.status, 200, "{host}: {}", r.text());
+        // signed with the key that the root `jwks_uri` serves
+        let claims = verify(r.json()["access_token"].as_str().unwrap(), &srv_jwks(&srv, &base).await);
+        assert_eq!(claims["appid"], "app-1", "{host}");
+    }
+}
+
+async fn srv_jwks(srv: &azemu_core::testing::TestServer, base: &str) -> serde_json::Value {
+    let r = srv.send("GET", &format!("{base}/contoso/discovery/v2.0/keys"), &[], "").await;
+    assert_eq!(r.status, 200);
+    r.json()
+}
+
+#[tokio::test]
+async fn every_entra_shape_at_the_root_reaches_the_identity_service() {
+    let srv = server().await;
+    let base = gateway(&srv);
+    let get = |p: &str| {
+        let url = format!("{base}{p}");
+        let srv = &srv;
+        async move { srv.send("GET", &url, &[], "").await }
+    };
+    for p in [
+        "/t/.well-known/openid-configuration",
+        "/t/v2.0/.well-known/openid-configuration",
+        "/t/discovery/keys",
+        "/t/discovery/v2.0/keys",
+        "/common/discovery/instance?api-version=1.1&authorization_endpoint=https%3A%2F%2Flocalhost%2Ft%2Foauth2%2Fv2.0%2Fauthorize",
+        "/t/oauth2/deviceauth",
+        "/common/userrealm/a@b.c",
+        "/t/oauth2/v2.0/authorize?client_id=a&redirect_uri=http%3A%2F%2Flocalhost%2Fcb&response_type=code&scope=openid",
+    ] {
+        let r = get(p).await;
+        assert!(r.status == 200 || r.status == 302, "{p}: {} {}", r.status, r.text());
+    }
+    // POST-only endpoints answer 405 (identity's own answer), not "no service matched"
+    for p in ["/t/oauth2/token", "/t/oauth2/v2.0/token", "/t/oauth2/devicecode", "/t/oauth2/v2.0/devicecode"] {
+        let r = get(p).await;
+        assert_eq!(r.status, 405, "{p}");
+    }
+    // not an Entra shape: the gateway's own answer
+    for p in ["/t/oauth2", "/t/oauth2/nothing", "/t/other/x", "/_azemu/oauth2/token"] {
+        let r = get(p).await;
+        assert_eq!(r.status, 404, "{p}");
+        assert!(r.json()["error"]["code"].as_str().is_some_and(|c| c == "NoServiceMatched" || c == "NotFound"), "{p}: {}", r.text());
+    }
+}

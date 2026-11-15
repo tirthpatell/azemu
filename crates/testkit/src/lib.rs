@@ -396,6 +396,30 @@ impl Emulator {
         );
     }
 
+    /// Make a blob container, which Azure's infrastructure code makes before the application runs. One that already
+    /// exists is left as it is. Panics when the emulator refuses (a name that is not valid, for example).
+    pub fn create_blob_container(&self, account: &str, container: &str) {
+        let answer = self.call(Service::Blob, account, "PUT", &format!("/{container}?restype=container"), &[BEARER], "");
+        assert_made(&format!("blob container {account}/{container}"), &answer);
+    }
+
+    /// Make a Cosmos DB database (the Rust Cosmos crate has no call for it in older versions). One that already exists
+    /// is left as it is. Panics when the emulator refuses.
+    pub fn create_cosmos_database(&self, account: &str, database: &str) {
+        let body = format!("{{\"id\":\"{database}\"}}");
+        let answer = self.call(Service::Cosmos, account, "POST", "/dbs", COSMOS_HEADERS, &body);
+        assert_made(&format!("Cosmos database {account}/{database}"), &answer);
+    }
+
+    /// Make a Cosmos DB container with one partition key path (`"/tenantId"`) in an existing database. One that already
+    /// exists is left as it is. Panics when the emulator refuses.
+    pub fn create_cosmos_container(&self, account: &str, database: &str, container: &str, partition_key_path: &str) {
+        let body =
+            format!("{{\"id\":\"{container}\",\"partitionKey\":{{\"paths\":[\"{partition_key_path}\"],\"kind\":\"Hash\",\"version\":2}}}}");
+        let answer = self.call(Service::Cosmos, account, "POST", &format!("/dbs/{database}/colls"), COSMOS_HEADERS, &body);
+        assert_made(&format!("Cosmos container {account}/{database}/{container}"), &answer);
+    }
+
     /// Make a Service Bus queue, with the ATOM request an administration client sends (there is none for Rust).
     pub fn create_service_bus_queue(&self, namespace: &str, queue: &str) {
         let body = "<entry xmlns=\"http://www.w3.org/2005/Atom\"><content type=\"application/xml\"><QueueDescription xmlns=\"http://schemas.microsoft.com/netservices/2010/10/servicebus/connect\"/></content></entry>";
@@ -545,6 +569,19 @@ fn write_atomically(path: &Path, data: &[u8]) -> std::io::Result<()> {
 }
 
 /// Status and body of an HTTP/1.1 answer, `Content-Length` and chunked bodies both.
+/// Any bearer token does for every service.
+const BEARER: (&str, &str) = ("Authorization", "Bearer azemu-testkit");
+
+/// Cosmos wants a version and some `authorization` value; the emulator checks neither.
+const COSMOS_HEADERS: &[(&str, &str)] =
+    &[("x-ms-version", "2018-12-31"), ("Authorization", "type=master&ver=1.0&sig=azemu-testkit"), ("Content-Type", "application/json")];
+
+/// Made (201), or already there (409 with the service's "already exists" or `Conflict`): both are fine for a test's set-up.
+fn assert_made(what: &str, answer: &Answer) {
+    let exists = answer.status == 409 && (answer.body.contains("AlreadyExists") || answer.body.contains("Conflict"));
+    assert!(matches!(answer.status, 200 | 201 | 204) || exists, "azemu-testkit: creating {what}: {} {}", answer.status, answer.body);
+}
+
 fn parse_answer(raw: &[u8]) -> Result<Answer, String> {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("the answer has no end of headers")?;
     let head = String::from_utf8_lossy(&raw[..split]).into_owned();

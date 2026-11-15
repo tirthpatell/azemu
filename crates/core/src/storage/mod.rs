@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod cors;
+pub mod credentials;
 pub mod sig;
 
 use std::borrow::Cow;

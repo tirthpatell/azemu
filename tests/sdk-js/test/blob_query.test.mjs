@@ -73,7 +73,10 @@ describe('query blob contents (JavaScript SDK)', () => {
 
   it('aggregates', async () => {
     const b = await blob('1\n2\n3\n4\n');
-    assert.equal(await run(b, 'SELECT COUNT(*), SUM(CAST(_1 AS INT)), AVG(CAST(_1 AS INT)) FROM BlobStorage'), '4,10,2.5\n');
+    // one aggregate is the whole select list on Azure (two are a syntax error)
+    assert.equal(await run(b, 'SELECT COUNT(*) FROM BlobStorage'), '4\n');
+    assert.equal(await run(b, 'SELECT SUM(CAST(_1 AS INT)) FROM BlobStorage'), '10\n');
+    assert.equal(await run(b, 'SELECT AVG(CAST(_1 AS INT)) FROM BlobStorage'), '2.5\n');
   });
 
   it('onProgress sees the scanned bytes and onError sees a fatal parse error', async () => {
@@ -103,11 +106,11 @@ describe('query blob contents (JavaScript SDK)', () => {
     assert.deepEqual(errors.map((e) => [e.name, e.isFatal, e.position]), [['InvalidColumnOrdinal', false, CSV.length]]);
   });
 
-  it('a bad expression is a fatal error in the stream', async () => {
+  it('a bad expression is a 400 before any data', async () => {
     const b = await blob(CSV);
-    const errors = [];
-    assert.equal(await run(b, 'SELEKT * FROM BlobStorage', { onError: (e) => errors.push(e) }), '');
-    assert.deepEqual(errors.map((e) => [e.name, e.isFatal]), [['ParseError', true]]);
+    const e = await rejection(() => b.query('SELEKT * FROM BlobStorage'));
+    assert.equal(e.statusCode, 400);
+    assert.equal(e.code, 'ErrorProcessingQueryExpression');
   });
 
   it('a missing blob, an etag condition and an append blob', async () => {
@@ -120,7 +123,8 @@ describe('query blob contents (JavaScript SDK)', () => {
     const app = svc.getContainerClient(b.containerName).getAppendBlobClient(uniq('app'));
     await app.create();
     const e3 = await rejection(() => svc.getContainerClient(b.containerName).getBlockBlobClient(app.name).query('SELECT * FROM BlobStorage'));
-    assert.equal(e3.statusCode, 409);
+    assert.equal(e3.statusCode, 400);
+    assert.equal(e3.code, 'QueryBlobContentsNotSupportedForPageBlobsOrAppendBlobs');
   });
 
   it('a snapshot is queried as it was', async () => {
@@ -139,10 +143,11 @@ describe('query blob contents (JavaScript SDK)', () => {
     assert.equal(out, rows);
   });
 
-  it('parquet input and arrow output are refused with a 501', async () => {
+  it('parquet input of a blob that is not parquet is a 400; arrow output is refused with a 501', async () => {
     const b = await blob(CSV);
     const e = await rejection(() => b.query('select * from blobstorage', { inputTextConfiguration: { kind: 'parquet' } }));
-    assert.equal(e.statusCode, 501);
+    assert.equal(e.statusCode, 400);
+    assert.equal(e.code, 'ErrorProcessingQueryExpression');
     const e2 = await rejection(() => b.query('SELECT _2 FROM BlobStorage', { outputTextConfiguration: { kind: 'arrow', schema: [{ type: 'decimal', name: 'abc', precision: 4, scale: 2 }] } }));
     assert.equal(e2.statusCode, 501);
   });

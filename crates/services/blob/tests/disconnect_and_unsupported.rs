@@ -29,7 +29,7 @@ fn only_reads_and_queries_are_dropped_when_the_client_goes() {
         assert!(!ask(&svc, m.clone(), "/cnt/blob"), "{m}");
         assert!(!ask(&svc, m.clone(), "/cnt"), "{m}");
     }
-    // the Data Lake service: reads only (a POST there is a query or a lease)
+    // the Data Lake service: reads only (a POST there is a lease)
     assert!(ask(&lake, Method::GET, "/fs/path"));
     assert!(!ask(&lake, Method::POST, "/fs/path"));
     assert!(!ask(&lake, Method::PUT, "/fs/path"));
@@ -45,9 +45,13 @@ async fn unbuilt_operations_are_named_in_the_unsupported_list() {
     let a = [AUTH];
     assert_eq!(srv.send("PUT", &format!("{blob}/cnt?restype=container"), &a, "").await.status, 201);
     assert_eq!(srv.send("PUT", &format!("{blob}/cnt/b.csv"), &[AUTH, ("x-ms-blob-type", "BlockBlob")], "a,b\n").await.status, 201);
-    // Parquet input
+    // Parquet input (a blob that is a Parquet file; one that is not gets Azure's `400 ... Corrupt footer`)
+    assert_eq!(
+        srv.send("PUT", &format!("{blob}/cnt/p.parquet"), &[AUTH, ("x-ms-blob-type", "BlockBlob")], "PAR1 rows PAR1").await.status,
+        201
+    );
     let q = "<QueryRequest><QueryType>SQL</QueryType><Expression>SELECT * FROM BlobStorage</Expression><InputSerialization><Format><Type>parquet</Type></Format></InputSerialization></QueryRequest>";
-    let r = srv.send("POST", &format!("{blob}/cnt/b.csv?comp=query"), &a, q).await;
+    let r = srv.send("POST", &format!("{blob}/cnt/p.parquet?comp=query"), &a, q).await;
     assert_eq!(r.status, 501, "{}", r.text());
     // an operation that is not built (Rename Container) and a request nothing matches
     let r = srv.send("PUT", &format!("{blob}/cnt?restype=container&comp=rename"), &[AUTH, ("x-ms-source-container-name", "cnt")], "").await;

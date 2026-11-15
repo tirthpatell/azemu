@@ -18,7 +18,7 @@ async fn a_query_over_the_memory_budget_is_a_400_that_says_so() {
     assert_eq!(h.doc("d", "c", &json!("p"), &json!({"id": "1", "pk": "p", "arr": arr})).await.status, 201);
     let pk = [("x-ms-documentdb-partitionkey", "[\"p\"]")];
     // ORDER BY has to keep every row, and there are 4 million of them
-    let q = json!({"query": "SELECT a, b FROM c JOIN a IN c.arr JOIN b IN c.arr ORDER BY a DESC"});
+    let q = json!({"query": "SELECT a, b FROM c JOIN a IN c.arr JOIN b IN c.arr ORDER BY c.id DESC"});
     let r = h.query("d", "c", &pk, q).await;
     assert_eq!(r.status, 400, "{}", r.text());
     let text = r.text();

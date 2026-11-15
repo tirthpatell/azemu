@@ -520,21 +520,7 @@ impl SbConn {
                         }),
                     }
                 }
-                TxOp::Cancel { target, seqs } => {
-                    let mut found = |seq: i64| -> bool {
-                        let nsr = st.ns(&ns);
-                        match target {
-                            Target::Topic(name) => nsr.topic(name).map(|t| t.scheduled.get(seq as u64).is_some()).unwrap_or(false),
-                            Target::Core(a) => {
-                                nsr.core(a).and_then(|c| c.main.get(seq as u64)).map(|m| m.state == MsgState::Scheduled).unwrap_or(false)
-                            }
-                        }
-                    };
-                    match seqs.iter().find(|s| !found(**s)).copied() {
-                        Some(s) => Err(SbError::message_not_found(s)),
-                        None => Ok(()),
-                    }
-                }
+                TxOp::Cancel { target, seqs } => crate::mgmt::check_cancel(&mut st, &ns, target, seqs),
                 TxOp::SessionState { addr, session, .. } => match st.ns(&ns).core(addr) {
                     None => Err(SbError::entity_not_found(&crate::mgmt::path_of(addr), &ns)),
                     Some(core) if core.session_locked(session, now) => Ok(()),

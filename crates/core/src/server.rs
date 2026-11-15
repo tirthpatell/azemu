@@ -27,7 +27,8 @@ use crate::persistence::{PersistConfig, Persistence, SaveOutcome, ServiceSave, D
 use crate::request::{Endpoint, Query, Request, RequestCtx};
 use crate::resp::Resp;
 use crate::routing::{route_gateway, route_pinned, Routed};
-use crate::service::{RawConn, RawProtocol, Service};
+use crate::seed::{self, Scope, Seed};
+use crate::service::{Mount, RawConn, RawProtocol, Service};
 use crate::tls::{server_config, server_config_no_alpn, Ca, LeafResolver};
 use crate::websocket::{self, RawOverWebSocket, WebSocketProtocol, WsRequest, WsStream};
 use crate::{json_error, Response};
@@ -99,9 +100,19 @@ pub struct EmulatorBuilder {
     data_dir: Option<PathBuf>,
     save_interval: Option<Duration>,
     discard_unreadable: bool,
+    seed: Option<PathBuf>,
 }
 
 impl EmulatorBuilder {
+    /// Create what a seed file lists (`docs/seed.md`) when the emulator starts, and again after every reset (a partial
+    /// reset puts back only what it removed). Something that already exists is left as it is. `start` fails with a message
+    /// that names the file, the place in it and the reason when the file cannot be read, has a property that is not
+    /// known, or lists something a service refuses.
+    pub fn seed_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.seed = Some(path.into());
+        self
+    }
+
     pub fn service(mut self, s: Arc<dyn Service>) -> Self {
         self.services.push(s);
         self
@@ -249,6 +260,15 @@ impl EmulatorBuilder {
             }
         }
 
+        // The seed file is read first, so that a mistake in it is reported before anything else has been touched.
+        let seed = match &self.seed {
+            Some(path) => {
+                let seed = Seed::load(path).map_err(anyhow::Error::msg)?;
+                seed.check_mounted(&self.services).map_err(anyhow::Error::msg)?;
+                Some(Arc::new(seed))
+            }
+            None => None,
+        };
         let cert_dir = self.cert_dir.clone().unwrap_or_else(default_cert_dir);
         let names = crate::tls::TlsNames::parse(&self.tls_names)?;
         // Saved state is read before anything listens. The lock on the directory is released when `start`
@@ -264,6 +284,11 @@ impl EmulatorBuilder {
             }
             None => None,
         };
+        // State read from the data directory is there now; the seed adds what is missing (and leaves the rest as it is).
+        if let Some(seed) = &seed {
+            let applied = seed.apply(&self.services, &Scope::default()).await.map_err(anyhow::Error::msg)?;
+            seed::log_applied(seed, "seed file applied", &applied);
+        }
         let access = AccessPolicy::new(&self.allow_hosts, names.dns_suffixes(), &self.allow_origins)?;
         // read once here, so the first request does not decide when `AZEMU_LOOSE_AUTH` is looked at
         let _ = crate::storage::sig::loose_auth();
@@ -278,6 +303,7 @@ impl EmulatorBuilder {
                 .filter(|s| !s.is_empty())
                 .collect(),
             save_interval: self.save_interval,
+            seed: seed.as_ref().map(|s| s.path().to_path_buf()),
         };
         let ca = Ca::load_or_create_with(&cert_dir, &names)?;
         let resolver = Arc::new(LeafResolver::new(ca)?);
@@ -288,6 +314,7 @@ impl EmulatorBuilder {
         let (drain_tx, drain_rx) = watch::channel(false);
         let shared = Arc::new(Shared {
             persist: persist.clone(),
+            seed,
             draining: AtomicBool::new(false),
             in_flight: AtomicUsize::new(0),
             connections: AtomicUsize::new(0),
@@ -480,7 +507,7 @@ impl RunningEmulator {
         self.shared.services.iter().map(|s| s.name()).collect()
     }
 
-    /// Call `reset()` on every service (same as `POST /_azemu/reset`).
+    /// Call `reset()` on every service and create the seed file's items again (same as `POST /_azemu/reset`).
     pub fn reset(&self) {
         self.shared.reset_all();
     }
@@ -573,6 +600,8 @@ struct ConfigSummary {
     allow_hosts: Vec<String>,
     allow_origins: Vec<String>,
     save_interval: Option<Duration>,
+    /// The seed file in force, as an absolute path when it could be resolved.
+    seed: Option<PathBuf>,
 }
 
 struct Shared {
@@ -585,6 +614,8 @@ struct Shared {
     config: ConfigSummary,
     /// The data directory driver, when `--data-dir` is set.
     persist: Option<Arc<Persistence>>,
+    /// The seed file, created again after a reset.
+    seed: Option<Arc<Seed>>,
     /// Set when shutdown begins: new requests are refused with 503.
     draining: AtomicBool,
     /// HTTP requests being handled, and connection tasks alive: what `shutdown` waits for.
@@ -618,12 +649,38 @@ struct ConnMeta {
 }
 
 impl Shared {
+    /// Reset every service and put the seed back.
     fn reset_all(&self) {
+        self.reset_services();
+        if let Some(seed) = &self.seed {
+            let r = seed.apply_blocking(&self.services, &Scope::default());
+            self.seed_result(seed, r);
+        }
+    }
+
+    /// Reset every service; the seed is not put back (the caller does it).
+    fn reset_services(&self) {
         for s in &self.services {
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.reset()));
             if r.is_err() {
                 tracing::error!(service = s.name(), "reset() panicked");
             }
+        }
+    }
+
+    /// Put back the part of the seed that a reset removed. It worked at start, so a failure now is unexpected: logged at
+    /// ERROR, and the reset itself still counts.
+    async fn reseed(&self, scope: Scope) {
+        if let Some(seed) = &self.seed {
+            let r = seed.apply(&self.services, &scope).await;
+            self.seed_result(seed, r);
+        }
+    }
+
+    fn seed_result(&self, seed: &Seed, r: Result<seed::Applied, String>) {
+        match r {
+            Ok(a) => seed::log_applied(seed, "seed file applied after a reset", &a),
+            Err(e) => tracing::error!("the seed file could not be applied after a reset (it worked at start): {e}"),
         }
     }
 }
@@ -1230,7 +1287,7 @@ async fn dispatch(
     let cross_site_blocked = browser.cross_site_fetch && !browser.permitted;
 
     // 1. admin API, then PathPrefix mounts under /_azemu/ (the latter via routing below)
-    let is_admin_path = crate::routing::collapse_slashes(raw_path).starts_with(crate::routing::ADMIN_PREFIX);
+    let is_admin_path = crate::routing::is_admin_path(raw_path);
     // Every admin path (core's and the services') refuses a request another web site sent, simple GET and form POST included.
     if is_admin_path && browser.cross_site && !shared.access.any_origin() {
         return core(access::cross_site_refusal(browser, access::Target::Admin));
@@ -1251,7 +1308,7 @@ async fn dispatch(
                     return core(json_error::response(
                         StatusCode::NOT_FOUND,
                         "NotFound",
-                        &format!("Unknown azemu admin path '{raw_path}'."),
+                        &format!("Unknown azemu admin path '{raw_path}'. GET /_azemu/ lists the admin endpoints."),
                     ));
                 }
                 return core(json_error::response(StatusCode::NOT_FOUND, "NoServiceMatched", &msg));
@@ -1623,6 +1680,11 @@ async fn admin(path: &str, query: &str, method: &Method, shared: &Shared) -> Opt
             .build()
     };
     match path {
+        "/_azemu/" | "/_azemu" => Some(if allowed(&[Method::GET, Method::HEAD]) {
+            Resp::new(StatusCode::OK).json(&index_json(shared)).build()
+        } else {
+            method_not_allowed("GET, HEAD")
+        }),
         "/_azemu/health" => Some(if allowed(&[Method::GET, Method::HEAD]) {
             let mut body = serde_json::json!({
                 "status": "ok",
@@ -1663,6 +1725,39 @@ async fn admin(path: &str, query: &str, method: &Method, shared: &Shared) -> Opt
         }),
         _ => None,
     }
+}
+
+/// The body of `GET /_azemu/`: the admin endpoints, core's own and the prefix of each mounted service that has any.
+fn index_json(shared: &Shared) -> serde_json::Value {
+    let mut endpoints = vec![
+        serde_json::json!({"path": "/_azemu/", "methods": ["GET", "HEAD"], "description": "This list."}),
+        serde_json::json!({"path": "/_azemu/health", "methods": ["GET", "HEAD"], "description": "Version, commit and the services that are running."}),
+        serde_json::json!({"path": "/_azemu/config", "methods": ["GET", "HEAD"], "description": "Listeners and the settings in force, with where each came from."}),
+        serde_json::json!({"path": "/_azemu/ca.pem", "methods": ["GET", "HEAD"], "description": "The certificate authority that signs the emulator's TLS certificates; trust it in your client."}),
+        serde_json::json!({"path": "/_azemu/reset", "methods": ["POST"], "description": "Empty every service; ?service=<name> one service, ?account=<name> one account, save=true to write the empty state."}),
+        serde_json::json!({"path": "/_azemu/save", "methods": ["POST"], "description": "Write changed state to the data directory now (409 when there is none)."}),
+        serde_json::json!({"path": "/_azemu/unsupported", "methods": ["GET", "HEAD", "DELETE"], "description": "Operations that were asked for and are not built, with counts; DELETE empties the list."}),
+    ];
+    let mut service_prefixes: Vec<(String, &'static str)> = shared
+        .services
+        .iter()
+        .flat_map(|s| {
+            s.mounts().into_iter().filter_map(move |m| match m {
+                Mount::PathPrefix(p) if p.starts_with(crate::routing::ADMIN_PREFIX) => Some((p.to_string(), s.name())),
+                _ => None,
+            })
+        })
+        .collect();
+    service_prefixes.sort();
+    for (prefix, name) in service_prefixes {
+        endpoints.push(serde_json::json!({
+            "path": format!("{prefix}/..."),
+            "service": name,
+            "methods": "varies",
+            "description": format!("Admin endpoints of the {name} service; its documentation page lists them."),
+        }));
+    }
+    serde_json::json!({"endpoints": endpoints})
 }
 
 /// `POST /_azemu/reset`, with `service=<name>` and `account=<name>` (both optional) and `save=true`. Nothing given:
@@ -1706,7 +1801,8 @@ async fn reset_response(shared: &Shared, query: &str) -> Response {
     }
     let mut body = serde_json::json!({});
     if !restricted {
-        shared.reset_all();
+        shared.reset_services();
+        shared.reseed(Scope::default()).await;
     } else {
         let mut done: Vec<&str> = Vec::new();
         let mut not_supported: Vec<&str> = Vec::new();
@@ -1738,6 +1834,7 @@ async fn reset_response(shared: &Shared, query: &str) -> Response {
             tracing::debug!(services = %not_supported.join(","), "reset by account: these services keep no state per account and were left as they are");
         }
         body = serde_json::json!({"reset": done, "notSupported": not_supported});
+        shared.reseed(Scope { services: Some(done.iter().map(|s| s.to_string()).collect()), account: account.clone() }).await;
     }
     if save {
         let saved = save_response(shared).await;
@@ -1779,6 +1876,7 @@ fn config_json(shared: &Shared) -> serde_json::Value {
         "services": shared.services.iter().map(|s| s.name()).collect::<Vec<_>>(),
         "listeners": listeners,
         "dataDirectory": shared.persist.as_ref().map(|p| p.root().display().to_string()),
+        "seedFile": shared.config.seed.as_ref().map(|p| p.display().to_string()),
         "saveIntervalSeconds": shared.persist.as_ref().map(|_| shared.config.save_interval.unwrap_or(Duration::from_secs(DEFAULT_SAVE_INTERVAL_SECS)).as_secs()),
         "allowedHosts": {
             "builtIn": ["IP addresses", "localhost", "*.localhost", "names with no dot", "host.docker.internal", "gateway.docker.internal"],

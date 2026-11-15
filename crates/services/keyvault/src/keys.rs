@@ -157,8 +157,21 @@ fn parse_exportable(body: &Map<String, Value>) -> bool {
 }
 
 fn parse_create(body: &Map<String, Value>) -> Result<Spec, Response> {
-    let kty_text = str_field(body, "kty")?;
-    let (family, kty) = jwk::parse_kty(kty_text).ok_or_else(|| bad_parameter(&format!("The key type '{kty_text}' is not supported.")))?;
+    // no `kty` is two problems to the service, one it does not know is one (tried in November 2026)
+    let kty_text = match body.get("kty") {
+        Some(Value::String(k)) => k.as_str(),
+        _ => return Err(bad_parameter(&format!("{0}{0}", invalid_property_text("")))),
+    };
+    let (family, kty) = jwk::parse_kty(kty_text).ok_or_else(|| invalid_property(""))?;
+    if family == Family::Oct && kty == "oct" {
+        // symmetric keys are only made in a hardware vault (`oct-HSM`)
+        return Err(azemu_core::json_error::response_with_inner(
+            400,
+            "BadParameter",
+            "Software oct key type is not supported. Use oct-HSM.",
+            "KeyTypeNotSupported",
+        ));
+    }
     let size = match body.get("key_size") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| bad_parameter("'key_size' must be a number."))?),
@@ -180,7 +193,7 @@ fn parse_create(body: &Map<String, Value>) -> Result<Spec, Response> {
             spec.bits = size.unwrap_or(2048);
             if !matches!(spec.bits, 2048 | 3072 | 4096) {
                 return Err(bad_parameter(&format!(
-                    "The RSA key size {} is not supported. Supported sizes are 2048, 3072 and 4096.",
+                    "Unsupported key size: {}. Valid values for created keys are 2048, 3072, 4096.",
                     spec.bits
                 )));
             }
@@ -194,7 +207,11 @@ fn parse_create(body: &Map<String, Value>) -> Result<Spec, Response> {
         }
         Family::Ec => {
             if let Some(c) = body.get("crv").and_then(|c| c.as_str()) {
-                spec.curve = Curve::parse(c).ok_or_else(|| bad_parameter(&format!("The curve '{c}' is not supported.")))?;
+                spec.curve = Curve::parse(c).ok_or_else(|| {
+                    bad_parameter(&format!(
+                        "Unsupported curve: \"{c}\". Supported curves are \"P-256\", \"P-384\", \"P-521\", \"P-256K\", \"SECP256K1\"."
+                    ))
+                })?;
             }
         }
         Family::Oct => {
@@ -502,6 +519,8 @@ impl KeyVaultService {
         if vault.keys.is_deleted(name) {
             vault.keys.items.remove(&norm(name));
             no_content()
+        } else if vault.keys.active(name).is_some() {
+            not_deleted_for_purge(Kind::Key)
         } else {
             deleted_not_found(Kind::Key, name)
         }
@@ -515,7 +534,7 @@ impl KeyVaultService {
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now_secs(req));
         let Some(item) = vault.keys.items.get_mut(&norm(name)).filter(|i| i.deleted.is_some()) else {
-            return deleted_not_found(Kind::Key, name);
+            return if vault.keys.active(name).is_some() { exists_already(Kind::Key, name) } else { deleted_not_found(Kind::Key, name) };
         };
         item.deleted = None;
         match item.latest() {
@@ -631,12 +650,12 @@ impl KeyVaultService {
     }
 
     pub async fn restore_key(&self, req: &Request) -> Response {
-        let body = match body_object(req) {
+        let body = match required_body_object(req) {
             Ok(b) => b,
             Err(r) => return r,
         };
-        let text = match str_field(&body, "value") {
-            Ok(t) => t.to_string(),
+        let text = match backup::value_of(&body) {
+            Ok(t) => t,
             Err(r) => return r,
         };
         let payload = match backup::decode(Kind::Key, &text) {
@@ -647,14 +666,14 @@ impl KeyVaultService {
         let parsed = tokio::task::spawn_blocking(move || parse_backup(&payload)).await;
         let (name, versions, policy) = match parsed {
             Ok(Some(p)) => p,
-            _ => return bad_parameter("The backup blob is not valid."),
+            _ => return backup::corrupt(),
         };
         let c = Ctx::of(req);
         let now = now_secs(req);
         let mut st = self.state.lock();
         let vault = st.vault(&req.account, now);
         let Some(last) = versions.last() else {
-            return bad_parameter("The backup blob is not valid.");
+            return backup::corrupt();
         };
         if vault.keys.exists(&name) {
             return restore_conflict(Kind::Key, &format!("{}/keys/{name}/{}", c.base, last.version));

@@ -177,7 +177,7 @@ def test_account_sas_ip_range_excluding_client_is_rejected(container, acct_sas):
     c = ContainerClient.from_container_url(container.url, credential=sas)
     with pytest.raises(HttpResponseError) as ei:
         list(c.list_blobs())
-    assert_error(ei, "AuthorizationSourceIPMismatch", 403)
+    assert_error(ei, "AuthorizationFailure", 403)
 
 
 def test_account_sas_ip_range_including_client_is_accepted(container, acct_sas):
@@ -410,7 +410,7 @@ def test_sas_works_for_plain_http_clients(container, blob_sas):
 
 
 @pytest.mark.not_on_azurite(reason="Azurite does not check the signature of a version it does not know")
-@pytest.mark.parametrize("sv", ["2026-12-06", "2031-01-01"])
+@pytest.mark.parametrize("sv", ["2026-12-06", "2027-06-06"])
 def test_blob_sas_with_a_newer_service_version_is_checked(container, account_name, account_key, sv):
     import base64
     import hashlib

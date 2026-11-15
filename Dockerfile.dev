@@ -20,7 +20,10 @@
 # signs it from `http://azemu:4577/_azemu/ca.pem`.
 FROM debian:stable-slim
 
-RUN useradd --create-home --uid 10001 azemu
+# The certificate directory and /data exist, private (mode 0700, owned by azemu, as the release image has them), before the
+# first start: a Docker volume mounted on either then takes that mode and owner, and azemu has no "mode 755" warning to give.
+RUN useradd --create-home --uid 10001 azemu \
+ && install -d -m 0700 -o azemu -g azemu /home/azemu/.azemu /data
 COPY --chmod=0755 azemu /usr/local/bin/azemu
 
 USER azemu

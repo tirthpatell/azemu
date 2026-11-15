@@ -9,8 +9,8 @@ All of them are read the same way (`azemu_core::settings`):
   number with `ms`, `s`, `m`, `h` or `d`.
 - A command-line option wins over the variable. `--lenient` and `--allow-webhook-host` are read before the services are
   built, because services read their settings when they start.
-- `AZEMU_LENIENT=1` (or `--lenient`) turns on every convenience Azure does not have: queues, topics, event hubs and
-  consumer groups that a client names but nobody created come into being on first use, Event Grid topics too, and new
+- `AZEMU_LENIENT=1` (or `--lenient`) turns on every convenience Azure does not have: queues, topics and event hubs
+  that a client names but nobody created come into being on first use, Event Grid topics too, and new
   storage accounts keep blob versions. Each convenience also has a variable of its own, which wins over
   `AZEMU_LENIENT` for that one convenience.
 - `GET /_azemu/config` shows the settings in force (name, value, and whether it came from the default, the
@@ -68,17 +68,19 @@ reads the setting, in the constructor of its service (so that `azemu __settings-
 | `AZEMU_EVENTGRID_MAX_PENDING_TOTAL_MB` | 128 | Most megabytes of deliveries waiting for a retry in all subscriptions together. |
 | `AZEMU_EVENTGRID_RETRY_BASE_MS` | 500 | Milliseconds before the first retry of a failed webhook delivery; later retries wait twice as long each time. |
 | `AZEMU_EVENTGRID_RETRY_MAX_MS` | 10000 | Longest wait in milliseconds between two retries of a webhook delivery. |
-| `AZEMU_EVENTHUBS_AUTOCREATE` | off (on with `AZEMU_LENIENT`) | An event hub or consumer group that is sent to or read from but was never created comes into being (over AMQP and over the Kafka endpoint), instead of the not-found answer Azure gives. |
+| `AZEMU_EVENTHUBS_AUTOCREATE` | off (on with `AZEMU_LENIENT`) | An event hub that an AMQP client sends to or reads from but was never created comes into being, instead of the not-found answer Azure gives. (The Kafka endpoint makes the event hub for a producer or an admin client either way, as Azure does.) |
 | `AZEMU_EVENTHUBS_CONFIG` | none | Path of a JSON file with event hubs and consumer groups to create at start and after every reset. |
 | `AZEMU_KAFKA_ADVERTISED_HOST` | none (the host the client connected to) | Broker host name the Kafka endpoint puts in Metadata and FindCoordinator answers, for plain connections that do not name one. |
 | `AZEMU_KAFKA_ADVERTISED_PORT` | none (the port the emulator listens on) | Broker port the Kafka endpoint advertises when clients reach the emulator through another port. |
 | `AZEMU_KAFKA_INITIAL_REBALANCE_DELAY_MS` | 500 | Milliseconds the first round of a new Kafka consumer group waits for more members to join (at most 30000). |
 | `AZEMU_LENIENT` | off | Turn on every convenience Azure does not have: things a client names but nobody created (queues, topics, event hubs, consumer groups, Event Grid topics) come into being on first use, and new storage accounts keep blob versions. Option: `--lenient`. A convenience's own variable overrides this for that convenience. |
-| `AZEMU_LOOSE_AUTH` | off | Skip the signature checks of storage requests (Shared Key and SAS) for the one account whose key is known, `devstoreaccount1`. |
+| `AZEMU_LOOSE_AUTH` | off | Check no signature of a storage request (Blob, Queue, Table, Data Lake): a Shared Key or SAS signature that is malformed (`replay`, `Sanitized`) or wrong passes, so does an old `x-ms-date`. Without it azemu refuses a malformed signature for every account and a wrong one for `devstoreaccount1`, as Azure does. It is for replaying recorded traffic. A warning at start says it is on. |
 | `AZEMU_SAVE_INTERVAL` | 15 (seconds) | Seconds between saves of changed state when a data directory is set; 0 saves only on `POST /_azemu/save` and at shutdown. Option: `--save-interval`. |
 | `AZEMU_SCRIPT_WORKER` | the emulator's own program | Cosmos: the program that runs a script worker (it must handle the worker's hidden first argument); only embedders and tests need it. |
+| `AZEMU_SEED` | none | A JSON file of things to create at start and again after every reset: blob containers, queues, tables, Cosmos databases and containers, Key Vault secrets, App Configuration key-values (`docs/seed.md`). Option: `--seed`. |
 | `AZEMU_SERVICEBUS_AUTOCREATE` | off (on with `AZEMU_LENIENT`) | A queue, topic or subscription that is sent to or read from but was never created comes into being, instead of the not-found answer Azure gives. |
 | `AZEMU_SERVICEBUS_CONFIG` | none | Path of a JSON file with queues, topics, subscriptions and rules to create at start and after every reset. |
+| `AZEMU_SERVICEBUS_TIER` | any | `standard` makes the administration API refuse what only a Standard namespace refuses: a `MaxMessageSizeInKilobytes` other than 256 and a `MaxSizeInMegabytes` over 5120. By default the values of every tier (Premium takes larger ones) are accepted. |
 | `AZEMU_SERVICEBUS_TXN_CONNECTION_MAX_MB` | 256 | Most megabytes of messages the open transactions of one connection may hold. |
 | `AZEMU_SERVICEBUS_TXN_MAX_MB` | 128 | Most megabytes of messages one open AMQP transaction may hold. |
 | `AZEMU_SERVICEBUS_TXN_TIMEOUT_SECONDS` | 120 (seconds) | How long an AMQP transaction may stay open before it is rolled back (seconds, or a number with ms, s, m). |

@@ -48,6 +48,11 @@ fn my_blob_code() {
 4. Sets the environment the Azure SDKs for Rust need (`Emulator::apply_environment`): `SSL_CERT_FILE` (the bundle),
    `IDENTITY_ENDPOINT` and `IDENTITY_HEADER`, `COSMOS_DISABLE_IMDS`, `AZURE_COSMOS_BINARY_ENCODING_ENABLED`.
 
+**macOS.** The Azure crates do not read `SSL_CERT_FILE` there: their TLS asks the Keychain. The bundle does nothing, and
+because each test program gets a new authority, trusting one in the Keychain does not last. Run one emulator that stays,
+trust its authority once and set `AZEMU_GATEWAY`: the steps are in
+[`docs/rust.md`](../../docs/rust.md#macos) (the System keychain way was run on a macOS 26 runner).
+
 ## Addresses
 
 | Call | Gives |
@@ -90,6 +95,9 @@ AZEMU_GATEWAY=http://127.0.0.1:4577 cargo test
 * `emu.reset_account("acct")` empties one account in every service; `emu.reset_all()` empties everything.
 * `emu.create_event_hub("ns", "hub", 2)` and `emu.create_service_bus_queue("ns", "queue")` make what Azure's management API
   makes (the Rust SDK has no client for it).
+* `emu.create_blob_container("acct", "box")`, `emu.create_cosmos_database("acct", "app")` and `emu.create_cosmos_container("acct", "app", "items", "/tenantId")` make what Azure's infrastructure
+  code usually makes before an application runs (a container that exists is left as it is; a refusal panics with the emulator's answer). For many things at once, a seed file does it at start and after
+  every reset: `AZEMU_TESTKIT_ARGS="--seed tests/seed.json"` (not tried; format in `docs/seed.md`).
 * `emu.request("GET", "/_azemu/config", "")` calls the emulator's own API, and `emu.call(Service::Blob, "acct", "GET", "/", &[], "")`
   a service, with no SDK (no credential is added).
 * `unique_name("prefix")` makes a lowercase name of at most 24 characters that is valid for a storage account, a vault, a

@@ -15,6 +15,9 @@ used), managed storage accounts, Managed HSM administration (RBAC, backup/restor
 the key material is software. No RBAC, access policies, firewall or private endpoints. Certificate issuance finishes at once (Azure takes seconds); auto-renew
 and key rotation policies are stored, not run.
 
+**Secrets from a file.** A seed file (`--seed`, [`docs/seed.md`](../seed.md)) sets the secrets you list (`{"myvault": {"secrets": {"db-password": "value"}}}`) at start and after
+every reset. A secret that already exists (from `--data-dir`, say) is not set again, so it gets no new version. Keys and certificates are not part of the seed file.
+
 | | |
 |---|---|
 | Service name | `keyvault` |
@@ -22,7 +25,7 @@ and key rotation policies are stored, not run.
 | Default vault on a pinned port | `default` (only when the host has no `{vault}.vault` label) |
 | Vaults | any name works without being created first; every vault is separate |
 | State | in memory, and on disk too with `--data-dir`; `POST /_azemu/reset` drops everything, `POST /_azemu/reset?account=<vault>` one vault (secrets, keys, certificates, their deleted copies) |
-| `api-version` | required; every `7.x`, `7.x-preview.y`, date style (`2016-10-01`, `2025-07-01`, `2026-04-01`, `2026-01-01-preview`) is accepted |
+| `api-version` | required, and checked against the list Azure took in November 2026: `7.0` to `7.6` (each also as `-preview` and `-preview.<n>`), `2015-06-01`, `2016-10-01`, `2025-07-01`, `2026-01-01-preview`, `2026-03-01-preview`, `2026-04-01`. Anything else (`1.0`, `7.7`, `2026-01-01`) is `400 BadParameter` "The specified version (…) is not recognized. Consider using the latest supported version (7.6)."; none at all is "api-version must be specified" |
 
 ## Pointing the Azure SDKs at it
 
@@ -117,7 +120,7 @@ text too. The emulator answers as the service does now.)
 
 | Operation | Route | Status |
 |---|---|---|
-| Create | `POST /keys/{name}/create` | RSA 2048/3072/4096, EC P-256/P-384/P-521/P-256K, `oct`/`oct-HSM` (material only, see below) |
+| Create | `POST /keys/{name}/create` | RSA 2048/3072/4096, EC P-256/P-384/P-521/P-256K, `oct-HSM` (material only, see below; software `oct` is `400`, as on Azure) |
 | Import | `PUT /keys/{name}` | RSA, EC, oct from a JWK; public parts only in the answer |
 | Get / update | `GET`, `PATCH /keys/{name}[/{version}]` | built (`key_ops`, tags, `enabled`, `nbf`, `exp`, release policy field) |
 | Delete / deleted list / get / recover / purge | `/keys`, `/deletedkeys` | built |
@@ -191,9 +194,29 @@ that is not built answers `501 {"error":{"code":"NotImplemented","message":"keyv
 - A disabled secret answers `403 Forbidden` / `SecretDisabled` on get (also on get of the deleted secret, as
   recorded). Keys: `enabled`, `nbf`, `exp` and `key_ops` are enforced for every crypto operation
   (`403 Forbidden`, inner `KeyDisabled` / `KeyOperationForbidden`). Algorithm for the wrong key type or curve,
-  digest of the wrong length, ciphertext that does not decrypt: `400 BadParameter`.
-- Lists return at most 25 items per page (`maxresults` lowers it) sorted by name (versions by version id),
-  with a `nextLink` built from the URL the client used.
+  digest of the wrong length, ciphertext that does not decrypt: `400 BadParameter` with the texts Azure sent when they were tried
+  (November 2026): "Invalid algorithm: FOO", "Bad Length.", "Error occurred while decoding OAEP padding." (a ciphertext of the wrong
+  size too), "Invalid length of 'value': 10 bytes. RS256 requires 32 bytes, encoded with base64url." for sign, "Bad Hash." for verify, and
+  "Key and signing algorithm are incompatible. Key <kid> is of type 'RSA', and algorithm 'ES256' can only be used with a key of type
+  'EC' or 'EC-HSM'." (also for an EC key and `RS256`, and "uses curve 'P-256', and algorithm 'ES384' can only be used with curve
+  'P-384'"). A body with missing properties lists them, as Azure does ("Property  has invalid value\r\n" for `alg`, "Property 'value' is
+  required.\r\n"). `nbf` in the future: "Operation encrypt is not allowed because the 'not before' constraint on this key is not met."; `exp` past:
+  "Operation encrypt is not allowed on an expired key."
+- Lists return at most 25 items per page sorted by name (versions by version id), with a `nextLink` built from the URL the client used.
+  `maxresults` is 1 to 25 on every list; anything else (`0`, `26`, text) is `400 BadParameter` "invalid maxresults". A `$skiptoken` is
+  base64url of a JSON object (`{"NextMarker":"…","TargetLocation":0}`, as Azure's are); text that is not that is `400` "Invalid skip token".
+  A JSON token the emulator did not write starts at the first page. The word `Sanitized` (what the recordings that `tools/replay` plays back
+  hold in place of every token) is taken the same way.
+- A secret is at most 25600 characters: more is `400 BadParameter` "Secret is beyond the maximum permitted length of 25600 characters." (inner
+  `SecretTooLarge`). A number as the value is stored as its text. A body without a usable value, or that is not JSON, is `400` "Property  has
+  invalid value\r\n" (two spaces: the name is empty); an empty body is "Request body not specified".
+- A purge of an object that is not deleted is `400 MethodNotAllowed` "Secret must be deleted prior to being purged." and a recover of one
+  that is not deleted is `400 MethodNotAllowed` "Secret exists already: <name>" (Key, Certificate alike).
+- A restore of a `value` that is not a backup of the right kind is `400` with the code `Malformed backup blob` and the message "Backup blob
+  is corrupt."; an empty or missing `value` is "Property  has invalid value\r\n".
+- Key creation refuses what Azure refuses: RSA sizes other than 2048, 3072, 4096 ("Unsupported key size: 1024. Valid values for created
+  keys are 2048, 3072, 4096."), an unknown curve, software `oct` ("Software oct key type is not supported. Use oct-HSM.", inner
+  `KeyTypeNotSupported`).
 - Key and certificate generation runs on a blocking thread, never under the state lock. In the debug build
   (the big-number crates are compiled with `opt-level = 3` in the root `Cargo.toml`) an RSA 2048 key takes
   well under a second and RSA 4096 under a second to a few seconds.
@@ -205,6 +228,11 @@ that is not built answers `501 {"error":{"code":"NotImplemented","message":"keyv
 
 The replay's value comparison (`tools/replay`) found some wording that changed in the service over time: the 401 text, the RSA-HSM exponent, `hsmPlatform`; the emulator uses the newest recorded form.
 - `GET /deletedsecrets|deletedkeys|deletedcertificates/{name}` for a name that is nowhere (never made or purged) answers the long `A secret with (name/id) ... was not found in this key vault` text (recorded for a purged name; inferred for a name never made); for a live name `Deleted Secret not found: X`. Azure also answers the short text while it is still finishing a purge, which the emulator never does (it purges at once).
+- Checked against Azure in November 2026 (a vault with role-based access, soft delete with 7 days, the Standard tier): the points above and the
+  pending certificate below. What the emulator keeps different on purpose: the 90 day retention and `Recoverable+Purgeable` (that vault
+  said `CustomizedRecoverable+Purgeable` and 7, which is the vault's setting); `oct-HSM` and the other `-HSM` kinds are made here, a Standard
+  vault answers `403 Forbidden` "Hardware key operation not allowed on standard vault" (a Premium vault would take them); a bearer
+  token that is not a token (`Bearer garbage`) is `401 [MalformedToken]` on Azure and passes here, because there is no tenant to ask.
 - Certificate creation (issuer `Self`) takes seconds on Azure (`inProgress`, then `completed`; `cancelled` after a cancel); the emulator reports `completed` on the first poll. The preview `platformManaged` policy of API `2026-03-01-preview` is not built.
 
 - **Java SDK defaults (not in any recording).** `public_exponent: 0` on a key create means "not given" (65537): the Java
@@ -212,18 +240,15 @@ The replay's value comparison (`tools/replay`) found some wording that changed i
   (the Java `importKey` sends `[]` for a key with no operations, and decrypt then answered 403). The recordings of the Python
   SDK always send explicit operations, so what Azure does with `[]` is inferred from the Java SDK's own use; update keeps an
   explicit list as sent. Tests: `tests/sdk-python/keyvault/test_kv_keys_java_sdk_requests.py`.
-- **Timing.** Real Key Vault finishes soft delete, recover and purge asynchronously: `GET /deletedsecrets/{n}`
-  answers 404 for a moment after a delete, and a purged name answers `409 ObjectIsBeingDeleted` for a while.
-  The emulator finishes at once. A certificate create answers `202` with `status: inProgress` (the SDK pollers
+- **Timing (tried in November 2026, not copied).** Real Key Vault finishes soft delete, recover and purge in the background:
+  `GET /deletedsecrets/{n}` answers 404 for 1.4 to 2.6 seconds after a delete, a purge or a create of the name in that time is
+  `409 Conflict` (inner `ObjectIsBeingDeleted`), and after a purge the name is `409` for about 2.5 seconds. The emulator finishes at once: a
+  window like that would break every "delete, then create" in a test that does not retry, and the recorded replay needs the immediate
+  answer. The SDKs' `begin_delete_*` pollers handle the 409; a raw client has to retry it on Azure. A certificate create answers `202` with `status: inProgress` (the SDK pollers
   need that) and the first `GET .../pending` already says `completed`.
-- **Missing `api-version`** answers `400 BadParameter` with the text "The api-version query parameter
-  (?api-version=) is required for all requests." There is no recording of that answer; the wording is not
-  verified. The same goes for the messages of the crypto errors, the oversized secret value (25 KiB limit)
-  and the garbage-backup error, which are not in the recordings.
 - Authorization is not checked beyond the scheme: `Authorization: Bearer <anything>` passes, anything else is
   challenged. There are no RBAC, access policies, firewall or private endpoints.
 - Backup blobs are not encrypted and cannot be restored by Azure (nor Azure's by the emulator).
-- A `$skiptoken` the emulator did not issue is ignored (first page again) instead of failing.
 - `-HSM` key types (`RSA-HSM`, `EC-HSM`, `oct-HSM`) are accepted and echoed in `kty` (with `hsmPlatform` "2"),
   but the key material is software. Symmetric keys can be created, imported, listed and backed up, not used.
 - Certificates: issuer names other than `Unknown` behave like `Self` (the issuer's provider is never
@@ -231,11 +256,13 @@ The replay's value comparison (`tools/replay`) found some wording that changed i
   `GET /certificates/{name}` answers 200 with a bundle that has no `cer`, `kid`, `sid` or `x5t` (it has `id`
   with a made-up version, `attributes`, `policy` and `pending`), and so does `GET /certificates/{name}/{that version}`
   (without `policy` and `pending`); any other version is 404. The JavaScript SDK reads this before the operation.
-  `attributes.enabled` is true until the request is cancelled (the only recording of such a bundle is of a cancelled
-  request, `enabled: false`; none exists of one in progress, so that is a guess). Such a certificate is listed with
-  `includePending=true` (not in the plain list), its versions list has the one made-up version, and it can be deleted,
-  recovered and purged. A cancelled request makes that bundle `enabled: false`; the real service
-  also does this for a self-signed request, which azemu finishes at once and so cannot cancel. Auto-renew and the
+  Checked against Azure in November 2026: the bundle is `enabled: false` from the start, with the `nbf` and `exp` of the
+  certificate to come; the versions list is empty; it is listed with `includePending=true` (not in the plain list); a second
+  create (or import) while the request is in progress is `409 Conflict` "A new key vault certificate can not be created or imported
+  while a pending key vault certificate's status is inProgress."; a cancel (`PATCH .../pending`) leaves `status` `inProgress` and sets
+  `cancellation_requested` (`false` takes it back); `DELETE .../pending` answers with the request and leaves the certificate, as a
+  bundle without `pending`, which can be deleted, recovered and purged, and made again. A self-signed request takes about two
+  seconds on Azure; azemu finishes it at once, so it cannot be cancelled. Auto-renew and the
   rotation of lifetime actions are stored, not executed (also for key rotation policies). `validity_months` of an
   imported certificate is its validity in months of 30.5 days (a twelfth of 365 days before 7.5), as recorded for
   one certificate; other values are extrapolated. The order of several alternative names inside one certificate,

@@ -102,6 +102,14 @@ impl Default for ServerConfig {
     }
 }
 
+/// What a service may set for one connection in place of the [`ServerConfig`]: the largest frame we accept and the idle timeout
+/// we advertise (and enforce).
+#[derive(Debug, Clone, Copy)]
+pub struct OpenSettings {
+    pub max_frame_size: u32,
+    pub idle_timeout: Option<Duration>,
+}
+
 /// Creates one handler per accepted connection.
 pub trait HandlerFactory: Send + Sync + 'static {
     fn new_connection(&self, info: &ConnectionInfo, conn: ConnHandle) -> Box<dyn ConnectionHandler>;
@@ -195,6 +203,12 @@ pub trait ConnectionHandler: Send + 'static {
     /// The peer's `open` arrived. Return an error to close the connection with it.
     fn on_open(&mut self, _open: &Open) -> Result<(), Error> {
         Ok(())
+    }
+
+    /// Settings of this connection's `open` that are not the server's (asked after [`on_open`](Self::on_open), before our `open`
+    /// is sent). `None` keeps those of the [`ServerConfig`].
+    fn open_settings(&self) -> Option<OpenSettings> {
+        None
     }
 
     /// The peer wants to attach a link.

@@ -159,12 +159,17 @@ func TestItem_IdsWithSpacesPercentPlusUnicodeAndAtSignRoundTrip(t *testing.T) {
 	}
 }
 
-// Azure's service refuses only '/' and backslash in an item id; '?' and '#' are accepted (item_ids_test.go).
-func TestItem_IdWithForbiddenCharacterIsBadRequest400(t *testing.T) {
+// What a real account answered in November 2026: an item id with '/' or a backslash is created (201), and a request by id cannot
+// reach it (401: the gateway reads another path than the one that was signed; item_ids_test.go).
+func TestItem_IdWithSlashOrBackslashIsCreatedButCannotBeReadById(t *testing.T) {
 	ct := newContainer(t, newClient(t))
+	pk := azcosmos.NewPartitionKeyString("p")
 	for _, id := range []string{"a/b", `a\b`} {
-		_, err := ct.CreateItem(context.Background(), azcosmos.NewPartitionKeyString("p"), doc(map[string]any{"id": id, "pk": "p"}), nil)
-		status(t, err, http.StatusBadRequest)
+		if _, err := ct.CreateItem(context.Background(), pk, doc(map[string]any{"id": id, "pk": "p"}), nil); err != nil {
+			t.Fatalf("create %q: %v", id, err)
+		}
+		_, err := ct.ReadItem(context.Background(), pk, id, nil)
+		status(t, err, http.StatusUnauthorized)
 	}
 }
 

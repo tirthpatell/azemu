@@ -113,7 +113,7 @@ async fn reading_does_not_remove_events_and_readers_have_their_own_position() {
 }
 
 #[tokio::test]
-async fn consumer_groups_are_independent_and_created_on_first_attach() {
+async fn consumer_groups_are_independent_and_a_new_name_is_accepted_but_not_listed() {
     let env = env().await;
     five(&env).await;
     let mut c = env.client().await;
@@ -121,11 +121,9 @@ async fn consumer_groups_are_independent_and_created_on_first_attach() {
     let r2 = consume(&mut c, "h", "CG-TWO", 0, &from_start()).await.unwrap();
     assert_eq!(take(&mut c, r1, 5).await.len(), 5);
     assert_eq!(take(&mut c, r2, 5).await.len(), 5);
+    // Azure does not add the group to the hub's list (a real namespace, November 2026)
     let groups = env.shared.state.lock().hub("myns", "h").unwrap().consumer_groups.values().cloned().collect::<Vec<_>>();
-    assert!(
-        groups.contains(&"$Default".to_string()) && groups.contains(&"cg-one".to_string()) && groups.contains(&"CG-TWO".to_string()),
-        "{groups:?}"
-    );
+    assert_eq!(groups, vec!["$Default".to_string()]);
 }
 
 #[tokio::test]
@@ -178,11 +176,32 @@ async fn bad_selector_and_bad_position_are_refused() {
     five(&env).await;
     let mut c = env.client().await;
     for f in ["amqp.annotation.x-opt-offset > 'abc'", "amqp.annotation.x-opt-foo > '1'", "garbage"] {
-        let e = consume(&mut c, "h", "$Default", 0, &with_filter(f)).await.unwrap_err();
-        assert_eq!(condition(e), "com.microsoft:argument-error", "{f}");
+        let e = consume(&mut c, "h", "$Default", 0, &with_filter(f)).await.unwrap_err().unwrap();
+        // Azure (November 2026): amqp:not-allowed and this text, for an offset that is not a number
+        assert_eq!(e.condition, "amqp:not-allowed", "{f}");
+        assert_eq!(e.description.unwrap(), format!("The filter '{f}' is not a valid amqp filter for EventHub entities"));
     }
-    let e = consume(&mut c, "h", "$Default", 0, &with_filter("amqp.annotation.x-opt-sequence-number > '50'")).await.unwrap_err();
-    assert_eq!(condition(e), "com.microsoft:argument-out-of-range");
+    // five events: sequence numbers 0..4, so 4 is the last. A number past the last one is refused, inclusive or not.
+    for f in [
+        "amqp.annotation.x-opt-sequence-number > '5'",
+        "amqp.annotation.x-opt-sequence-number >= '5'",
+        "amqp.annotation.x-opt-sequence-number > '50'",
+    ] {
+        let e = consume(&mut c, "h", "$Default", 0, &with_filter(f)).await.unwrap_err().unwrap();
+        assert_eq!(e.condition, "com.microsoft:argument-error", "{f}");
+        let d = e.description.unwrap();
+        assert!(
+            d.starts_with("The supplied sequence number '") && d.contains("The last sequence number in the system is '4' TrackingId:"),
+            "{d}"
+        );
+        assert!(d.contains("SystemTracker:myns:eventhub:h~0, Timestamp:"), "{d}");
+    }
+    let e = consume(&mut c, "h", "$Default", 0, &with_filter("amqp.annotation.x-opt-offset > '99999999'")).await.unwrap_err().unwrap();
+    assert_eq!(e.condition, "com.microsoft:argument-error");
+    assert!(e.description.unwrap().contains("The last offset in the system is '"));
+    // the last one itself waits for the next event, inclusive or not
+    consume(&mut c, "h", "$Default", 0, &with_filter("amqp.annotation.x-opt-sequence-number > '4'")).await.unwrap();
+    consume(&mut c, "h", "$Default", 0, &with_filter("amqp.annotation.x-opt-sequence-number >= '4'")).await.unwrap();
     let e = consume(&mut c, "h", "$Default", 9, &from_start()).await.unwrap_err();
     assert_eq!(condition(e), "com.microsoft:argument-out-of-range");
 }
@@ -208,7 +227,7 @@ async fn epoch_receivers_steal_from_lower_ones_and_refuse_lower_ones() {
     // a lower epoch cannot attach
     let e = consume(&mut b, "h", "$Default", 0, &Consumer { epoch: Some(4), ..from_start() }).await.unwrap_err();
     assert_eq!(condition(e.clone()), "amqp:link:stolen");
-    assert!(e.unwrap().description.unwrap().contains("higher epoch of '5'"));
+    assert!(e.unwrap().description.unwrap().contains("higher epoch '5' already exists"));
     // neither can a receiver without an epoch
     let e = consume(&mut b, "h", "$Default", 0, &from_start()).await.unwrap_err();
     assert_eq!(condition(e), "amqp:link:stolen");

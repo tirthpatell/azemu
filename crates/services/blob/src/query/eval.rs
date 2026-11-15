@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use super::budget::Budget;
 use super::datetime::{self, Part, Ts};
 use super::sql::{AggFn, BinOp, Expr, FuncId, Step, TrimMode};
-use super::value::{as_f64, cast, compare, parse_bool, to_number, CastType, EvalError, EvalResult, Value};
+use super::value::{as_f64, cast, compare, invalid_conversion, parse_bool, to_number, CastType, EvalError, EvalResult, Value};
 
 /// One input record.
 pub enum Row {
@@ -120,8 +120,8 @@ fn truth(v: &Value) -> EvalResult<Option<bool>> {
     match v {
         Value::Bool(b) => Ok(Some(*b)),
         Value::Null | Value::Missing => Ok(None),
-        Value::Str(s) => parse_bool(s).map(Some).ok_or_else(|| EvalError::new("CastFailed", format!("'{s}' is not a boolean."))),
-        other => Err(EvalError::new("CastFailed", format!("A {} is not a boolean.", other.type_name()))),
+        Value::Str(s) => parse_bool(s).map(Some).ok_or_else(invalid_conversion),
+        _ => Err(invalid_conversion()),
     }
 }
 
@@ -140,51 +140,45 @@ fn text(v: &Value) -> String {
 fn ts_arg(v: &Value) -> EvalResult<Ts> {
     match cast(v, CastType::Timestamp)? {
         Value::Ts(t) => Ok(t),
-        _ => Err(EvalError::new("CastFailed", "A timestamp is needed.")),
+        _ => Err(invalid_conversion()),
     }
 }
 
 fn int_arg(v: &Value) -> EvalResult<i64> {
     match cast(&to_number(v)?, CastType::Int)? {
         Value::Int(i) => Ok(i),
-        _ => Err(EvalError::new("CastFailed", "A whole number is needed.")),
+        _ => Err(invalid_conversion()),
     }
 }
 
-fn overflow() -> EvalError {
-    EvalError::new("ArithmeticOverflow", "The result does not fit in a 64-bit integer.")
+/// Azure ends the query for arithmetic that cannot be done (fatal `ClientError`, texts checked in November 2026).
+fn overflow(what: &str, x: i64, y: i64) -> EvalError {
+    EvalError::fatal("ClientError", format!("Integer {what} overflow/underflow for ints {x}, {y}"))
 }
 
 fn arith(op: BinOp, a: &Value, b: &Value) -> EvalResult<Value> {
     if a.is_nullish() || b.is_nullish() {
         return Ok(Value::Null);
     }
-    if op == BinOp::Concat {
-        let (x, y) = (text(a), text(b));
-        if x.len() + y.len() > MAX_STRING {
-            return Err(EvalError::new("ValueTooLarge", format!("A string built by || is longer than {MAX_STRING} bytes.")));
-        }
-        return Ok(Value::Str(x + &y));
-    }
     // a number of days added to or taken from a timestamp
     if let (Value::Ts(t), true) = (a, matches!(op, BinOp::Add | BinOp::Sub)) {
         let n = int_arg(b)?;
-        let n = if op == BinOp::Sub { n.checked_neg().ok_or_else(overflow)? } else { n };
-        return datetime::add(Part::Day, n, t)
-            .map(Value::Ts)
-            .ok_or_else(|| EvalError::new("ArithmeticOverflow", "The date is out of range."));
+        let n = if op == BinOp::Sub { n.checked_neg().ok_or_else(|| overflow("subtraction", 0, n))? } else { n };
+        return datetime::add(Part::Day, n, t).map(Value::Ts).ok_or_else(|| EvalError::fatal("ClientError", "The date is out of range."));
     }
     let (x, y) = (to_number(a)?, to_number(b)?);
+    if x.is_nullish() || y.is_nullish() {
+        return Ok(Value::Null);
+    }
     if let (Value::Int(x), Value::Int(y)) = (&x, &y) {
         let (x, y) = (*x, *y);
         return match op {
-            BinOp::Add => x.checked_add(y).map(Value::Int).ok_or_else(overflow),
-            BinOp::Sub => x.checked_sub(y).map(Value::Int).ok_or_else(overflow),
-            BinOp::Mul => x.checked_mul(y).map(Value::Int).ok_or_else(overflow),
-            BinOp::Div if y == 0 => Err(EvalError::new("DivisionByZero", "Division by zero.")),
-            BinOp::Div => x.checked_div(y).map(Value::Int).ok_or_else(overflow),
-            BinOp::Mod if y == 0 => Err(EvalError::new("DivisionByZero", "Division by zero.")),
-            BinOp::Mod => x.checked_rem(y).map(Value::Int).ok_or_else(overflow),
+            BinOp::Add => x.checked_add(y).map(Value::Int).ok_or_else(|| overflow("addition", x, y)),
+            BinOp::Sub => x.checked_sub(y).map(Value::Int).ok_or_else(|| overflow("subtraction", x, y)),
+            BinOp::Mul => x.checked_mul(y).map(Value::Int).ok_or_else(|| overflow("multiplication", x, y)),
+            BinOp::Div | BinOp::Mod if y == 0 => Err(EvalError::fatal("ClientError", format!("Divided {x} by zero."))),
+            BinOp::Div => x.checked_div(y).map(Value::Int).ok_or_else(|| overflow("division", x, y)),
+            BinOp::Mod => x.checked_rem(y).map(Value::Int).ok_or_else(|| overflow("division", x, y)),
             _ => Err(EvalError::new("InvalidOperation", "Not an arithmetic operator.")),
         };
     }
@@ -193,9 +187,8 @@ fn arith(op: BinOp, a: &Value, b: &Value) -> EvalResult<Value> {
         BinOp::Add => x + y,
         BinOp::Sub => x - y,
         BinOp::Mul => x * y,
-        BinOp::Div if y == 0.0 => return Err(EvalError::new("DivisionByZero", "Division by zero.")),
+        BinOp::Div | BinOp::Mod if y == 0.0 => return Err(EvalError::fatal("ClientError", "Division by zero in decimal arithmetic")),
         BinOp::Div => x / y,
-        BinOp::Mod if y == 0.0 => return Err(EvalError::new("DivisionByZero", "Division by zero.")),
         BinOp::Mod => x % y,
         _ => return Err(EvalError::new("InvalidOperation", "Not an arithmetic operator.")),
     };
@@ -213,9 +206,6 @@ fn cmp_op(op: BinOp, a: &Value, b: &Value) -> EvalResult<Value> {
         _ => o != Ordering::Less,
     }))
 }
-
-/// The longest string an expression may build (concatenation).
-const MAX_STRING: usize = 16 * 1024 * 1024;
 
 fn trim(mode: TrimMode, chars: &str, s: &str) -> String {
     let set: std::collections::HashSet<char> = chars.chars().collect();
@@ -250,7 +240,7 @@ fn func(id: FuncId, part: Option<Part>, args: &[Expr], ctx: &Ctx) -> EvalResult<
     if vals.iter().any(Value::is_nullish) {
         return Ok(Value::Null);
     }
-    let range = || EvalError::new("ArithmeticOverflow", "The date is out of range.");
+    let range = || EvalError::fatal("ClientError", "The date is out of range.");
     Ok(match id {
         FuncId::CharLength => Value::Int(text(&vals[0]).chars().count() as i64),
         FuncId::Lower => Value::Str(text(&vals[0]).to_lowercase()),
@@ -269,9 +259,20 @@ fn func(id: FuncId, part: Option<Part>, args: &[Expr], ctx: &Ctx) -> EvalResult<
         }
         FuncId::ToString => {
             let t = ts_arg(&vals[0])?;
-            Value::Str(datetime::to_string(&t, &text(&vals[1])).map_err(|m| EvalError::new("InvalidFormat", m))?)
+            Value::Str(datetime::to_string(&t, &text(&vals[1])).map_err(|_| {
+                EvalError::fatal("ClientError", format!("TimeStamp {} can't be formatted with given formatString", datetime::format(&t)))
+            })?)
         }
-        FuncId::ToTimestamp => Value::Ts(ts_arg(&vals[0])?),
+        FuncId::ToTimestamp => match &vals[0] {
+            Value::Ts(t) => Value::Ts(*t),
+            v => {
+                let s = text(v);
+                Value::Ts(
+                    datetime::parse(&s)
+                        .ok_or_else(|| EvalError::fatal("ClientError", format!("String can't be converted to TimeStamp: {s}")))?,
+                )
+            }
+        },
         FuncId::DateAdd => {
             let (Some(p), n, t) = (part, int_arg(&vals[0])?, ts_arg(&vals[1])?) else { return Err(range()) };
             Value::Ts(datetime::add(p, n, &t).ok_or_else(range)?)
@@ -305,7 +306,7 @@ fn eval_node(e: &Expr, ctx: &Ctx) -> EvalResult<Value> {
                 Value::Null
             } else {
                 match to_number(&v)? {
-                    Value::Int(i) => Value::Int(i.checked_neg().ok_or_else(overflow)?),
+                    Value::Int(i) => Value::Int(i.checked_neg().ok_or_else(|| overflow("subtraction", 0, i))?),
                     Value::Float(f) => Value::Float(-f),
                     _ => Value::Null,
                 }
@@ -339,11 +340,10 @@ fn eval_node(e: &Expr, ctx: &Ctx) -> EvalResult<Value> {
         Expr::Bin(op, a, b) => {
             let (l, r) = (eval(a, ctx)?, eval(b, ctx)?);
             match op {
-                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Concat => arith(*op, &l, &r)?,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod => arith(*op, &l, &r)?,
                 _ => cmp_op(*op, &l, &r)?,
             }
         }
-        Expr::IsNull { e, neg } => Value::Bool(eval(e, ctx)?.is_nullish() != *neg),
         Expr::IsMissing { e, neg } => Value::Bool(matches!(eval(e, ctx)?, Value::Missing) != *neg),
         Expr::Between { e, lo, hi, neg } => {
             let v = eval(e, ctx)?;
@@ -384,7 +384,9 @@ fn eval_node(e: &Expr, ctx: &Ctx) -> EvalResult<Value> {
                     let mut c = t.chars();
                     match (c.next(), c.next()) {
                         (Some(ch), None) => Some(ch),
-                        _ => return Err(EvalError::new("InvalidLikePattern", "ESCAPE takes a single character.")),
+                        _ => {
+                            return Err(EvalError::fatal("ClientError", "An invalid escape character was specified in the LIKE predicate."))
+                        }
                     }
                 }
                 None => None,
@@ -451,6 +453,10 @@ impl Acc {
         };
         if v.is_nullish() {
             return Ok(());
+        }
+        // SUM, AVG, MIN and MAX take numbers only: a text, even `7`, ends the query on Azure
+        if !matches!(self, Acc::Count(_)) && !matches!(v, Value::Int(_) | Value::Float(_)) {
+            return Err(EvalError::fatal("ClientError", "Not a numeric type."));
         }
         match self {
             Acc::Count(n) => *n += 1,
@@ -531,19 +537,18 @@ mod tests {
         assert_eq!(v("TRIM(LEADING '1' FROM '1121')"), Value::Str("21".into()));
         assert_eq!(v("TRIM(TRAILING '1' FROM '1121')"), Value::Str("112".into()));
         assert_eq!(v("TRIM('  x ')"), Value::Str("x".into()));
-        assert_eq!(v("'a' || 1 || 'b'"), Value::Str("a1b".into()));
         assert_eq!(run("CHAR_LENGTH(_1)", &["x"], &[]).unwrap(), Value::Int(1));
     }
 
     #[test]
     fn documented_date_examples() {
-        assert_eq!(v("DATE_ADD('minute', 1, CAST('2017-01-02T03:04:05.006Z' AS TIMESTAMP))").to_text(), "2017-01-02T03:05:05.006Z");
+        assert_eq!(v("DATE_ADD('minute', 1, CAST('2017-01-02T03:04:05.006Z' AS TIMESTAMP))").to_text(), "2017-01-02T03:05:05+00:00");
         assert_eq!(v("DATE_DIFF('hour','2018-11-09T00:00+05:30','2018-11-09T01:00:23-08:00')"), Value::Int(14));
         assert_eq!(v("EXTRACT(YEAR FROM '2010-01-01T')"), Value::Int(2010));
         assert_eq!(v("TO_STRING(CAST('1969-07-20T20:18Z' AS TIMESTAMP),  'MMMM d, y')"), Value::Str("July 20, 1969".into()));
-        assert_eq!(v("TO_TIMESTAMP('2007T')").to_text(), "2007-01-01T00:00:00Z");
-        assert_eq!(v("UTCNOW()").to_text(), "1970-01-01T00:00:00Z");
-        assert_eq!(v("TO_TIMESTAMP('2020-01-01') + 2").to_text(), "2020-01-03T00:00:00Z");
+        assert_eq!(v("TO_TIMESTAMP('2007T')").to_text(), "2007-01-01T00:00:00+00:00");
+        assert_eq!(v("UTCNOW()").to_text(), "1970-01-01T00:00:00+00:00");
+        assert_eq!(v("TO_TIMESTAMP('2020-01-01T') + 2").to_text(), "2020-01-03T00:00:00+00:00");
         assert_eq!(v("EXTRACT(timezone_hour FROM '2020-01-01T00:00+05:30')"), Value::Int(5));
     }
 
@@ -566,8 +571,6 @@ mod tests {
 
     #[test]
     fn logic_with_unknowns() {
-        assert_eq!(v("NULL IS NULL"), Value::Bool(true));
-        assert_eq!(v("1 IS NOT NULL"), Value::Bool(true));
         assert_eq!(v("NULL = 1"), Value::Null);
         assert_eq!(v("false AND NULL"), Value::Bool(false));
         assert_eq!(v("true AND NULL"), Value::Null);
@@ -620,7 +623,6 @@ mod tests {
         assert_eq!(q("nope"), Value::Missing);
         assert_eq!(q("nope IS MISSING"), Value::Bool(true));
         assert_eq!(q("n IS MISSING"), Value::Bool(false));
-        assert_eq!(q("n IS NULL"), Value::Bool(true));
         assert_eq!(q("tags[5] IS MISSING"), Value::Bool(true));
     }
 
@@ -631,7 +633,7 @@ mod tests {
         let mut a = Acc::new(AggFn::Avg);
         let mut mn = Acc::new(AggFn::Min);
         let mut mx = Acc::new(AggFn::Max);
-        for x in [Value::Int(3), Value::Null, Value::Int(1), Value::Str("2".into())] {
+        for x in [Value::Int(3), Value::Null, Value::Int(1), Value::Int(2)] {
             c.add(Some(&x)).unwrap();
             s.add(Some(&x)).unwrap();
             a.add(Some(&x)).unwrap();

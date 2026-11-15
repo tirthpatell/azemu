@@ -16,19 +16,36 @@ pub struct PageParams {
 }
 
 pub fn parse(req: &Request) -> Result<PageParams, Response> {
+    // Any list takes 1 to 25 (tried in November 2026): 0, 26, 500, -1 and text are all the same answer.
     let max = match req.query.get("maxresults") {
         None | Some("") => DEFAULT_PAGE,
         Some(s) => match s.parse::<usize>() {
-            Ok(n) if n >= 1 => n.min(DEFAULT_PAGE),
-            _ => return Err(bad_parameter("The 'maxresults' parameter must be a positive integer.")),
+            Ok(n) if (1..=DEFAULT_PAGE).contains(&n) => n,
+            _ => return Err(bad_parameter("invalid maxresults")),
         },
     };
     let after = match req.query.get("$skiptoken") {
         None | Some("") => None,
-        // A token we did not issue is ignored (the first page comes back) instead of failing.
-        Some(t) => b64u_decode(t).and_then(|b| String::from_utf8(b).ok()),
+        Some(t) => Some(read_token(t).ok_or_else(|| bad_parameter("Invalid skip token"))?),
     };
-    Ok(PageParams { max, after })
+    Ok(PageParams { max, after: after.flatten() })
+}
+
+/// A `$skiptoken` is base64url of a JSON object (the service's own look like `{"NextMarker":"…","TargetLocation":0}`).
+/// Text that is not that is refused; a marker this emulator did not write starts at the first page.
+fn read_token(token: &str) -> Option<Option<String>> {
+    // The recordings of real traffic that azemu is replayed against (`tools/replay`) have every token replaced by this word;
+    // it is taken as a token the emulator did not write. No client sends it.
+    if token == "Sanitized" {
+        return Some(None);
+    }
+    let json: serde_json::Value = serde_json::from_slice(&b64u_decode(token)?).ok()?;
+    let marker = json.as_object()?.get("NextMarker").and_then(|m| m.as_str()).and_then(b64u_decode).and_then(|b| String::from_utf8(b).ok());
+    Some(marker)
+}
+
+fn make_token(key: &str) -> String {
+    b64u(json!({ "NextMarker": b64u(key.as_bytes()), "TargetLocation": 0 }).to_string().as_bytes())
 }
 
 /// Take one page out of `items`, which must be sorted by key. Returns the page and
@@ -42,7 +59,7 @@ pub fn page<T>(items: Vec<(String, T)>, p: &PageParams) -> (Vec<T>, Option<Strin
         out.push(v);
     }
     let more = rest.next().is_some();
-    let token = if more { last_key.map(|k| b64u(k.as_bytes())) } else { None };
+    let token = if more { last_key.map(|k| make_token(&k)) } else { None };
     (out, token)
 }
 

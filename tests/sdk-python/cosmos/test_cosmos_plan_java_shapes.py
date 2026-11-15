@@ -7,7 +7,8 @@ MultipleAggregates, ...`. Its pipeline (`AggregateDocumentQueryExecutionContext`
   names the aliases (`groupByAliases`) and their operators (`groupByAliasToAggregateType`); `hasSelectValue` is false;
 * `SELECT VALUE <aggregate> ... GROUP BY`: the operator in `aggregates`, the partial in a one element array under `payload`
   (the JavaScript SDK reads `aggregates[0]` and `payload[0]` too).
-Not recorded; taken from those SDKs' sources (see docs/sdk-notes.md).
+The plans and partition answers below were checked against a real account in November 2026 (Java feature list); the SDKs'
+reading of them is from their sources (see docs/sdk-notes.md).
 """
 
 import pytest
@@ -27,7 +28,9 @@ PY_PLAN = {
     "content-type": "application/query+json",
     "x-ms-cosmos-is-query-plan-request": "True",
     "x-ms-cosmos-query-version": "1.0",
-    "x-ms-cosmos-supported-query-features": "Aggregate,CompositeAggregate,Distinct,MultipleOrderBy,OffsetAndLimit,OrderBy,Top,GroupBy",
+    # what the Python SDK sends (`_cosmos_client_connection.py`, `_GetQueryPlanThroughGateway`): no GroupBy, no NonValueAggregate
+    "x-ms-cosmos-supported-query-features": "Aggregate, CompositeAggregate, Distinct, MultipleOrderBy, OffsetAndLimit, OrderBy, Top, "
+    "NonStreamingOrderBy, HybridSearch, CountIf, WeightedRankFusion",
 }
 
 
@@ -78,14 +81,17 @@ def test_select_list_of_aggregates_is_planned_as_one_group_for_a_client_with_non
     assert info["groupByExpressions"] == []
     assert info["groupByAliases"] == ["n", "lo", "hi", "total"]
     assert info["groupByAliasToAggregateType"] == {"n": "Count", "lo": "Min", "hi": "Max", "total": "Sum"}
-    assert info["aggregates"] == ["Count", "Min", "Max", "Sum"]
-    # one row per partition with a payload; MIN and MAX in the composite form only for a client that takes it (version 1.4)
+    assert info["aggregates"] == []
+    # one row per partition with a payload; MIN and MAX carry the composite in `item2`
     assert _run(raw, db, coll, info["rewrittenQuery"]) == [
-        {"payload": {"n": {"item": 3}, "lo": {"item": 3}, "hi": {"item": 9}, "total": {"item": 17}}}
+        {"payload": {"n": {"item": 3}, "lo": {"item": 3, "item2": {"min": 3, "count": 3}},
+                     "hi": {"item": 9, "item2": {"max": 9, "count": 3}}, "total": {"item": 17}}}
     ]
-    # an empty partition still answers one row: COUNT is 0, the others have no item
+    # an empty partition still answers one row: COUNT and SUM are 0, MIN and MAX have only a count
     empty = _plan(raw, db, coll, sql + " WHERE c.n > 100", JAVA_PLAN)
-    assert _run(raw, db, coll, empty["rewrittenQuery"]) == [{"payload": {"n": {"item": 0}, "lo": {}, "hi": {}, "total": {}}}]
+    assert _run(raw, db, coll, empty["rewrittenQuery"]) == [
+        {"payload": {"n": {"item": 0}, "lo": {"item2": {"count": 0}}, "hi": {"item2": {"count": 0}}, "total": {"item": 0}}}
+    ]
 
 
 def test_unnamed_aggregate_in_a_select_list_is_named_dollar_one(raw, rcoll):
@@ -96,12 +102,20 @@ def test_unnamed_aggregate_in_a_select_list_is_named_dollar_one(raw, rcoll):
     assert _run(raw, db, coll, info["rewrittenQuery"]) == [{"payload": {"$1": {"item": 3}}}]
 
 
-def test_select_list_of_aggregates_keeps_the_old_form_for_a_client_without_the_feature(raw, rcoll):
+def test_select_list_of_aggregates_is_refused_for_a_client_without_the_feature(raw, rcoll):
+    # the Python SDK lists neither NonValueAggregate nor MultipleAggregates: 400, each feature named (a real account's answer)
     db, coll = rcoll
     _fill(raw, db, coll)
-    info = _plan(raw, db, coll, "SELECT COUNT(1) AS n, SUM(c.n) AS s FROM c", PY_PLAN)
-    assert info["groupByAliases"] == [] and info["groupByAliasToAggregateType"] == {}
-    assert _run(raw, db, coll, info["rewrittenQuery"]) == [[{"item": 3}, {"item": 17}]]
+    r = raw.post(f"dbs/{db}/colls/{coll}/docs", body={"query": "SELECT COUNT(1) AS n, SUM(c.n) AS s FROM c"}, headers=PY_PLAN)
+    assert r.status_code == 400
+    msg = r.json()["message"]
+    assert msg.startswith("Query contains 1 or more unsupported features. Upgrade your SDK to a version that does support the requested features:")
+    assert "Query contained NonValueAggregate, which the calling client does not support." in msg
+    assert "Query contained MultipleAggregates, which the calling client does not support." in msg
+    # GROUP BY is refused the same way
+    r = raw.post(f"dbs/{db}/colls/{coll}/docs", body={"query": "SELECT VALUE COUNT(1) FROM c GROUP BY c.pk"}, headers=PY_PLAN)
+    assert r.status_code == 400
+    assert "Query contained GroupBy, which the calling client does not support." in r.json()["message"]
 
 
 @pytest.mark.parametrize(
@@ -110,7 +124,7 @@ def test_select_list_of_aggregates_keeps_the_old_form_for_a_client_without_the_f
         ("COUNT(1)", {"item": 2}),
         ("SUM(c.n)", {"item": 8}),
         ("AVG(c.n)", {"item": {"sum": 8, "count": 2}}),
-        ("MAX(c.n)", {"item": 5}),
+        ("MAX(c.n)", {"item": 5, "item2": {"max": 5, "count": 2}}),
     ],
 )
 def test_value_aggregate_with_group_by_names_its_operator_and_wraps_each_partial_in_an_array(raw, rcoll, agg, partial):
@@ -119,7 +133,7 @@ def test_value_aggregate_with_group_by_names_its_operator_and_wraps_each_partial
     info = _plan(raw, db, coll, f"SELECT VALUE {agg} FROM c GROUP BY c.pk", JAVA_PLAN)
     assert info["hasSelectValue"] is True
     assert len(info["aggregates"]) == 1
-    assert info["groupByAliases"] == ["$1"]
+    assert info["groupByAliases"] == []
     rows = _run(raw, db, coll, info["rewrittenQuery"])
     mine = [r for r in rows if r["groupByItems"] == [{"item": "a"}]]
     assert mine == [{"groupByItems": [{"item": "a"}], "payload": [partial]}]
@@ -134,17 +148,23 @@ def test_value_without_aggregate_with_group_by_stays_bare(raw, rcoll):
     assert sorted(r["payload"] for r in rows) == ["a", "b"]
 
 
-def test_ordered_distinct_rows_carry_the_rid_unless_top_or_offset_limit_needs_the_partition_to_remove_repeats(raw, rcoll):
+def test_ordered_distinct_rows_carry_the_rid_and_the_partition_does_not_remove_repeats(raw, rcoll):
     # The Java SDK builds the continuation token of an ORDER BY page from the `_rid` of the last row ("rid must not be null").
+    # A real account answers every row (a, a, b), with and without TOP; the client removes the repeats.
     db, coll = rcoll
     _fill(raw, db, coll)
     info = _plan(raw, db, coll, "SELECT DISTINCT VALUE c.pk FROM c ORDER BY c.pk", JAVA_PLAN)
     assert info["distinctType"] == "Ordered"
+    assert "IS_DEFINED(c.pk)" in info["rewrittenQuery"]
     rows = _run(raw, db, coll, info["rewrittenQuery"].replace("{documentdb-formattableorderbyquery-filter}", "true"))
     assert len(rows) == 3 and all(r["_rid"] and r["payload"] in ("a", "b") for r in rows)
     top = _plan(raw, db, coll, "SELECT DISTINCT TOP 2 VALUE c.pk FROM c ORDER BY c.pk", JAVA_PLAN)
+    assert top["top"] == 2 and "TOP" not in top["rewrittenQuery"]
     rows = _run(raw, db, coll, top["rewrittenQuery"].replace("{documentdb-formattableorderbyquery-filter}", "true"))
-    assert [r["payload"] for r in rows] == ["a", "b"]
+    assert [r["payload"] for r in rows] == ["a", "a", "b"]
+    # DISTINCT of a value that is not the sort value is unordered
+    other = _plan(raw, db, coll, "SELECT DISTINCT VALUE c.n FROM c ORDER BY c.pk", JAVA_PLAN)
+    assert other["distinctType"] == "Unordered"
 
 
 def test_is_boolean_is_accepted_as_the_java_sdk_writes_it_in_order_by_resume_filters(raw, rcoll):

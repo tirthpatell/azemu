@@ -10,7 +10,7 @@ use crate::errors::{blob_not_found, container_not_found, err, ApiError, ApiResul
 use crate::headers::write_headers;
 use crate::lease::{self, Scope};
 use crate::state::{BlobKind, Immutability};
-use crate::store::{check_cpk, check_scope_write, roll_version, valid_tier};
+use crate::store::{check_cpk, check_cpk_read, check_scope_write, roll_version, valid_tier};
 use crate::util::*;
 
 pub fn set_properties(cx: &mut Cx, container: &str, name: &str) -> ApiResult {
@@ -104,7 +104,7 @@ pub fn set_metadata(cx: &mut Cx, container: &str, name: &str) -> ApiResult {
     let e = c.blobs.get_mut(name).ok_or_else(blob_not_found)?;
     refresh_entry(e, now);
     let b = e.live().ok_or_else(blob_not_found)?;
-    check_cpk(b, req)?;
+    check_cpk_read(b, req)?;
     check_scope_write(b, req)?;
     cond::check(req, "", Some((&b.etag, b.last_modified)), Kind::Write)?;
     cond::check_tags(req, Some(&b.tags))?;

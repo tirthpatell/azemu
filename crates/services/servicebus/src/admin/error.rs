@@ -34,6 +34,17 @@ pub enum ErrKind {
     AlreadyExists(String),
     /// 403 a quota of the namespace is used up.
     Quota(String),
+    /// 404 `The incoming request is not recognized as a namespace policy put request.` (a body that is no description, a subscription of a
+    /// topic that is not there)
+    NotRecognized,
+    /// 404 `The messaging entity '...' could not be found.` (delete of a subscription or rule that is not there)
+    NotFoundMessaging(String),
+    /// 412, no body (an update with an ETag that is not the entity's)
+    PreconditionFailed,
+    /// 500 `The service was unable to process the request; please retry the operation.` (what an update of a subscription with a stale ETag gets)
+    Retry,
+    /// 500 `SubCode=50000. Internal Server Error.`
+    Internal,
     /// 501
     NotImplemented(String),
 }
@@ -75,6 +86,11 @@ impl ApiError {
         ApiError::new(ErrKind::NotFoundEntity(id))
     }
 
+    /// 400 with the text laid out by the caller, after which comes the tracking text (no `SubCode`, no "To know more").
+    pub fn bad_raw(text: impl Into<String>) -> ApiError {
+        ApiError::new(ErrKind::BadRequestRaw(text.into()))
+    }
+
     pub fn not_implemented(what: impl Into<String>) -> ApiError {
         ApiError::new(ErrKind::NotImplemented(what.into()))
     }
@@ -85,6 +101,9 @@ impl ApiError {
             ErrKind::Unauthorized(_) => 401,
             ErrKind::Quota(_) => 403,
             ErrKind::NotFoundOperation | ErrKind::NotFoundEntity(_) | ErrKind::NoService => 404,
+            ErrKind::NotRecognized | ErrKind::NotFoundMessaging(_) => 404,
+            ErrKind::PreconditionFailed => 412,
+            ErrKind::Retry | ErrKind::Internal => 500,
             ErrKind::Conflict | ErrKind::AlreadyExists(_) => 409,
             ErrKind::NotImplemented(_) => 501,
         }
@@ -114,8 +133,22 @@ impl ApiError {
             ),
             ErrKind::AlreadyExists(id) => format!("The messaging entity '{id}' already exists. {MORE}  {tracking}, {no_tracker}, {ts}"),
             ErrKind::Quota(msg) => format!("{msg} {MORE} . {tracking}, {tracker}, {ts}"),
+            ErrKind::NotRecognized => format!("The incoming request is not recognized as a namespace policy put request. {MORE} {tracking}, {tracker}, {ts}"),
+            ErrKind::NotFoundMessaging(id) => format!("The messaging entity '{id}' could not be found. {MORE}  {tracking}, {tracker}, {ts}"),
+            ErrKind::PreconditionFailed => String::new(),
+            ErrKind::Retry => format!(
+                "The service was unable to process the request; please retry the operation. For more information on exception types and proper exception handling, please refer to http://go.microsoft.com/fwlink/?LinkId=761101. {tracking}, {tracker}, {ts}"
+            ),
+            ErrKind::Internal => format!("SubCode=50000. Internal Server Error. {MORE} . {tracking}, {tracker}, {ts}"),
             ErrKind::NotImplemented(what) => format!("servicebus: {what} is not implemented by azemu."),
         };
+        if status == 412 {
+            let mut r = Resp::new(412).header("Server", "Microsoft-HTTPAPI/2.0");
+            if let Some(e) = &self.etag {
+                r = r.header("ETag", e);
+            }
+            return r.body(String::new()).build();
+        }
         let body = format!("<Error><Code>{status}</Code><Detail>{}</Detail></Error>", esc(&detail));
         let mut r = Resp::new(status).header("Content-Type", "application/xml; charset=utf-8").header("Server", "Microsoft-HTTPAPI/2.0");
         if let Some(e) = &self.etag {

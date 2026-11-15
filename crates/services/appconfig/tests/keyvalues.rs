@@ -187,7 +187,9 @@ async fn select_limits_fields() {
     t.put("k", None, json!({"value":"v","content_type":"text/x"})).await;
     let r = t.get("/kv/k?$select=key,content_type").await;
     assert_eq!(r.json(), json!({"key":"k","content_type":"text/x"}));
-    assert_eq!(t.get("/kv/k?$select=bogus").await.status, 400);
+    // a field that does not exist is left out (tried against Azure in November 2026): no fields at all is an empty object
+    assert_eq!(t.get("/kv/k?$select=bogus").await.json(), json!({}));
+    assert_eq!(t.get("/kv/k?$select=key,bogus").await.json(), json!({"key":"k"}));
 }
 
 #[tokio::test]
@@ -265,12 +267,13 @@ async fn lock_conditions_and_missing_setting() {
 
 #[tokio::test]
 async fn lock_survives_a_conditional_overwrite_attempt_order() {
-    // a failing condition is reported before the lock
+    // the lock is reported before a condition that fails (tried against Azure in November 2026)
     let t = start().await;
     t.put_value("k", None, "v").await;
     t.call("PUT", "/locks/k", &[], "").await;
     let r = t.put_h("k", None, json!({"value":"x"}), &[("If-Match", "\"wrong\"")]).await;
-    assert_eq!(r.status, 412);
+    assert_eq!(r.status, 409);
+    assert_eq!(r.json()["type"], "https://azconfig.io/errors/key-locked");
 }
 
 #[tokio::test]
@@ -303,10 +306,25 @@ async fn feature_flags_and_secret_references_round_trip_untouched() {
 async fn bad_bodies_are_400() {
     let t = start().await;
     let h = [("Content-Type", "application/json")];
-    assert_eq!(t.call("PUT", "/kv/k", &h, "not json").await.status, 400);
-    assert_eq!(t.call("PUT", "/kv/k", &h, "[1]").await.status, 400);
-    assert_eq!(t.call("PUT", "/kv/k", &h, r#"{"value": 5}"#).await.status, 400);
-    assert_eq!(t.call("PUT", "/kv/k", &h, r#"{"tags": {"a": 1}}"#).await.status, 400);
+    // Azure names the parameter and leaves `detail` empty (tried in November 2026)
+    for (body, name) in [("not json", "key"), ("[1]", "key"), (r#"{"tags": {"a": 1}}"#, "tags"), (r#"{"tags": "x"}"#, "tags")] {
+        let r = t.call("PUT", "/kv/k", &h, body).await;
+        assert_eq!(r.status, 400, "{body}");
+        let j = r.json();
+        assert_eq!((j["name"].as_str(), j["detail"].as_str()), (Some(name), Some("")), "{body}");
+        assert_eq!(j["title"], format!("Invalid request parameter '{name}'"));
+    }
+    // a number as the value is stored as text
+    let r = t.call("PUT", "/kv/n", &h, r#"{"value": 5}"#).await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.json()["value"], "5");
+    // a body that is not JSON
+    let r = t.call("PUT", "/kv/k", &[("Content-Type", "text/plain")], r#"{"value":"v"}"#).await;
+    assert_eq!(r.status, 415);
+    assert_eq!(r.json()["title"], "Unsupported Media Type");
+    assert_eq!(r.json()["type"], "https://tools.ietf.org/html/rfc9110#section-15.5.16");
+    assert!(r.json()["traceId"].as_str().unwrap().starts_with("00-"));
+    assert_eq!(t.get("/kv/k").await.status, 404, "nothing was stored");
 }
 
 #[tokio::test]

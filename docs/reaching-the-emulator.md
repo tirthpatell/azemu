@@ -75,7 +75,8 @@ clients need https. Every port answers both http and https. The first start make
 
 - `ca.pem` is what a client trusts. It is also served at `GET /_azemu/ca.pem` on any port.
 - It can sign only for `localhost`, anything under `.localhost`, and the loopback addresses. For any other name (a Compose service name, a hosts-file name)
-  the emulator refuses the TLS handshake and logs why. `--tls-name <name>` (or `AZEMU_TLS_NAME`, comma separated, repeatable) adds a DNS suffix, an IP
+  the emulator refuses the TLS handshake and logs one WARN for that name, which says which name was asked for and that `--tls-name <name>` (or `AZEMU_TLS_NAME=<name>`) allows it. The client
+  only sees a TLS error. `--tls-name <name>` (or `AZEMU_TLS_NAME`, comma separated, repeatable) adds a DNS suffix, an IP
   address or an address range such as `10.0.0.0/24`; it is also served as a host name. A whole top-level domain (`com`, `co.uk`), a wildcard and a range
   wider than a /8 (IPv4) or a /32 (IPv6) are refused at start.
 - It lasts 2 years. A new one is made when it is within 30 days of its end, or when the set of `--tls-name` changes; then clients must trust the new
@@ -91,21 +92,24 @@ other https call from that shell then fails.
 | Node | `NODE_EXTRA_CA_CERTS=/path/ca.pem` (adds to the system list; read when Node starts) | yes |
 | curl | `--cacert /path/ca.pem` | yes |
 | Java | copy the JDK's `cacerts`, add the CA, run with the copy: `keytool -importcert -noprompt -alias azemu -file ca.pem -keystore my-cacerts -storepass changeit`, then `java -Djavax.net.ssl.trustStore=my-cacerts -Djavax.net.ssl.trustStorePassword=changeit ...` | yes |
-| Go, Terraform, Rust, .NET, and tools that take one file (`SSL_CERT_FILE`) | a bundle: the system list plus the emulator's CA (below), given to that one process. Rust: the Azure crates read it; without it a Blob request is retried for over a minute before it reports the certificate error ([`rust.md`](rust.md)) | Go: yes; Rust: yes (Blob, Queue, Key Vault, Cosmos DB, Event Hubs and `reqwest`); Terraform: yes (its test runner does this); .NET: not tried here |
+| Go, Terraform, Rust, .NET, and tools that take one file (`SSL_CERT_FILE`) | a bundle: the system list plus the emulator's CA (below), given to that one process. Rust on Linux: the Azure crates read it; without it a Blob request is retried for over a minute before it reports the certificate error ([`rust.md`](rust.md)). **Rust on macOS does not read the variable at all**: trust the CA in the Keychain, or give a Blob, Queue or Key Vault client the certificate in code (below) | Go: yes; Rust on Linux: yes (Blob, Queue, Key Vault, Cosmos DB, Event Hubs and `reqwest`); Terraform: yes (its test runner does this); .NET: not tried here; macOS: not tried (this machine is Linux) |
+| Rust, one Blob, Queue or Key Vault client, any system | `ClientOptions { transport: Some(Transport::new(Arc::new(client))), .. }` with a `reqwest::Client` that has `ca.pem` added (`tls_certs_merge`); no variable and no Keychain. The Cosmos DB and Event Hubs clients have no such option ([`rust.md`](rust.md#one-client-at-a-time-no-variable-no-keychain)) | Linux: yes (Blob, Queue, Key Vault) |
 | Everything on the machine | install `ca.pem` as a system CA (Debian and Ubuntu: copy it to `/usr/local/share/ca-certificates/azemu.crt`, run `update-ca-certificates`) | not tried (needs root) |
 
 A bundle for tools that read one file:
 
 ```bash
-cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem     # Linux; on macOS the system bundle is /etc/ssl/cert.pem
+cat /etc/ssl/certs/ca-certificates.crt ~/.azemu/ca.pem > ~/.azemu/bundle.pem     # Linux (Debian and Ubuntu path; other systems keep the list elsewhere)
 SSL_CERT_FILE=~/.azemu/bundle.pem terraform apply
 ```
+
+On macOS the Rust crates do not read `SSL_CERT_FILE`: their TLS asks the Keychain, so the CA must be trusted there (a command, and why that is safe for the default CA, in [`rust.md`](rust.md#macos); written from Apple's documentation, not run).
 
 azemu does not build the bundle for you: it may run in a container whose system list is not yours.
 
 **Installing the CA for the whole system is fine only for the default names.** The private key (`ca.key`, mode 0600) can sign only for the names the CA is
 limited to. A CA made with `--tls-name core.windows.net` can sign for `*.core.windows.net`, so with that CA installed system-wide, anyone who can read
-`ca.key` can impersonate real Azure storage to that machine. Do not install such a CA system-wide; trust it per client. See `SECURITY.md`.
+`ca.key` can impersonate real Azure storage to that machine. Do not install such a CA system-wide, and do not put it in a macOS Keychain; trust it per client. See `SECURITY.md`.
 
 ## Real Azure host names
 

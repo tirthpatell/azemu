@@ -99,10 +99,6 @@ fn dispatch(cx: &mut Cx, op: Op, fs: &str, p: &str) -> ApiResult {
         Op::GetFileSystemProperties => filesystem::get_properties(cx, fs),
         Op::DeleteFileSystem => filesystem::delete(cx, fs),
         Op::ListPaths => list::list_paths(cx, fs),
-        Op::ListBlobs => {
-            filesystem::open(cx, fs)?;
-            crate::list::list_blobs(cx, fs)
-        }
         Op::CreatePath { dir } => path::create(cx, fs, p, dir),
         Op::RenamePath => rename::rename(cx, fs, p),
         Op::ReadPath => path::read(cx, fs, p),
@@ -122,19 +118,33 @@ fn dispatch(cx: &mut Cx, op: Op, fs: &str, p: &str) -> ApiResult {
             filesystem::open(cx, fs)?;
             deleted::undelete(cx, fs, p)
         }
-        Op::Query => {
-            filesystem::open(cx, fs)?;
-            crate::query::query_blob(cx, fs, p, true)
-        }
         Op::Unknown => Err(unknown(cx)),
     }
 }
 
+/// What the `dfs` host answers to a request that is not a Data Lake operation. Azure answers the Blob endpoint's operations
+/// sent to it with an error of their own, never `501` (checked in November 2026): a `PUT` or `POST` with no `resource` and no
+/// `action` is a missing header, `restype=container` is a bad query parameter, and a `GET` of the account is a bad URI.
 fn unknown(cx: &Cx) -> ApiError {
     let req = cx.req;
     let m = req.method.as_str();
     if !matches!(m, "GET" | "HEAD" | "PUT" | "POST" | "PATCH" | "DELETE") {
         return crate::errors::err("UnsupportedHttpVerb");
+    }
+    let (fs, _, named) = parse_target(req);
+    let writes = matches!(m, "PUT" | "POST");
+    if fs.is_none() {
+        return if m == "PUT" {
+            crate::errors::err("MissingRequiredHeader")
+        } else {
+            crate::errors::err("InvalidUri").msg("The request URI is invalid.")
+        };
+    }
+    if !named && req.query.get("restype").is_some_and(|v| v.eq_ignore_ascii_case("container")) {
+        return crate::errors::err("InvalidQueryParameterValue");
+    }
+    if named && writes {
+        return crate::errors::err("MissingRequiredHeader");
     }
     let err = not_implemented(&format!("{m} {} ?{}", req.decoded_path(), req.query.raw()));
     // the name for `/_azemu/unsupported` carries the shape of the request, not the account's own names

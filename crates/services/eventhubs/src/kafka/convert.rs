@@ -10,7 +10,8 @@
 //!   consumer sees the raw AMQP-encoded byte sequence"); and the properties `message-id`, `user-id`, `to`,
 //!   `reply-to`, `content-type`, `content-encoding`, `creation-time` of the AMQP properties section come out as UTF-8
 //!   strings, headers of the same names.
-//! - Record timestamps are the time the event was enqueued; offsets are sequence numbers.
+//! - Record timestamps are the time the event was enqueued; offsets are sequence numbers. A record that came in through Kafka is
+//!   read as `LogAppendTime`, an event that came in over AMQP as `CreateTime` (see `fetch.rs`).
 
 use azemu_amqp::message::{Body, Message};
 use azemu_amqp::types::Value;
@@ -32,7 +33,8 @@ pub fn record_to_message(r: &Record) -> Message {
             Ok(s) => Value::String(s.to_string()),
             Err(_) => Value::Binary(k.to_vec()),
         };
-        m.message_annotations = Some(vec![(Value::sym("x-opt-partition-key"), v)]);
+        // an event that Kafka wrote carries the key twice (seen on a real namespace in November 2026)
+        m.message_annotations = Some(vec![(Value::sym("x-opt-partition-key"), v.clone()), (Value::sym("x-opt-kafka-key"), v)]);
     }
     if !r.headers.is_empty() {
         m.application_properties = Some(
@@ -46,7 +48,9 @@ pub fn record_to_message(r: &Record) -> Message {
 }
 
 pub fn record_to_event(r: &Record) -> PreparedEvent {
-    prepare(record_to_message(r))
+    let mut e = prepare(record_to_message(r));
+    e.kafka = true;
+    e
 }
 
 fn text_of(v: &Value) -> Option<String> {
@@ -166,6 +170,8 @@ mod tests {
         };
         let m = record_to_message(&rec);
         assert_eq!(m.annotation("x-opt-partition-key"), Some(&Value::String("user-1".into())));
+        assert_eq!(m.annotation("x-opt-kafka-key"), Some(&Value::String("user-1".into())));
+        assert!(record_to_event(&rec).kafka);
         assert_eq!(m.app_property("h"), Some(&Value::Binary(vec![0, 0, 4, 210])));
         assert_eq!(m.app_property("n"), Some(&Value::Null));
         assert_eq!(key_of(&m).as_deref(), Some(&b"user-1"[..]));

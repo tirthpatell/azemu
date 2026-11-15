@@ -10,6 +10,7 @@ from datetime import timedelta
 
 import pytest
 from azure.servicebus import ServiceBusMessage, ServiceBusMessageState
+from azure.servicebus.exceptions import ServiceBusError
 
 from sbutil import body_of, drain_bodies, receive_n, utcnow
 
@@ -66,7 +67,16 @@ def test_scheduled_message_arrives_after_its_time(sb, queue):
     assert m.scheduled_enqueue_time_utc == when
     assert m.enqueued_time_utc.replace(microsecond=0) >= when - timedelta(seconds=1)
     assert m.delivery_count == 0
-    assert m.state == ServiceBusMessageState.ACTIVE
+
+
+@pytest.mark.slow
+def test_scheduled_message_that_arrived_still_has_the_state_scheduled(sb, queue):
+    with sb.get_queue_sender(queue) as s:
+        s.schedule_messages(ServiceBusMessage("soon"), whole_seconds(4))
+    with sb.get_queue_receiver(queue, max_wait_time=8) as r:
+        (m,) = receive_n(r, 1, max_wait=8)
+    # Azure keeps the state of a message that was scheduled after it arrived (checked in November 2026)
+    assert m.state == ServiceBusMessageState.SCHEDULED
 
 
 @pytest.mark.slow
@@ -150,11 +160,18 @@ def test_cancel_only_some_of_several_scheduled_messages(sb, queue):
 
 @pytest.mark.slow
 def test_cancelled_scheduled_message_is_never_delivered(sb, queue):
+    # 25 s ahead: Azure delivers a message that is due within about 15 s even when the cancel call succeeded (a race inside the
+    # service that the emulator does not copy, see its page), so the test cancels one that is further away
     with sb.get_queue_sender(queue) as s:
-        seqs = s.schedule_messages(ServiceBusMessage("never"), whole_seconds(2))
+        seqs = s.schedule_messages(ServiceBusMessage("never"), whole_seconds(25))
         s.cancel_scheduled_messages(seqs)
-    time.sleep(3.5)
-    assert drain_bodies(sb, queue, max_wait=1) == []
+        # cancelling again is no error; a number that was never scheduled is
+        s.cancel_scheduled_messages(seqs)
+        with pytest.raises(ServiceBusError):
+            s.cancel_scheduled_messages([987654321])
+    time.sleep(1.5)
+    with sb.get_queue_receiver(queue, max_wait_time=1) as r:
+        assert r.peek_messages(max_message_count=5) == []
 
 
 def test_closed_sender_can_not_schedule_or_cancel(sb, queue):
@@ -170,8 +187,12 @@ def test_scheduled_message_can_be_peeked_but_not_received_in_the_same_session(sb
     with sb.get_queue_sender(queue) as s:
         s.send_messages(ServiceBusMessage("now"))
         s.schedule_messages(ServiceBusMessage("later"), whole_seconds(120))
+    time.sleep(1.5)
     with sb.get_queue_receiver(queue, max_wait_time=2) as r:
-        assert len(r.peek_messages(max_message_count=10)) == 2
+        # a peek that starts at an active message stops before the scheduled one after it; one that starts at the scheduled
+        # message shows it (checked in November 2026)
+        assert [body_of(m) for m in r.peek_messages(max_message_count=10, sequence_number=1)] == ["now"]
+        assert [body_of(m) for m in r.peek_messages(max_message_count=10, sequence_number=2)] == ["later"]
         got = receive_n(r, 1)
         assert body_of(got[0]) == "now"
         assert r.receive_messages(max_message_count=1, max_wait_time=1) == []

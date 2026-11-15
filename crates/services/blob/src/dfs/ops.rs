@@ -13,7 +13,6 @@ pub enum Op {
     GetFileSystemProperties,
     DeleteFileSystem,
     ListPaths,
-    ListBlobs,
     CreatePath {
         dir: bool,
     },
@@ -29,8 +28,7 @@ pub enum Op {
     LeasePath,
     SetExpiry,
     Undelete,
-    /// Query Blob Contents (`POST ?comp=query`) on a file.
-    Query,
+    /// A request the `dfs` host answers with an error of its own (see `router::unknown`), or that is not built.
     Unknown,
 }
 
@@ -54,7 +52,7 @@ impl Op {
             Op::DeleteFileSystem => need(Level::Container, "d", Anon::No),
             Op::GetFileSystemProperties => need(Level::Container, "r", Anon::Container),
             Op::SetFileSystemProperties => need(Level::Container, "w", Anon::No),
-            Op::ListPaths | Op::ListBlobs => need(Level::Container, "l", Anon::Container),
+            Op::ListPaths => need(Level::Container, "l", Anon::Container),
             Op::CreatePath { .. } => Need { level: Level::Object, perms: "w", perms_new: Some("cw"), anon: Anon::No },
             Op::RenamePath => need(Level::Object, "mcw", Anon::No),
             Op::ReadPath | Op::GetPathProperties => need(Level::Object, "re", Anon::Blob),
@@ -63,7 +61,6 @@ impl Op {
             Op::Flush | Op::SetProperties | Op::LeasePath | Op::SetExpiry => need(Level::Object, "w", Anon::No),
             Op::SetAccessControl | Op::SetAccessControlRecursive => need(Level::Object, "pow", Anon::No),
             Op::Undelete => need(Level::Object, "wd", Anon::No),
-            Op::Query => need(Level::Object, "re", Anon::No),
             Op::Unknown => need(Level::Service, "", Anon::No),
         }
     }
@@ -91,13 +88,19 @@ pub fn identify(req: &Request, has_fs: bool, has_path: bool) -> Op {
         };
     }
     if !has_path {
+        // `restype=container` is the Blob endpoint's: the `dfs` host refuses it (`InvalidQueryParameterValue`).
+        // Not so when the account is in the path (a pinned or standard `dfs` port): there the Data Lake SDKs cannot
+        // work out a Blob address and send their container calls (create, properties, delete) to this one, so they
+        // are taken as the filesystem operations they stand for.
+        if restype == Some("container") && !req.ctx.endpoint.path_style {
+            return Op::Unknown;
+        }
         return match (m, resource, comp) {
             ("PUT", _, None) => Op::CreateFileSystem,
             ("PATCH", _, None) => Op::SetFileSystemProperties,
             ("HEAD", _, None) => Op::GetFileSystemProperties,
             ("DELETE", _, None) => Op::DeleteFileSystem,
             ("GET", Some("filesystem"), None) => Op::ListPaths,
-            ("GET", _, Some("list")) if restype == Some("container") => Op::ListBlobs,
             _ => Op::Unknown,
         };
     }
@@ -122,7 +125,6 @@ pub fn identify(req: &Request, has_fs: bool, has_path: bool) -> Op {
             Some("setaccesscontrolrecursive") => Op::SetAccessControlRecursive,
             _ => Op::Unknown,
         },
-        "POST" if comp == Some("query") => Op::Query,
         "POST" => Op::LeasePath,
         "GET" => Op::ReadPath,
         "HEAD" => Op::GetPathProperties,

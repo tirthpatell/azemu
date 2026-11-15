@@ -235,10 +235,11 @@ func TestProperties_PartitionPropertiesOfAMissingPartitionIsAnError(t *testing.T
 	sendTo(t, p, &azeventhubs.EventDataBatchOptions{PartitionID: ptr("0")}, ev("x"))
 	_, err = p.GetPartitionProperties(ctxT(t, 10*time.Second), "99", nil)
 	if err == nil {
-		t.Fatal("partition 99 does not exist; the service answers with status 400 and a description naming the partition")
+		t.Fatal("partition 99 does not exist; the service answers with status 400 and a description of the partitions there are")
 	}
-	if !strings.Contains(err.Error(), "99") {
-		t.Fatalf("error does not name the partition: %v", err)
+	// Azure's text does not name the partition; it says which ones exist (a real namespace, November 2026)
+	if !strings.Contains(err.Error(), "status code 400") || !strings.Contains(err.Error(), "It should be between 0 and 3.") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

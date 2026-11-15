@@ -28,24 +28,46 @@ use crate::state::{Container, Doc};
 
 const DEFAULT_PAGE: usize = 100;
 
-/// What the SDK that sends this request can read in the answers of the partitions. The JavaScript SDK
-/// (query version 1.4, all query features) reads MIN and MAX as `{"min": .., "count": ..}`; the Python SDK
-/// (query version 1.0) reads the bare value. A client that says it is at least 1.4 and that it takes
-/// composite aggregates gets the first form, every other client the second.
+/// The query features the client says it supports (`x-ms-cosmos-supported-query-features`, comma separated). A request
+/// without the header supports none (a real account refuses an ORDER BY plan for it).
+fn declared_features(cx: &Cx) -> Vec<String> {
+    cx.header("x-ms-cosmos-supported-query-features")
+        .map(|f| f.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// What the SDK that sends this request can read in the answers of the partitions. A real account plans MIN and MAX with
+/// `{"item": .., "item2": {"min": .., "count": ..}}` for every client (the Python SDK reads `item`, the JavaScript and Java SDKs
+/// read `item2`); a client that lists `NonValueAggregate` gets a select list of aggregates planned as a group of one.
 fn plan_options(cx: &Cx) -> PlanOptions {
-    let version_ok = cx
-        .header("x-ms-cosmos-query-version")
-        .and_then(|v| {
-            let (major, minor) = v.trim().split_once('.')?;
-            Some((major.parse::<u32>().ok()?, minor.parse::<u32>().ok()?) >= (1, 4))
-        })
-        .unwrap_or(false);
-    let declares = |feature: &str| {
-        cx.header("x-ms-cosmos-supported-query-features")
-            .map(|f| f.split(',').any(|x| x.trim().eq_ignore_ascii_case(feature)))
-            .unwrap_or(false)
-    };
-    PlanOptions { composite_min_max: version_ok && declares("CompositeAggregate"), non_value_aggregate: declares("NonValueAggregate") }
+    let features = declared_features(cx);
+    let declares = |feature: &str| features.iter().any(|x| x.eq_ignore_ascii_case(feature));
+    PlanOptions { composite_min_max: true, non_value_aggregate: declares("NonValueAggregate") }
+}
+
+/// A cross partition query that Azure refuses before it plans anything.
+fn check_cross_partition(p: &Prepared) -> R<()> {
+    if p.query.has_composed_aggregate() {
+        return Err(CosmosError::bad_request("Compositions of aggregates and other expressions are not allowed."));
+    }
+    Ok(())
+}
+
+/// The plan request of a client that cannot read what the query needs is a 400 that names each missing feature.
+fn check_client_features(cx: &Cx, p: &Prepared) -> R<()> {
+    let declared = declared_features(cx);
+    let missing: Vec<&str> =
+        p.query.required_features().into_iter().filter(|f| !declared.iter().any(|d| d.eq_ignore_ascii_case(f))).collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let mut msg = String::from(
+        "Query contains 1 or more unsupported features. Upgrade your SDK to a version that does support the requested features:",
+    );
+    for f in missing {
+        msg.push_str(&format!("\r\nQuery contained {f}, which the calling client does not support."));
+    }
+    Err(CosmosError::plain(400, "BadRequest", msg))
 }
 
 pub fn plan_json(p: &Prepared, opts: PlanOptions) -> Value {
@@ -64,6 +86,8 @@ pub fn plan_json(p: &Prepared, opts: PlanOptions) -> Value {
 pub fn plan_request(cx: &Cx) -> R<Out> {
     let body = query::parse_body(cx)?;
     let p = query::prepare(&body)?;
+    check_cross_partition(&p)?;
+    check_client_features(cx, &p)?;
     Ok(Out::json(200, plan_json(&p, plan_options(cx))).header("x-ms-documentdb-query-metrics", "").charge(1.0))
 }
 
@@ -78,11 +102,28 @@ fn metrics(scanned: usize, out: usize, bytes: usize) -> String {
     )
 }
 
-/// Composite-index requirement: more than one ORDER BY field needs a composite index with
-/// the same paths in the same order (all directions equal or all inverted).
+/// ORDER BY is served from the index: the path has to be indexed, and several fields need a composite index with the same
+/// paths in the same order (all directions equal or all inverted). The texts are the ones a real account answers.
 fn check_order_by(c: &Container, p: &Prepared) -> R<()> {
     let info = p.query.info(&p.params);
+    if info.order_by_expressions.is_empty() {
+        return Ok(());
+    }
+    let policy = c.props.get("indexingPolicy");
+    if policy.and_then(|p| p.get("indexingMode")).and_then(Value::as_str).is_some_and(|m| m.eq_ignore_ascii_case("none")) {
+        return Err(CosmosError::bad_request(
+            "A query has been specified for a document collection with indexing mode 'none'. Consider adding allow scan header in the request.",
+        ));
+    }
     if info.order_by_expressions.len() < 2 {
+        let path = order_path(&info.order_by_expressions[0]);
+        if path == "/_rid" {
+            return Err(CosmosError::bad_request("Primary key order-by is not supported."));
+        }
+        // `id` and `_ts` are always in the index
+        if path.is_empty() || !(matches!(path.as_str(), "/id" | "/_ts") || path_is_indexed(policy, &path)) {
+            return Err(CosmosError::bad_request("The index path corresponding to the specified order-by item is excluded."));
+        }
         return Ok(());
     }
     let wanted: Vec<(String, bool)> = info
@@ -91,8 +132,7 @@ fn check_order_by(c: &Container, p: &Prepared) -> R<()> {
         .zip(info.order_by.iter())
         .map(|(e, o)| (order_path(e), matches!(o, azemu_cosmos_sql::SortOrder::Ascending)))
         .collect();
-    let comps =
-        c.props.get("indexingPolicy").and_then(|p| p.get("compositeIndexes")).and_then(Value::as_array).cloned().unwrap_or_default();
+    let comps = policy.and_then(|p| p.get("compositeIndexes")).and_then(Value::as_array).cloned().unwrap_or_default();
     for comp in &comps {
         let Some(items) = comp.as_array() else { continue };
         if items.len() != wanted.len() {
@@ -116,36 +156,50 @@ fn check_order_by(c: &Container, p: &Prepared) -> R<()> {
     Err(CosmosError::bad_request("The order by query does not have a corresponding composite index that it can be served from."))
 }
 
-/// Whether ORDER BY leaves out the documents that lack the sort property.
-///
-/// Azure serves ORDER BY from the index, and a document is only in the index of a path when
-/// the path is defined, unless the path is indexed explicitly. Microsoft Learn, "Indexing
-/// policies" (include/exclude strategy): "If an explicitly indexed path doesn't exist in an
-/// item, a value is added to the index to indicate that the path is undefined"; the same for
-/// composite indexes ("Composite indexes": "If a path in a composite index doesn't exist in an
-/// item ... a value is added to the index to indicate that the path is undefined"). So:
-/// * one ORDER BY field covered only by the default `/*` path: documents without it are left out;
-/// * one field with its own included path (`/field/?`): they are returned, undefined first;
-/// * several fields (a composite index is required, see `check_order_by`): returned.
-fn order_by_excludes_undefined(c: &Container, p: &Prepared) -> bool {
-    let info = p.query.info(&p.params);
-    if info.order_by_expressions.len() != 1 {
-        return false;
+/// The segments of an index path: `/a/b/?` is `a`, `b` and a `?`; `/*` is no segment and a `*`.
+fn index_rule(path: &str) -> (Vec<String>, bool) {
+    let mut segs: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(|s| s.replace('"', "")).collect();
+    let wildcard = !matches!(segs.last().map(String::as_str), Some("?"));
+    if matches!(segs.last().map(String::as_str), Some("?") | Some("*")) {
+        segs.pop();
     }
-    let path = order_path(&info.order_by_expressions[0]);
-    let explicit = c
-        .props
-        .get("indexingPolicy")
-        .and_then(|p| p.get("includedPaths"))
-        .and_then(Value::as_array)
-        .map(|inc| {
-            inc.iter().filter_map(|i| i.get("path").and_then(Value::as_str)).any(|ip| {
-                let ip = ip.replace('"', "");
-                ip == format!("{path}/?")
-            })
-        })
-        .unwrap_or(false);
-    !explicit
+    (segs, wildcard)
+}
+
+/// Whether the index covers `path` (like `/a/b`): the most specific of the included and excluded paths that matches it
+/// decides; `/a/?` covers `/a` only, `/a/*` covers `/a` and everything below it. Without a policy `/*` is included.
+fn path_is_indexed(policy: Option<&Value>, path: &str) -> bool {
+    let target: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    let listed = |key: &str| -> Vec<String> {
+        policy
+            .and_then(|p| p.get(key))
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(|i| i.get("path").and_then(Value::as_str)).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let mut included = listed("includedPaths");
+    if policy.and_then(|p| p.get("includedPaths")).is_none() {
+        included.push("/*".to_string());
+    }
+    let excluded = listed("excludedPaths");
+    let mut best: Option<(usize, bool, bool)> = None; // (segments, is_included, exact rule)
+    for (paths, is_included) in [(&included, true), (&excluded, false)] {
+        for rule in paths {
+            let (segs, wildcard) = index_rule(rule);
+            let matches = if wildcard { target.len() >= segs.len() && target[..segs.len()] == segs[..] } else { target == segs };
+            if !matches {
+                continue;
+            }
+            let better = match best {
+                None => true,
+                Some((n, inc, _)) => segs.len() > n || (segs.len() == n && inc && !is_included),
+            };
+            if better {
+                best = Some((segs.len(), is_included, !wildcard));
+            }
+        }
+    }
+    best.is_some_and(|(_, inc, _)| inc)
 }
 
 /// `c.a.b` or `c["a"]["b"]` to `/a/b`.
@@ -212,7 +266,14 @@ pub fn handle(cx: &Cx, c: &mut Container) -> R<Out> {
             ));
         }
         if p.query.needs_query_plan() {
-            let mut e = CosmosError::bad_request(
+            // what the gateway refuses before it asks the client for a plan
+            check_cross_partition(&p)?;
+            if p.query.has_select_list_aggregate() {
+                return Err(CosmosError::bad_request("Cross partition query only supports 'VALUE <AggregateFunc>' for aggregates."));
+            }
+            let mut e = CosmosError::plain(
+                400,
+                "BadRequest",
                 "The provided cross partition query can not be directly served by the gateway. This is a first chance (internal) exception that all newer clients will know how to handle gracefully. This exception is traced, but unless you see it bubble up as an exception (which only happens on older SDK clients), then you can safely ignore this message.",
             )
             .sub(1004);
@@ -222,7 +283,7 @@ pub fn handle(cx: &Cx, c: &mut Container) -> R<Out> {
     }
     check_order_by(c, &p)?;
     let sig = signature(cx, &c.meta.rid);
-    let tok = paging::decode(cx.header("x-ms-continuation"));
+    let tok = paging::decode(cx.header("x-ms-continuation"), &c.meta.rid)?;
     // A later page of a query whose result is kept needs no documents at all.
     let hit = match (tok.cache_id, &cx.cache) {
         (Some(id), Some(cache)) => cache.get(id, sig, cx.now),
@@ -235,12 +296,14 @@ pub fn handle(cx: &Cx, c: &mut Container) -> R<Out> {
             (Some(k), None) => c.partition(k).map(|(_, d)| d).collect(),
             _ => sel.docs(c),
         };
-        found.into_iter().map(|d| d.value.clone()).collect()
+        // documents come in the order they were created (the order of an index scan on Azure), which decides the rows
+        // with equal sort keys, the first appearance of a group or a DISTINCT value
+        let mut found: Vec<(u64, &Doc)> = found.into_iter().map(|d| (creation_number(&d.rid), d)).collect();
+        found.sort_by_key(|(n, _)| *n);
+        found.into_iter().map(|(_, d)| d.value.clone()).collect()
     };
     let scanned = docs.len();
-    let excludes_undefined = order_by_excludes_undefined(c, &p);
     Ok(Out::deferred(QueryJob {
-        excludes_undefined,
         p,
         docs,
         scanned,
@@ -255,6 +318,21 @@ pub fn handle(cx: &Cx, c: &mut Container) -> R<Out> {
         udfs,
         settings: cx.settings.clone().unwrap_or_default(),
     }))
+}
+
+/// The number a document got when it was created, read from its resource id (the counter sits in the first seven of the
+/// last eight bytes, little endian; `rid.rs`). 0 for an id that cannot be read.
+fn creation_number(rid: &str) -> u64 {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    let Ok(bytes) = STANDARD.decode(rid.replace('-', "/")) else { return 0 };
+    if bytes.len() < 16 {
+        return 0;
+    }
+    let mut eight = [0u8; 8];
+    eight.copy_from_slice(&bytes[bytes.len() - 8..]);
+    eight[7] = 0;
+    u64::from_le_bytes(eight)
 }
 
 /// Identifies a request for the page cache: the same container, path, query text, parameters and
@@ -276,7 +354,6 @@ fn signature(cx: &Cx, container_rid: &str) -> u64 {
 /// A query ready to run over a snapshot of the documents. It owns everything it needs, so it
 /// runs after the service lock is released (and off the async worker thread).
 pub struct QueryJob {
-    excludes_undefined: bool,
     p: Prepared,
     docs: Vec<Arc<Value>>,
     scanned: usize,
@@ -301,8 +378,7 @@ impl QueryJob {
     }
 
     pub fn run(self, cache: Option<&PageCache>) -> R<Out> {
-        let QueryJob { excludes_undefined, p, docs, scanned, hit, sig, size, token, rid, lsn, metrics: want_metrics, now, udfs, settings } =
-            self;
+        let QueryJob { p, docs, scanned, hit, sig, size, token, rid, lsn, metrics: want_metrics, now, udfs, settings } = self;
         let _running = cache.map(|c| c.running_guard());
         let (rows, scanned, cached_id) = match hit {
             Some((rows, scanned)) => (rows, scanned, token.cache_id),
@@ -311,7 +387,6 @@ impl QueryJob {
                     c.count_execution();
                 }
                 let mut opts = query::eval_options_at(now);
-                opts.order_by_excludes_undefined = excludes_undefined;
                 if !udfs.is_empty() {
                     opts.udf = Some(Arc::new(crate::udf::UdfSource::new(udfs, &settings, std::time::Instant::now() + settings.timeout)));
                 }
@@ -329,7 +404,7 @@ impl QueryJob {
                 (None, Some(c)) => c.put(sig, rows.clone(), scanned, now),
                 (None, None) => None,
             };
-            Some(paging::encode(&paging::Token { skip: end, cache_id: id, after: None }))
+            Some(paging::encode(&paging::Token { skip: end, cache_id: id, after: None }, &rid))
         } else {
             if let (Some(id), Some(c)) = (cached_id, cache) {
                 c.remove(id);

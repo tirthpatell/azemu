@@ -107,7 +107,7 @@ async fn patch_with_eleven_operations_is_400_and_ten_work() {
     };
     let r = patch(&h, "a", &ops(11)).await;
     assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("more than 10 operations"), "{}", r.text());
+    assert!(r.text().contains("The number of patch operations cannot exceed '10'."), "{}", r.text());
     // nothing was applied
     let doc = h.req("GET", "dbs/d/colls/c/docs/a", &PK, "").await.json();
     assert!(doc.get("f0").is_none());
@@ -125,13 +125,14 @@ async fn repeated_patches_cannot_build_a_document_deeper_than_the_limit() {
     }
     // adds a 100 levels deep value at the innermost object: total depth ~ 200
     let body = json!({"operations": [{"op": "add", "path": format!("{path}/b"), "value": nested(100)}]});
+    // Azure answers 500, not 400, when a patch makes the document too deep (checked in November 2026)
     let r = patch(&h, "a", &body).await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    assert!(r.text().contains("nested too deeply"), "{}", r.text());
+    assert_eq!(r.status, 500, "{}", r.text());
+    assert!(r.text().contains("An unknown error occurred while processing this request."), "{}", r.text());
     // ten operations each adding 100 levels, one after the other, in one request
     let ops: Vec<Value> = (0..10).map(|i| json!({"op": "add", "path": format!("{path}/b{i}"), "value": nested(30)})).collect();
     let r = patch(&h, "a", &json!({"operations": ops})).await;
-    assert_eq!(r.status, 400, "{}", r.text());
+    assert_eq!(r.status, 500, "{}", r.text());
     // the document is unchanged and still readable
     let r = h.req("GET", "dbs/d/colls/c/docs/a", &PK, "").await;
     assert_eq!(r.status, 200);
@@ -173,7 +174,7 @@ async fn patch_in_a_batch_obeys_the_same_limit() {
         )
         .await;
     assert_eq!(r.status, 207, "{}", r.text());
-    assert_eq!(r.json()[0]["statusCode"], 400);
+    assert_eq!(r.json()[0]["statusCode"], 500);
 }
 
 #[tokio::test]
@@ -188,7 +189,7 @@ async fn many_patches_in_a_row_stop_at_the_nesting_limit() {
         let body = json!({"operations": [{"op": "add", "path": format!("{path}/a"), "value": nested(100)}]});
         let r = patch(&h, "a", &body).await;
         if r.status != 200 {
-            assert_eq!(r.status, 400, "{}", r.text());
+            assert_eq!(r.status, 500, "{}", r.text());
             break;
         }
         accepted += 1;

@@ -6,6 +6,8 @@ import pytest
 import kutil
 from kutil import consume, consumer, produce_all, producer
 
+pytestmark = pytest.mark.emulator_only  # a second emulator process with its own port and settings
+
 
 @pytest.fixture
 def pinned(emu):

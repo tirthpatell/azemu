@@ -113,8 +113,11 @@ fn parse_entry(s: &str, with_perm: bool) -> Result<Entry, String> {
 /// assignments and ACL entries?" in the Data Lake Storage access control article.
 pub const MAX_ENTRIES: usize = 32;
 
+/// The start of the text of the error for a list that is too long (`errors::acl_error` tells the two kinds of refusal apart).
+pub const TOO_MANY: &str = "The ACL has more than";
+
 fn too_many(kind: &str) -> String {
-    format!("The ACL has more than {MAX_ENTRIES} {kind} entries, the most a path can have.")
+    format!("{TOO_MANY} {MAX_ENTRIES} {kind} entries, the most a path can have.")
 }
 
 /// Refuse a list that has more than 32 access entries or more than 32 default entries.

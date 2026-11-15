@@ -89,6 +89,26 @@ func setIMDSEnv(t *testing.T) {
 
 func authority() string { return fmt.Sprintf("https://login.localhost:%d", emu.E.Port) }
 
+// rootAuthority is the gateway itself, no path and no `login.` name: `https://localhost:<port>`. The Entra paths answer at
+// the root of a host that names no service.
+func rootAuthority() string { return fmt.Sprintf("https://localhost:%d", emu.E.Port) }
+
+func rootOpts(c *http.Client) azcore.ClientOptions {
+	return azcore.ClientOptions{Transport: c, Cloud: cloud.Configuration{ActiveDirectoryAuthorityHost: rootAuthority()}}
+}
+
+// oneBlobCall creates a container with the credential: the token is used on a Blob request.
+func oneBlobCall(t *testing.T, cred azcore.TokenCredential, hc *http.Client) {
+	t.Helper()
+	bc, err := azblob.NewClient(emu.E.HTTPS("blob", emu.Name("rootid")), cred, &azblob.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: hc}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bc.CreateContainer(context.Background(), emu.Name("rootc"), nil); err != nil {
+		t.Fatalf("blob create container with a token from the root authority: %v", err)
+	}
+}
+
 func secretOpts(c *http.Client) azcore.ClientOptions {
 	return azcore.ClientOptions{Transport: c, Cloud: cloud.Configuration{ActiveDirectoryAuthorityHost: authority()}}
 }
@@ -351,6 +371,62 @@ func TestWorkloadIdentityCredential_ReadsTheFederatedTokenFile(t *testing.T) {
 	}
 	if claims(t, tok.Token)["appid"] != client {
 		t.Fatal("wrong appid")
+	}
+}
+
+func TestClientSecretCredential_AuthorityAtTheRootOfTheGateway(t *testing.T) {
+	hc, _ := newTransport()
+	cred, err := azidentity.NewClientSecretCredential(tenant, client, "any-secret", &azidentity.ClientSecretCredentialOptions{
+		ClientOptions: rootOpts(hc), DisableInstanceDiscovery: true, AdditionallyAllowedTenants: []string{"*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := cred.GetToken(context.Background(), policy.TokenRequestOptions{Scopes: []string{"https://storage.azure.com/.default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := claims(t, tok.Token); c["appid"] != client || c["tid"] != tenant {
+		t.Fatalf("claims %v", c)
+	}
+	oneBlobCall(t, cred, hc)
+}
+
+func TestWorkloadIdentityCredential_AuthorityAtTheRootOfTheGateway(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "token")
+	os.WriteFile(f, []byte("not-a-real-kubernetes-token"), 0o600)
+	hc, _ := newTransport()
+	cred, err := azidentity.NewWorkloadIdentityCredential(&azidentity.WorkloadIdentityCredentialOptions{
+		ClientOptions: rootOpts(hc), TenantID: tenant, ClientID: client, TokenFilePath: f, DisableInstanceDiscovery: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := cred.GetToken(context.Background(), policy.TokenRequestOptions{Scopes: []string{"https://storage.azure.com/.default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := claims(t, tok.Token); c["appid"] != client || c["tid"] != tenant {
+		t.Fatalf("claims %v", c)
+	}
+	oneBlobCall(t, cred, hc)
+}
+
+func TestEnvironmentCredential_AuthorityHostAtTheRootOfTheGateway(t *testing.T) {
+	// what a container that has AZURE_AUTHORITY_HOST=https://azemu:4577 in its environment does, with the name localhost
+	t.Setenv("AZURE_TENANT_ID", tenant)
+	t.Setenv("AZURE_CLIENT_ID", client)
+	t.Setenv("AZURE_CLIENT_SECRET", "s")
+	t.Setenv("AZURE_AUTHORITY_HOST", rootAuthority())
+	hc, _ := newTransport()
+	cred, err := azidentity.NewEnvironmentCredential(&azidentity.EnvironmentCredentialOptions{ClientOptions: azcore.ClientOptions{Transport: hc}, DisableInstanceDiscovery: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := cred.GetToken(context.Background(), policy.TokenRequestOptions{Scopes: []string{"https://storage.azure.com/.default"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims(t, tok.Token)["tid"] != tenant {
+		t.Fatal("wrong tenant")
 	}
 }
 

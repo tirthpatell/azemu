@@ -18,9 +18,21 @@ pub(crate) fn compare(op: BinaryOp, a: &Val, b: &Val) -> Val {
             cmp_num(*x, *y)
         }
         (Val::Arr(_), Val::Arr(_)) | (Val::Obj(_), Val::Obj(_)) => {
-            return if op == Eq { Val::Bool(values_equal(a, b)) } else { Val::Undefined };
+            return match op {
+                Eq => Val::Bool(values_equal(a, b)),
+                Ne => Val::Bool(!values_equal(a, b)),
+                _ => Val::Undefined,
+            };
         }
-        _ => return Val::Undefined,
+        // two values of different types are never equal (`=` is false, `!=` is true), and have no order (undefined);
+        // checked on a real account, November 2026
+        _ => {
+            return match op {
+                Eq => Val::Bool(false),
+                Ne => Val::Bool(true),
+                _ => Val::Undefined,
+            };
+        }
     };
     Val::Bool(match op {
         Eq => ord == Ordering::Equal,

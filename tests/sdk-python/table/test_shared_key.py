@@ -294,21 +294,24 @@ def test_signature_for_one_verb_or_path_does_not_work_for_another(emu, table_nam
     assert r.status_code == 403
 
 
-def test_placeholder_signature_is_not_checked(emu):
-    # recordings and replay tools carry short placeholders such as "Sanitized"; they pass (as in Blob and Queue)
+def test_placeholder_signature_is_refused(emu):
+    # recordings and replay tools carry placeholders such as "Sanitized"; Azure answers 400 for a signature that is not
+    # base64 (tried in November 2026) and so does the emulator, unless AZEMU_LOOSE_AUTH=1 is set (below)
     r = requests.get(
         f"http://127.0.0.1:{emu.port}/Tables",
         headers={"Host": f"{DEV_ACCOUNT}.table.core.localhost:{emu.port}", "Authorization": f"SharedKey {DEV_ACCOUNT}:Sanitized",
                  "Accept": "application/json;odata=nometadata", "x-ms-date": http_date()},
         timeout=10,
     )
-    assert r.status_code == 200
+    assert r.status_code == 400
+    assert r.json()["odata.error"]["code"] == "InvalidAuthenticationInfo"
 
 
 def test_no_credentials_is_still_refused(emu):
     r = requests.get(f"http://127.0.0.1:{emu.port}/Tables",
                      headers={"Host": f"{DEV_ACCOUNT}.table.core.localhost:{emu.port}"}, timeout=10)
-    assert r.status_code in (401, 403)
+    assert r.status_code == 401
+    assert r.json()["odata.error"]["code"] == "NoAuthenticationInformation"
 
 
 # -- AZEMU_LOOSE_AUTH=1 ------------------------------------------------------------------------
@@ -338,6 +341,12 @@ def test_loose_auth_switch_turns_the_check_off(emu, uniq):
                 t = svc.create_table(name)
                 t.create_entity({"PartitionKey": "p", "RowKey": "r"})
                 assert t.get_entity("p", "r")["RowKey"] == "r"
+            # a placeholder signature and an old date (recorded traffic) pass too
+            r = requests.get(f"http://127.0.0.1:{port}/Tables",
+                             headers={"Host": f"{DEV_ACCOUNT}.table.core.localhost:{port}", "Accept": "application/json;odata=nometadata",
+                                      "Authorization": f"SharedKey {DEV_ACCOUNT}:replay", "x-ms-date": "Fri, 27 Mar 2020 01:00:51 GMT"},
+                             timeout=10)
+            assert r.status_code == 200
         finally:
             proc.terminate()
             proc.wait(timeout=5)

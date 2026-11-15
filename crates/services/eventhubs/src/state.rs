@@ -208,8 +208,12 @@ impl State {
 
     /// Register a receiver. A receiver with an epoch takes over every receiver with a lower or
     /// equal epoch (and every one without); a lower epoch, or none, cannot attach next to it.
-    pub fn register_receiver(&mut self, ns: &str, hub: &str, reg: RecvReg) -> Result<(), EhError> {
+    ///
+    /// The texts are those of a real namespace (November 2026). It names a receiver `nil` when the client gave no name,
+    /// which is what the Python SDK did; here every receiver is `nil`. `hub_name` is the name the event hub was made with.
+    pub fn register_receiver(&mut self, ns: &str, hub: &str, hub_name: &str, reg: RecvReg) -> Result<(), EhError> {
         let k = (self.resolve(ns), key(hub));
+        let tracker = format!("{}:eventhub:{hub_name}~{}|{}", k.0, reg.pid, reg.cg);
         let list = self.receivers.entry(k).or_default();
         let same = |r: &RecvReg| r.pid == reg.pid && r.cg == reg.cg;
         let blocker =
@@ -217,22 +221,21 @@ impl State {
         if let Some(theirs) = blocker {
             return Err(EhError::stolen(match reg.epoch {
                 Some(mine) => format!(
-                    "Receiver with a higher epoch of '{theirs}' already exists. Receiver with epoch {mine} cannot be created. Make sure you are creating receiver with increasing epoch value to ensure connectivity, or ensure all old epoch receivers are closed or disconnected. TrackingId:{}",
-                    crate::errors::tracking_id()
+                    "Receiver 'nil' with a higher epoch '{theirs}' already exists. Receiver 'nil' with epoch {mine} cannot be created. Make sure you are creating receiver with increasing epoch value to ensure connectivity, or ensure all old epoch receivers are closed or disconnected."
                 ),
                 None => format!(
-                    "A receiver with epoch '{theirs}' already exists on this partition and consumer group, so a receiver without an epoch cannot be created. TrackingId:{}",
-                    crate::errors::tracking_id()
+                    "At least one receiver for the endpoint is created with epoch of '{theirs}', and so non-epoch receiver is not allowed. Either reconnect with a higher epoch, or make sure all epoch receivers are closed or disconnected."
                 ),
             }));
         }
+        let connected = list.iter().filter(|r| same(r)).count();
         if reg.epoch.is_none() && list.iter().filter(|r| same(r) && r.epoch.is_none()).count() >= MAX_NON_EPOCH_RECEIVERS {
             return Err(EhError::new(
                 azemu_amqp::condition::RESOURCE_LIMIT_EXCEEDED,
                 403,
                 format!(
-                    "Exceeded the maximum number of allowed receivers per partition in a consumer group which is {MAX_NON_EPOCH_RECEIVERS}. Close a receiver, or use a receiver with an epoch (owner level). TrackingId:{}",
-                    crate::errors::tracking_id()
+                    "Exceeded the maximum number of allowed receivers per partition in a consumer group which is {MAX_NON_EPOCH_RECEIVERS}. List of connected receivers - {}.",
+                    vec!["nil"; connected].join(", ")
                 ),
             ));
         }
@@ -241,9 +244,10 @@ impl State {
                 if same(r) {
                     r.handle.detach(Some(
                         EhError::stolen(format!(
-                            "New receiver with higher epoch of '{mine}' is created hence current receiver with epoch '{}' is getting disconnected. If you are recreating the receiver, make sure a higher epoch is used. TrackingId:{}",
+                            "New receiver 'nil' with higher epoch of '{mine}' is created hence current receiver 'nil' with epoch '{}' is getting disconnected. If you are recreating the receiver, make sure a higher epoch is used. TrackingId:{}, SystemTracker:{tracker}, Timestamp:{}",
                             r.epoch.map(|e| e.to_string()).unwrap_or_else(|| "none".into()),
-                            crate::errors::tracking_id()
+                            crate::errors::tracking_id(),
+                            crate::errors::timestamp_now()
                         ))
                         .to_amqp(),
                     ));
@@ -298,12 +302,11 @@ impl Shared {
     }
 
     /// From the environment, through `azemu_core::settings` (read here, when the service is built):
-    /// `AZEMU_EVENTHUBS_AUTOCREATE` (off as on Azure; on with `AZEMU_LENIENT=1`: event hubs and consumer groups, over
-    /// AMQP and Kafka alike), `AZEMU_EVENTHUBS_CONFIG` (path of a Config.json) and
+    /// `AZEMU_EVENTHUBS_AUTOCREATE` (off as on Azure; on with `AZEMU_LENIENT=1`: event hubs, over AMQP), `AZEMU_EVENTHUBS_CONFIG` (path of a Config.json) and
     /// `AZEMU_KAFKA_INITIAL_REBALANCE_DELAY_MS`.
     pub fn from_env() -> Arc<Shared> {
         use azemu_core::settings;
-        settings::describe("AZEMU_EVENTHUBS_AUTOCREATE", "off (on with `AZEMU_LENIENT`)", "An event hub or consumer group that is sent to or read from but was never created comes into being (over AMQP and over the Kafka endpoint), instead of the not-found answer Azure gives.");
+        settings::describe("AZEMU_EVENTHUBS_AUTOCREATE", "off (on with `AZEMU_LENIENT`)", "An event hub that an AMQP client sends to or reads from but was never created comes into being, instead of the not-found answer Azure gives. (The Kafka endpoint makes the event hub for a producer or an admin client either way, as Azure does.)");
         settings::describe(
             "AZEMU_EVENTHUBS_CONFIG",
             "none",

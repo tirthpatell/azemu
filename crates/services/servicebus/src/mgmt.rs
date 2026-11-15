@@ -49,6 +49,7 @@ fn decode_scheduled(body: &[(Value, Value)], now: i64) -> Result<Vec<Incoming>, 
         let bin =
             item.map_get("message").and_then(|v| v.as_binary()).ok_or_else(|| SbError::argument("schedule-message: message missing"))?;
         let m = Message::decode(bin).map_err(|e| SbError::argument(e.to_string()))?;
+        check_time_to_live(&m)?;
         let mut inc = Incoming::new(m, bin.len());
         // an immediate schedule time still counts as scheduled for the sequence number
         if inc.scheduled_ms.is_none() {
@@ -106,7 +107,8 @@ impl SbConn {
         let (sk, dk) = if cbs { ("status-code", "status-description") } else { ("statusCode", "statusDescription") };
         let mut props = vec![(Value::str(sk), Value::Int(resp.status)), (Value::str(dk), Value::String(resp.description))];
         if let Some(c) = resp.condition {
-            props.push((Value::str("errorCondition"), Value::Symbol(c.to_string())));
+            // `$cbs` answers name it `error-condition`, `$management` answers `errorCondition`
+            props.push((Value::str(if cbs { "error-condition" } else { "errorCondition" }), Value::Symbol(c.to_string())));
         }
         let msg = Message {
             properties: Some(Properties { correlation_id: correlation, ..Default::default() }),
@@ -124,7 +126,11 @@ impl SbConn {
     fn cbs_request(&self, req: &Message) -> Response {
         let op = app_prop(req, "operation").and_then(|v| v.as_str()).unwrap_or("");
         if op.eq_ignore_ascii_case("put-token") {
-            // Every credential is accepted: SAS tokens and JWTs alike.
+            // Every credential is accepted: SAS tokens and JWTs alike. What is checked is the entity the token is for (its address is the
+            // `name` of the request): Azure refuses the token of an entity that does not exist, so a client never gets as far as attaching.
+            if let Some(e) = self.missing_entity_for_token(app_prop(req, "name").and_then(|v| v.as_str()).unwrap_or("")) {
+                return Response::err(e);
+            }
             Response { status: 202, description: "Accepted".into(), condition: None, body: None }
         } else {
             Response::err(SbError::new(
@@ -133,6 +139,37 @@ impl SbConn {
                 format!("servicebus: $cbs operation '{op}' is not implemented by azemu"),
             ))
         }
+    }
+
+    /// The error for a `put-token` for the address of an entity that does not exist: a queue or topic that is not there, or a subscription
+    /// whose topic is not there (a missing subscription of an existing topic gets its token, and the attach is refused instead). Nothing is
+    /// refused when auto-creation is on: the attach makes the entity.
+    fn missing_entity_for_token(&self, audience: &str) -> Option<SbError> {
+        if self.shared.autocreate {
+            return None;
+        }
+        let addr = match Address::parse(audience)? {
+            Address::Management(path) => Address::parse(&path)?,
+            a => a,
+        };
+        let ns = self.ns.clone();
+        let mut st = self.shared.state.lock();
+        let nsr = st.ns(&ns);
+        let exists = match &addr {
+            Address::Queue { name, .. } | Address::Topic { name } => nsr.queue(name).is_some() || nsr.topic(name).is_some(),
+            Address::Subscription { topic, .. } => nsr.topic(topic).is_some(),
+            _ => true,
+        };
+        if exists {
+            return None;
+        }
+        let path = audience
+            .trim()
+            .find("://")
+            .map(|i| &audience.trim()[i + 3..])
+            .and_then(|r| r.find('/').map(|j| &r[j + 1..]))
+            .unwrap_or(audience.trim());
+        Some(SbError::entity_address_not_found(path.trim_matches('/'), &ns))
     }
 
     fn resolve_target(&self, st: &mut State, path: &str) -> Result<Target, SbError> {
@@ -252,16 +289,7 @@ impl SbConn {
         let now = std::time::Instant::now();
         self.txns.check_open(txn, now)?;
         let seqs = long_list(get(body, "sequence-numbers"));
-        for s in &seqs {
-            let nsr = st.ns(&ns);
-            let found = match target {
-                Target::Topic(name) => nsr.topic(name).map(|t| t.scheduled.get(*s as u64).is_some()).unwrap_or(false),
-                Target::Core(a) => nsr.core(a).and_then(|c| c.main.get(*s as u64)).map(|m| m.state == MsgState::Scheduled).unwrap_or(false),
-            };
-            if !found {
-                return Err(SbError::message_not_found(*s));
-            }
-        }
+        check_cancel(st, &ns, target, &seqs)?;
         let weight = seqs.len().max(1);
         self.txns.add(txn, crate::txn::TxOp::Cancel { target: target.clone(), seqs }, weight, now)?;
         Ok(Response::ok(None))
@@ -332,6 +360,9 @@ impl SbConn {
                 let from = get(body, "from-sequence-number").and_then(|v| v.as_i64()).unwrap_or(0).max(0) as u64;
                 let count = get(body, "message-count").and_then(|v| v.as_i64()).unwrap_or(1).clamp(0, MAX_PEEK_COUNT) as usize;
                 let core = core_of(st, &ns, addr)?;
+                if matches!(core.settings.status.as_str(), "Disabled" | "ReceiveDisabled") {
+                    return Err(SbError::entity_disabled(&core.ns, &core.path));
+                }
                 let msgs = core.peek_limited(sq, from, count, session_id.as_deref(), now, MAX_PEEK_BYTES);
                 if msgs.is_empty() {
                     return Ok(Response::no_content("No Content"));
@@ -454,26 +485,36 @@ fn op_cancel(st: &mut State, ns: &str, target: &Target, body: &[(Value, Value)])
     Ok(Response::ok(None))
 }
 
-/// Cancel scheduled messages (a plain `cancel-scheduled-message`, or the commit of one made in a transaction).
+/// Can these scheduled messages be cancelled? Azure refuses the whole request when one sequence number was never a scheduled message.
+pub(crate) fn check_cancel(st: &mut State, ns: &str, target: &Target, seqs: &[i64]) -> Result<(), SbError> {
+    match target {
+        Target::Topic(name) => {
+            let t = st.ns(ns).topic(name).ok_or_else(|| SbError::entity_not_found(name, ns))?;
+            match seqs.iter().find(|s| !(**s > 0 && (t.scheduled.get(**s as u64).is_some() || t.cancelled_sched.contains(&(**s as u64))))) {
+                Some(s) => Err(SbError::scheduled_message_unknown(*s)),
+                None => Ok(()),
+            }
+        }
+        Target::Core(addr) => core_of(st, ns, addr)?.check_cancel(seqs),
+    }
+}
+
+/// Cancel scheduled messages (a plain `cancel-scheduled-message`, or the commit of one made in a transaction). A message that is not
+/// waiting any more (it arrived, or was cancelled before) is left alone and is no error.
 pub(crate) fn op_cancel_scheduled(st: &mut State, ns: &str, target: &Target, seqs: &[i64]) -> Result<(), SbError> {
+    check_cancel(st, ns, target, seqs)?;
     match target {
         Target::Topic(name) => {
             let t = st.ns(ns).topic_mut(name).ok_or_else(|| SbError::entity_not_found(name, ns))?;
             for s in seqs {
-                match t.scheduled.get(*s as u64) {
-                    Some(_) => {
-                        t.scheduled.remove(*s as u64);
-                    }
-                    None => return Err(SbError::message_not_found(*s)),
+                t.scheduled.remove(*s as u64);
+                if t.cancelled_sched.len() >= 100_000 {
+                    t.cancelled_sched.clear();
                 }
+                t.cancelled_sched.insert(*s as u64);
             }
         }
-        Target::Core(addr) => {
-            let core = core_of(st, ns, addr)?;
-            for s in seqs {
-                core.cancel_scheduled(*s as u64)?;
-            }
-        }
+        Target::Core(addr) => core_of(st, ns, addr)?.cancel_scheduled(seqs)?,
     }
     Ok(())
 }

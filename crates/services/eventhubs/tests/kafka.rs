@@ -175,10 +175,14 @@ async fn api_versions_lists_what_is_served_and_nothing_else() {
             r.structs("ApiKeys").map(|a| (a.i16("ApiKey"), a.i16("MinVersion"), a.i16("MaxVersion"))).collect();
         assert_eq!(keys.len(), api::SERVED.len());
         for a in api::SERVED {
-            assert!(keys.contains(&(a.key, a.min, a.max)), "{} missing", a.name);
+            assert!(keys.contains(&(a.key, a.min, api::advertised_max(a))), "{} missing", a.name);
         }
     }
-    // not offered: transactions, ACLs, DeleteRecords, offset for leader epoch, ...
+    // the maximum of four APIs is what a real namespace offers (November 2026), below what the library can decode
+    let max_of = |key: i16| api::SERVED.iter().find(|a| a.key == key).map(api::advertised_max).unwrap();
+    assert_eq!([api::PRODUCE, api::API_VERSIONS, api::DESCRIBE_CONFIGS, api::CREATE_PARTITIONS].map(max_of), [7, 3, 2, 1]);
+    // not offered: transactions, ACLs, DeleteRecords, offset for leader epoch, ... (a real namespace offers DeleteRecords, DeleteGroups,
+    // OffsetForLeaderEpoch, AlterConfigs, IncrementalAlterConfigs and OffsetDelete as well; the emulator does not build them)
     let served: Vec<i16> = api::SERVED.iter().map(|a| a.key).collect();
     for key in [21, 23, 24, 25, 26, 27, 28, 29, 30, 31, 33, 34, 38, 42, 44, 47, 60] {
         assert!(!served.contains(&key), "api key {key} must not be offered");
@@ -229,7 +233,7 @@ async fn the_advertised_host_and_port_can_be_set() {
 }
 
 #[tokio::test]
-async fn metadata_creates_a_missing_topic_only_when_auto_creation_is_on_and_allowed() {
+async fn metadata_creates_a_missing_topic_when_the_request_allows_it_whatever_the_setting() {
     let env = env().await;
     let mut k = K::connect(&env).await;
     let r = metadata(&mut k, Some(&["made"]), false).await;
@@ -237,8 +241,11 @@ async fn metadata_creates_a_missing_topic_only_when_auto_creation_is_on_and_allo
     assert!(env.shared.state.lock().hub("default", "made").is_none());
     let r = metadata(&mut k, Some(&["made"]), true).await;
     let t = r.structs("Topics").next().unwrap();
-    assert_eq!((t.i16("ErrorCode"), t.structs("Partitions").count()), (0, 4));
-    assert!(env.shared.state.lock().hub("default", "made").is_some());
+    // one partition, no replicas listed, 7 days (a real namespace, November 2026)
+    assert_eq!((t.i16("ErrorCode"), t.structs("Partitions").count()), (0, 1));
+    let part = t.structs("Partitions").next().unwrap();
+    assert!(part.items("ReplicaNodes").is_empty() && part.items("IsrNodes").is_empty());
+    assert_eq!(env.shared.state.lock().hub("default", "made").unwrap().retention_ms, 7 * 24 * 3_600_000);
     // all topics
     let r = metadata(&mut k, None, false).await;
     assert_eq!(r.structs("Topics").count(), 1);
@@ -246,11 +253,15 @@ async fn metadata_creates_a_missing_topic_only_when_auto_creation_is_on_and_allo
     let r = metadata(&mut k, Some(&["bad name"]), true).await;
     assert_eq!(r.structs("Topics").next().unwrap().i16("ErrorCode"), err::INVALID_TOPIC_EXCEPTION);
 
+    // AZEMU_EVENTHUBS_AUTOCREATE is about AMQP: Azure's Kafka endpoint makes the event hub for a producer or an admin client either way
     let off = env_with(Shared::new(false, None), KafkaConfig::default()).await;
     let mut k = K::connect(&off).await;
     let r = metadata(&mut k, Some(&["nope"]), true).await;
+    assert_eq!(r.structs("Topics").next().unwrap().i16("ErrorCode"), 0);
+    assert!(off.shared.state.lock().hub("default", "nope").is_some());
+    let r = metadata(&mut k, Some(&["nope2"]), false).await;
     assert_eq!(r.structs("Topics").next().unwrap().i16("ErrorCode"), err::UNKNOWN_TOPIC_OR_PARTITION);
-    assert!(off.shared.state.lock().hub("default", "nope").is_none());
+    assert!(off.shared.state.lock().hub("default", "nope2").is_none());
 }
 
 #[tokio::test]
@@ -282,8 +293,9 @@ async fn produce_then_fetch_returns_the_records_with_offsets_equal_to_sequence_n
     assert_eq!(fetch(&mut k, "t", 1, 2, 0, 1).await.3.len(), 2);
     let (e, high, _, recs) = fetch(&mut k, "t", 1, 4, 0, 1).await;
     assert_eq!((e, high, recs.len()), (0, 4, 0));
-    // beyond the end, and a partition that does not exist
-    assert_eq!(fetch(&mut k, "t", 1, 5, 0, 1).await.0, err::OFFSET_OUT_OF_RANGE);
+    // beyond the end Azure answers with no error and no records (November 2026); a partition that does not exist
+    let (e, high, _, recs) = fetch(&mut k, "t", 1, 5, 0, 1).await;
+    assert_eq!((e, high, recs.len()), (0, 4, 0));
     assert_eq!(fetch(&mut k, "t", 7, 0, 0, 1).await.0, err::UNKNOWN_TOPIC_OR_PARTITION);
     assert_eq!(fetch(&mut k, "missing", 0, 0, 0, 1).await.0, err::UNKNOWN_TOPIC_OR_PARTITION);
     // produce to a topic or partition that does not exist
@@ -469,7 +481,9 @@ async fn list_offsets_earliest_latest_and_by_time() {
     assert_eq!(one(&k.call(api::LIST_OFFSETS, 5, list(-1)).await).1, 2);
     assert_eq!(one(&k.call(api::LIST_OFFSETS, 5, list(-2)).await).1, 0);
     assert_eq!(one(&k.call(api::LIST_OFFSETS, 5, list(before)).await).1, 0);
-    assert_eq!(one(&k.call(api::LIST_OFFSETS, 5, list(now_ms() + 3_600_000)).await), (0, -1, -1));
+    // a time after the last event gives the end offset, not -1 (a real namespace, November 2026)
+    let later = now_ms() + 3_600_000;
+    assert_eq!(one(&k.call(api::LIST_OFFSETS, 5, list(later)).await), (0, 2, later));
 }
 
 #[tokio::test]
@@ -619,8 +633,10 @@ async fn one_member_joins_syncs_heartbeats_and_leaves() {
         )
         .await;
     assert_eq!(lv.structs("Members").next().unwrap().i16("ErrorCode"), 0);
+    // Azure forgets a group when its last member has left: not listed, `Dead` (a real namespace, November 2026)
     let d = k.call(api::DESCRIBE_GROUPS, 4, Struct::new().with("Groups", vec!["g1".to_string()])).await;
-    assert_eq!(d.structs("Groups").next().unwrap().str("GroupState"), Some("Empty"));
+    assert_eq!(d.structs("Groups").next().unwrap().str("GroupState"), Some("Dead"));
+    assert_eq!(k.call(api::LIST_GROUPS, 3, Struct::new()).await.structs("Groups").count(), 0);
 }
 
 #[tokio::test]
@@ -756,19 +772,25 @@ async fn offsets_commit_fetch_and_survive_a_restart_of_the_consumer() {
         .map(|p| (p.i32("PartitionIndex"), p.i64("CommittedOffset"), p.str("Metadata").map(str::to_string)))
         .collect();
     assert_eq!(ps, vec![(0, 5, Some("meta".to_string())), (1, -1, Some(String::new()))]);
-    // every committed partition of the group
+    // a group that has no member is forgotten by the request for every partition (a real namespace, November 2026); the named partitions above still answered
     let r = k.call(api::OFFSET_FETCH, 6, fetch_offsets(Value::Null)).await;
-    assert_eq!(r.structs("Topics").next().unwrap().structs("Partitions").count(), 1);
+    assert_eq!(r.structs("Topics").count(), 0);
     // a member commit needs the member and the generation
     let (mut kk, j) = join_with_id(&env, "g4", &["range"]).await;
     let m = j.str("MemberId").unwrap().to_string();
     assert_eq!(code(&kk.call(api::OFFSET_COMMIT, 7, commit(1, &m, "t", 1, 3, None)).await), 0);
     assert_eq!(code(&kk.call(api::OFFSET_COMMIT, 7, commit(5, &m, "t", 1, 4, None)).await), err::ILLEGAL_GENERATION);
     assert_eq!(code(&kk.call(api::OFFSET_COMMIT, 7, commit(1, "ghost", "t", 1, 4, None)).await), err::UNKNOWN_MEMBER_ID);
-    // the member leaves: the offsets stay
-    kk.call(api::LEAVE_GROUP, 2, Struct::new().with("GroupId", "g4").with("MemberId", m)).await;
+    // while the group has a member, every committed partition is listed
     let r = k.call(api::OFFSET_FETCH, 6, fetch_offsets(Value::Null)).await;
     assert_eq!(r.structs("Topics").next().unwrap().structs("Partitions").count(), 2);
+    // the member leaves: the offsets stay for a request that names the partitions, the group is not listed any more
+    kk.call(api::LEAVE_GROUP, 2, Struct::new().with("GroupId", "g4").with("MemberId", m)).await;
+    assert_eq!(k.call(api::OFFSET_FETCH, 6, fetch_offsets(Value::Null)).await.structs("Topics").count(), 0);
+    let named = Value::Array(vec![Value::Struct(Struct::new().with("Name", "t").with("PartitionIndexes", vec![0i32, 1]))]);
+    let r = k.call(api::OFFSET_FETCH, 6, fetch_offsets(named)).await;
+    let committed: Vec<i64> = r.structs("Topics").next().unwrap().structs("Partitions").map(|p| p.i64("CommittedOffset")).collect();
+    assert_eq!(committed, vec![5, 3]);
     // deleting the topic drops its offsets
     k.call(api::DELETE_TOPICS, 4, Struct::new().with("TopicNames", vec!["t".to_string()]).with("TimeoutMs", 1000)).await;
     let r = k.call(api::OFFSET_FETCH, 6, fetch_offsets(Value::Null)).await;
@@ -865,15 +887,32 @@ async fn create_and_delete_topics_and_describe_configs() {
     assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create("compact", 1, vec![("cleanup.policy", "compact")])).await), err::INVALID_CONFIG);
     assert!(env.shared.state.lock().hub("default", "compact").is_none());
     assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create("zero", 0, vec![])).await), err::INVALID_PARTITIONS);
-    assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create("bad/name", 1, vec![])).await), err::INVALID_TOPIC_EXCEPTION);
+    // a name Event Hubs does not allow is INVALID_CONFIG on Azure (a space, 300 characters, `..`, a letter outside ASCII)
+    for bad in ["bad/name", "with space", "..", "zürich"] {
+        assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create(bad, 1, vec![])).await), err::INVALID_CONFIG, "{bad}");
+    }
+    assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create(&"a".repeat(300), 1, vec![])).await), err::INVALID_CONFIG);
+    // no count and no retention: one partition and 7 days
     assert_eq!(code(&k.call(api::CREATE_TOPICS, 5, create("dflt", -1, vec![])).await), 0);
-    assert_eq!(env.shared.state.lock().hub("default", "dflt").unwrap().partitions.len(), 4);
+    {
+        let st = env.shared.state.lock();
+        let h = st.hub("default", "dflt").unwrap();
+        assert_eq!((h.partitions.len(), h.retention_ms), (1, 7 * 24 * 3_600_000));
+    }
+    // a setting that is not known, and max.message.bytes, are accepted and ignored
+    assert_eq!(
+        code(&k.call(api::CREATE_TOPICS, 5, create("odd", 2, vec![("no.such.config", "1"), ("max.message.bytes", "100000")])).await),
+        0
+    );
+    let existing = k.call(api::CREATE_TOPICS, 5, create("orders", 3, vec![])).await;
+    let msg = existing.structs("Topics").next().unwrap().str("ErrorMessage").unwrap().to_string();
+    assert_eq!(msg, "The messaging entity 'orders' already exists. To know more visit https://aka.ms/sbResourceMgrExceptions. ");
     assert_eq!(code(&k.call(api::CREATE_TOPICS, 2, create("older", 1, vec![])).await), 0);
 
     let d = k
         .call(
             api::DESCRIBE_CONFIGS,
-            4,
+            2,
             Struct::new().with(
                 "Resources",
                 vec![
@@ -887,7 +926,24 @@ async fn create_and_delete_topics_and_describe_configs() {
     assert_eq!(rs[0].i16("ErrorCode"), 0);
     let ret = rs[0].structs("Configs").find(|c| c.str("Name") == Some("retention.ms")).unwrap();
     assert_eq!(ret.str("Value"), Some("7200000"));
-    assert_eq!(rs[1].i16("ErrorCode"), err::UNKNOWN_TOPIC_OR_PARTITION);
+    // the four settings Azure lists, and no max.message.bytes
+    let names: Vec<&str> = rs[0].structs("Configs").map(|c| c.str("Name").unwrap()).collect();
+    assert_eq!(names, vec!["cleanup.policy", "message.timestamp.difference.max.ms", "message.timestamp.type", "retention.ms"]);
+    // a topic that is not there has no settings, and no error (and is not made)
+    assert_eq!((rs[1].i16("ErrorCode"), rs[1].structs("Configs").count()), (0, 0));
+    assert!(env.shared.state.lock().hub("default", "ghost").is_none());
+    // the broker's settings are not readable
+    let b = k
+        .call(
+            api::DESCRIBE_CONFIGS,
+            2,
+            Struct::new().with(
+                "Resources",
+                vec![Struct::new().with("ResourceType", 4).with("ResourceName", "0").with("ConfigurationKeys", Value::Null)],
+            ),
+        )
+        .await;
+    assert_eq!(b.structs("Results").next().unwrap().i16("ErrorCode"), err::INVALID_REQUEST);
 
     let del =
         |names: &[&str]| Struct::new().with("TopicNames", names.iter().map(|s| s.to_string()).collect::<Vec<_>>()).with("TimeoutMs", 1000);
@@ -905,14 +961,14 @@ async fn create_partitions_is_refused_because_an_event_hub_keeps_its_partition_c
     let r = k
         .call(
             api::CREATE_PARTITIONS,
-            3,
+            1,
             Struct::new()
                 .with("Topics", vec![Struct::new().with("Name", "t").with("Count", 8).with("Assignments", Value::Null)])
                 .with("TimeoutMs", 1000)
                 .with("ValidateOnly", false),
         )
         .await;
-    assert_eq!(r.structs("Results").next().unwrap().i16("ErrorCode"), err::INVALID_PARTITIONS);
+    assert_eq!(r.structs("Results").next().unwrap().i16("ErrorCode"), err::INVALID_REQUEST);
     assert_eq!(env.shared.state.lock().hub("default", "t").unwrap().partitions.len(), 2);
 }
 

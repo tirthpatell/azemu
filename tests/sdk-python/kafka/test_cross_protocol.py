@@ -33,7 +33,7 @@ def kafka_conf(emu):
 @pytest.fixture
 def hub(emu):
     name = kutil.uniq("xp")
-    ehutil.admin_create_hub(emu, name, 2)
+    kutil.admin_create(emu, name, 2, namespace=ehutil.NAMESPACE)
     return name
 
 
@@ -63,6 +63,7 @@ def test_kafka_to_amqp_binary_key_and_null_value(emu, hub, track):
     assert events[1].partition_key is not None  # a key that is not UTF-8 is still kept
 
 
+@pytest.mark.azure_differs("by design: the Standard tier refuses a compressed batch (UNSUPPORTED_FOR_MESSAGE_FORMAT); Microsoft documents compression for Premium and Dedicated, and the emulator accepts gzip")
 def test_kafka_batch_with_gzip_is_read_event_by_event_through_amqp(emu, hub, track):
     p = track(producer(kafka_conf(emu), **{"compression.type": "gzip", "linger.ms": 50}))
     items = [f"event-{i:03d}".encode() for i in range(100)]
@@ -114,7 +115,7 @@ def test_a_hub_created_by_amqp_is_a_topic_and_a_topic_created_by_kafka_is_a_hub(
     from confluent_kafka.admin import NewTopic
 
     name = kutil.uniq("shared")
-    ehutil.admin_create_hub(emu, name, 4)  # the emulator does not create hubs by being named
+    kutil.admin_create(emu, name, 4, namespace=ehutil.NAMESPACE)  # the emulator does not create hubs by being named
     prod = track(ehutil.make_producer(emu, name))
     prod.send_batch(prod.create_batch(partition_id="0"))
     a = kutil.admin(kafka_conf(emu))
@@ -122,6 +123,7 @@ def test_a_hub_created_by_amqp_is_a_topic_and_a_topic_created_by_kafka_is_a_hub(
     assert name in md.topics and len(md.topics[name].partitions) == 4
     other = kutil.uniq("kcreated")
     a.create_topics([NewTopic(other, num_partitions=2)])[other].result(10)
+    kutil.CREATED.append(other)
     assert ehutil.make_producer(emu, other).get_partition_ids() == ["0", "1"]
 
 
@@ -153,9 +155,11 @@ def test_kafka_consumer_groups_are_not_amqp_consumer_groups(emu, hub, track):
     info = kutil.admin_get(emu, hub, ehutil.NAMESPACE)
     assert group not in [g.lower() for g in info.get("consumerGroups", [])]
     assert "$Default" in info["consumerGroups"] or "$default" in [g.lower() for g in info["consumerGroups"]]
-    assert group in [g["group"] for g in kutil.admin_groups(emu, ehutil.NAMESPACE)]
+    if not emu.azure:
+        assert group in [g["group"] for g in kutil.admin_groups(emu, ehutil.NAMESPACE)]
 
 
+@pytest.mark.emulator_only  # Azure keeps events for a day at least; the emulator can be told to keep them for 2 seconds
 def test_retention_applies_to_kafka_readers(emu, track):
     name = kutil.uniq("short")
     ehutil.admin_create_hub(emu, name, 1)
@@ -174,6 +178,7 @@ def test_retention_applies_to_kafka_readers(emu, track):
     assert (m.offset(), m.value()) == (3, b"new")
 
 
+@pytest.mark.emulator_only  # the admin API's reset
 def test_reset_clears_topics_groups_and_offsets(emu, hub, track):
     import urllib.request
 

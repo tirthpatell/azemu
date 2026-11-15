@@ -119,10 +119,38 @@ async fn token_of_a_reset_service_still_resumes() {
     let (rest, next) = page(&h, "SELECT * FROM c ORDER BY c.n", 10, Some(&old)).await;
     assert_eq!(rest.iter().map(|d| d["n"].as_i64().unwrap()).collect::<Vec<_>>(), vec![15, 16, 17, 18, 19]);
     assert!(next.is_none());
-    // junk is "from the start"
-    let (first, _) = page(&h, "SELECT * FROM c ORDER BY c.n", 3, Some("not json")).await;
+    // junk is a 400, as on Azure (checked in November 2026); an empty token is the start
+    let r = h
+        .query(
+            "d",
+            "c",
+            &[("x-ms-max-item-count", "3"), XP[0], ("x-ms-documentdb-partitionkeyrangeid", "0"), ("x-ms-continuation", "not json")],
+            json!({"query": "SELECT * FROM c ORDER BY c.n"}),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
+    assert!(
+        r.text().contains("The continuation token specified in the request is malformed. Re-run the query without it and iterate."),
+        "{}",
+        r.text()
+    );
+    let (first, _) = page(&h, "SELECT * FROM c ORDER BY c.n", 3, Some("")).await;
     assert_eq!(first.len(), 3);
     assert_eq!(first[0]["n"], 0);
+    // a token names its container: the token of another one is refused
+    let (_, t) = page(&h, "SELECT * FROM c ORDER BY c.n", 3, None).await;
+    let t = t.unwrap();
+    assert!(t.contains("-RID:~"), "{t}");
+    h.coll("d", "other", "/pk").await;
+    let r = h
+        .query_in(
+            "d",
+            "other",
+            &[("x-ms-max-item-count", "3"), XP[0], ("x-ms-documentdb-partitionkeyrangeid", "0"), ("x-ms-continuation", &t)],
+            json!({"query": "SELECT * FROM c ORDER BY c.n"}),
+        )
+        .await;
+    assert_eq!(r.status, 400, "{}", r.text());
 }
 
 #[tokio::test]
@@ -210,11 +238,15 @@ async fn a_page_stops_at_four_megabytes() {
     for i in 0..5 {
         assert_eq!(h.doc("d", "c", &json!("p"), &json!({"id": format!("{i}"), "pk": "p", "b": big})).await.status, 201);
     }
+    // Azure cuts the page after the document that takes it to 4 MB (checked in November 2026): 3 documents of 1.5 MB, then 2
     let r = h.req("GET", "dbs/d/colls/c/docs", &[("x-ms-documentdb-partitionkey", "[\"p\"]")], "").await;
     let n = r.json()["Documents"].as_array().unwrap().len();
-    assert_eq!(n, 2, "two documents of 1.5 MB fit in 4 MB; the third does not");
-    assert!(r.header("x-ms-continuation").is_some());
-    let r = h.query("d", "c", &[("x-ms-documentdb-partitionkey", "[\"p\"]")], json!({"query": "SELECT * FROM c"})).await;
+    assert_eq!(n, 3, "two documents of 1.5 MB are 3 MB, the third takes the page over 4 MB and ends it");
+    let token = r.header("x-ms-continuation").unwrap().to_string();
+    let r = h.req("GET", "dbs/d/colls/c/docs", &[("x-ms-documentdb-partitionkey", "[\"p\"]"), ("x-ms-continuation", &token)], "").await;
     assert_eq!(r.json()["Documents"].as_array().unwrap().len(), 2);
+    assert!(r.header("x-ms-continuation").is_none());
+    let r = h.query("d", "c", &[("x-ms-documentdb-partitionkey", "[\"p\"]")], json!({"query": "SELECT * FROM c"})).await;
+    assert_eq!(r.json()["Documents"].as_array().unwrap().len(), 3);
     assert!(r.header("x-ms-continuation").is_some());
 }

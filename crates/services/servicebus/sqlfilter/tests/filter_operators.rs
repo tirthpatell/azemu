@@ -8,7 +8,12 @@ fn orders() -> MapProperties {
 // comparisons
 t!(eq_long, "price = 20", orders(), true);
 t!(eq_long_false, "price = 21", orders(), false);
-t!(eq_double_eq_sign, "price == 20", orders(), true);
+
+#[test]
+fn double_equals_is_not_an_operator() {
+    // Azure: `a ==` is "syntax error, unexpected EQ" at the second `=`
+    assert_eq!(parse_err("price == 20").position, 7);
+}
 t!(ne_angle, "price <> 21", orders(), true);
 t!(ne_bang, "price != 20", orders(), false);
 t!(lt, "price < 21", orders(), true);
@@ -18,15 +23,27 @@ t!(gt, "price > 19", orders(), true);
 t!(gt_false, "price > 20", orders(), false);
 t!(ge, "price >= 20", orders(), true);
 t!(string_eq, "color = 'red'", orders(), true);
-t!(string_ordering, "color < 'sed' AND color > 'blue'", orders(), true);
 t!(bool_eq, "flag = TRUE", props().user("flag", true), true);
 t!(bool_ne, "flag <> TRUE", props().user("flag", true), false);
-t!(bool_lt_unknown, "flag < TRUE", props().user("flag", false), false);
-t!(bare_bool_property, "flag", props().user("flag", true), true);
-t!(bare_bool_property_false, "flag", props().user("flag", false), false);
-t!(bare_non_bool_property, "color", orders(), false);
-t!(true_literal, "TRUE", props(), true);
-t!(false_literal, "FALSE", props(), false);
+
+// Azure (checked in November 2026): `<`, `<=`, `>` and `>=` take numbers and times, not strings and not booleans: the message that is
+// evaluated gets a FilterException ("Operator '>' cannot be applied to operands of type 'string' and 'string'").
+#[test]
+fn ordering_of_strings_and_booleans_is_an_error() {
+    let err = |sql: &str, p: MapProperties| Filter::parse(sql).unwrap().try_matches(&p, &Params::new()).unwrap_err().message;
+    assert_eq!(err("color > 'a'", orders()), "Operator '>' cannot be applied to operands of type 'string' and 'string'");
+    assert_eq!(err("flag > TRUE", props().user("flag", true)), "Operator '>' cannot be applied to operands of type 'bool' and 'bool'");
+    assert_eq!(err("price > 'a'", orders()), "Operator '>' cannot be applied to operands of type 'long' and 'string'");
+}
+
+// Azure takes a comparison as a filter, not a bare value (a syntax error at the end of the text).
+#[test]
+fn a_bare_value_is_not_a_filter() {
+    for sql in ["flag", "color", "TRUE", "FALSE", "@p"] {
+        let e = parse_err(sql);
+        assert_eq!(e.position, sql.chars().count(), "{sql}");
+    }
+}
 t!(one_equals_one, "1=1", props(), true);
 t!(one_equals_two, "1=2", props(), false);
 

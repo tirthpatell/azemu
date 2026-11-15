@@ -93,9 +93,11 @@ fn top_and_limit_stop_early_and_keep_the_order() {
     assert_eq!(ids("SELECT VALUE c.id FROM c OFFSET 9 LIMIT 10"), Vec::<String>::new());
     assert_eq!(ids("SELECT TOP 0 VALUE c.id FROM c"), Vec::<String>::new());
     assert_eq!(ids("SELECT TOP 2 VALUE c.id FROM c WHERE c.g = 'x'"), vec!["a", "c"]);
-    // ORDER BY with a count: ties keep the order they arrived in, also when the list is cut while it is built
-    assert_eq!(ids("SELECT TOP 3 VALUE c.id FROM c ORDER BY c.n DESC"), vec!["a", "c", "d"]);
-    assert_eq!(ids("SELECT VALUE c.id FROM c ORDER BY c.n OFFSET 1 LIMIT 2"), vec!["c", "d"]);
+    // ORDER BY with a count: ties keep the order they arrived in (last arrived first when every key is DESC), also when the
+    // list is cut while it is built
+    assert_eq!(ids("SELECT TOP 3 VALUE c.id FROM c ORDER BY c.n DESC"), vec!["a", "d", "c"]);
+    // (the document without `n` is first, so the window starts at b)
+    assert_eq!(ids("SELECT VALUE c.id FROM c ORDER BY c.n OFFSET 1 LIMIT 2"), vec!["b", "c"]);
     // DISTINCT before TOP
     assert_eq!(run("SELECT DISTINCT TOP 2 VALUE c.g FROM c"), vec![json!("x"), json!("y")]);
     assert_eq!(run("SELECT DISTINCT VALUE c.n FROM c ORDER BY c.n DESC"), vec![json!(3), json!(2), json!(1)]);
@@ -111,7 +113,7 @@ fn top_and_limit_stop_early_and_keep_the_order() {
     let got: Vec<Value> =
         q.execute_shared(&many, &Params::new(), &EvalOptions::default()).unwrap().into_iter().map(Item::into_value).collect();
     let mut want: Vec<(i64, i64)> = (0..5000i64).map(|i| ((i * 7919) % 1000, i)).collect();
-    want.sort_by_key(|a| std::cmp::Reverse(a.0)); // stable: equal keys stay in id order
+    want.sort_by_key(|a| std::cmp::Reverse((a.0, a.1))); // every key DESC: equal keys come last-arrived first
     assert_eq!(got, want.iter().take(5).map(|(_, i)| json!(i)).collect::<Vec<_>>());
 }
 
@@ -124,9 +126,9 @@ fn groups_and_aggregates_keep_running_totals() {
     assert_eq!(run("SELECT VALUE MIN(c.n) FROM c"), vec![json!(1)]);
     assert_eq!(run("SELECT VALUE MAX(c.id) FROM c"), vec![json!("e")]);
     assert_eq!(run("SELECT VALUE SUM(c.id) FROM c"), Vec::<Value>::new());
-    // no rows: one group with count 0, nothing for SUM
+    // no rows: one group with count 0 and sum 0
     assert_eq!(run("SELECT VALUE COUNT(1) FROM c WHERE c.n > 99"), vec![json!(0)]);
-    assert_eq!(run("SELECT VALUE SUM(c.n) FROM c WHERE c.n > 99"), Vec::<Value>::new());
+    assert_eq!(run("SELECT VALUE SUM(c.n) FROM c WHERE c.n > 99"), vec![json!(0)]);
     assert_eq!(run("SELECT COUNT(1) AS n, MAX(c.n) AS m FROM c WHERE c.n > 99"), vec![json!({"n": 0})]);
     assert_eq!(
         run("SELECT c.g, COUNT(1) AS n, SUM(c.n) AS s FROM c GROUP BY c.g"),
@@ -134,7 +136,6 @@ fn groups_and_aggregates_keep_running_totals() {
     );
     assert_eq!(run("SELECT c.g, COUNT(1) AS n FROM c WHERE c.n > 99 GROUP BY c.g"), Vec::<Value>::new());
     assert_eq!(run("SELECT VALUE COUNT(1) FROM c JOIN t IN c.tags GROUP BY c.g"), vec![json!(6), json!(1)]);
-    assert_eq!(run("SELECT c.g, COUNT(1) AS n FROM c GROUP BY c.g ORDER BY COUNT(1) DESC")[0]["g"], json!("x"));
     assert_eq!(run("SELECT VALUE COUNT(1) + MAX(c.n) * 10 FROM c"), vec![json!(35)]);
     assert_eq!(run("SELECT VALUE (SELECT VALUE COUNT(1) FROM t IN c.tags) FROM c WHERE c.id = 'c'"), vec![json!(3)]);
 }

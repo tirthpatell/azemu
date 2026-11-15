@@ -63,7 +63,10 @@ def test_preflight_matches_rules_set_through_the_sdk(base, service):
     assert r.headers["Access-Control-Max-Age"] == "5"
     r = preflight(base, "/Tables", "http://www.contoso.com", "GET", "x-ms-blob-content-type")
     assert r.status_code == 200
-    assert r.headers["Access-Control-Allow-Origin"] == "*"
+    # a rule with `*` answers the origin, with credentials allowed, and no Vary (what Azure answered in November 2026)
+    assert r.headers["Access-Control-Allow-Origin"] == "http://www.contoso.com"
+    assert r.headers["Access-Control-Allow-Credentials"] == "true"
+    assert "Vary" not in r.headers
     assert r.headers["Access-Control-Max-Age"] == "7"
     r = preflight(base, "/Tables", "http://www.contoso.com", "GET", "x-ms-client-request-id")
     assert r.status_code == 403
@@ -74,10 +77,12 @@ def test_preflight_without_required_headers_is_400(base, service):
     service.set_service_properties(cors=rules((["*"], ["GET"], ["*"], [], 0)))
     r = preflight(base, "/Tables", "", "GET", with_origin=False)
     assert r.status_code == 400
-    assert r.headers["x-ms-error-code"] == "MissingRequiredHeader"
+    assert r.headers["x-ms-error-code"] == "InvalidHeaderValue"
+    # the Table service writes its errors in its own XML
+    assert "<m:code>InvalidHeaderValue</m:code>" in r.text and "<Error>" not in r.text
     r = preflight(base, "/Tables", "http://a.example", "", with_method=False)
     assert r.status_code == 400
-    assert r.headers["x-ms-error-code"] == "MissingRequiredHeader"
+    assert r.headers["x-ms-error-code"] == "InvalidHeaderValue"
 
 
 def test_removing_the_rules_ends_cors(base, service):
@@ -92,8 +97,7 @@ def test_actual_request_with_origin_gets_cors_headers(emu, base, service, table)
         cors=rules((["http://app.contoso.com"], ["GET", "POST"], ["*"], ["ETag", "x-ms-request-id"], 60))
     )
     url, host = base
-    auth = {"Authorization": "SharedKey devstoreaccount1:Sanitized", "x-ms-date": "Fri, 27 Mar 2026 01:00:51 GMT",
-            "Accept": "application/json;odata=nometadata"}
+    auth = {"Authorization": "Bearer token", "Accept": "application/json;odata=nometadata"}
     r = requests.get(url + "/Tables", headers={**host, **auth, "Origin": "http://app.contoso.com"}, timeout=10)
     assert r.status_code == 200
     assert r.headers["Access-Control-Allow-Origin"] == "http://app.contoso.com"

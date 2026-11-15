@@ -113,8 +113,11 @@ async fn logs_container_appears_when_logging_is_turned_on_and_is_hidden_from_a_p
     assert_eq!(tags(&r.text(), "Name"), ["$logs"]);
 }
 
+/// Azure (November 2026): once logging was switched on, a client cannot delete `$logs`, change its metadata or ACL, lease it or
+/// write a blob into it (`403 InsufficientAccountPermissions`), also not after logging is switched off again. Reading it
+/// and deleting a log blob work; deleting a blob that is not there is `404`.
 #[tokio::test]
-async fn logs_container_cannot_be_deleted_once_logging_was_enabled_but_its_blobs_can() {
+async fn logs_container_cannot_be_changed_once_logging_was_enabled_but_its_blobs_can_be_deleted() {
     let (svc, e) = start_svc().await;
     set_logging(&e, true, true, true).await;
     e.create_container("cnt").await;
@@ -124,12 +127,30 @@ async fn logs_container_cannot_be_deleted_once_logging_was_enabled_but_its_blobs
     assert_eq!(names.len(), 1);
     // the blobs can be deleted
     assert_eq!(e.send("DELETE", &format!("/$logs/{}", names[0]), &[], "").await.status, 202);
-    // the container cannot, also not after logging is switched off again
-    let r = e.send("DELETE", "/$logs?restype=container", &[], "").await;
-    assert_eq!(r.status, 400, "{}", r.text());
-    set_logging(&e, false, false, false).await;
-    assert_eq!(e.send("DELETE", "/$logs?restype=container", &[], "").await.status, 400);
-    assert_eq!(e.send("GET", "/$logs?restype=container&comp=list", &[], "").await.status, 200);
+    assert_eq!(e.send("DELETE", "/$logs/nothing", &[], "").await.status, 404);
+    let refused = |what: &'static str, r: azemu_core::testing::TestResponse| {
+        assert_eq!((r.status, r.header("x-ms-error-code")), (403, Some("InsufficientAccountPermissions")), "{what}: {}", r.text());
+        assert!(r.text().contains("The account being accessed does not have sufficient permissions to execute this operation."));
+    };
+    for round in 0..2 {
+        refused("delete container", e.send("DELETE", "/$logs?restype=container", &[], "").await);
+        refused("set metadata", e.send("PUT", "/$logs?restype=container&comp=metadata", &[("x-ms-meta-a", "1")], "").await);
+        refused("set acl", e.send("PUT", "/$logs?restype=container&comp=acl", &[], "<SignedIdentifiers />").await);
+        refused(
+            "lease",
+            e.send("PUT", "/$logs?restype=container&comp=lease", &[("x-ms-lease-action", "acquire"), ("x-ms-lease-duration", "15")], "")
+                .await,
+        );
+        refused("put blob", e.send("PUT", "/$logs/mine", &[("x-ms-blob-type", "BlockBlob")], "x").await);
+        refused("append blob", e.send("PUT", "/$logs/mine", &[("x-ms-blob-type", "AppendBlob")], "").await);
+        refused("put block", e.send("PUT", "/$logs/mine?comp=block&blockid=QUFBQQ%3D%3D", &[], "x").await);
+        assert_eq!(e.send("GET", "/$logs?restype=container&comp=list", &[], "").await.status, 200);
+        assert_eq!(e.send("HEAD", "/$logs?restype=container", &[], "").await.status, 200);
+        if round == 0 {
+            // also after logging is switched off again
+            set_logging(&e, false, false, false).await;
+        }
+    }
 }
 
 #[tokio::test]
@@ -430,7 +451,7 @@ async fn logs_and_the_logging_settings_survive_a_restart() {
     assert!(lines.iter().any(|f| f[12] == "\"/acct/cnt/waiting.txt\""));
     let sys = e.send("GET", "/?comp=list&include=system", &[], "").await.text();
     assert_eq!(tags(&sys, "Name"), ["$logs", "cnt"]);
-    assert_eq!(e.send("DELETE", "/$logs?restype=container", &[], "").await.status, 400, "still protected");
+    assert_eq!(e.send("DELETE", "/$logs?restype=container", &[], "").await.status, 403, "still protected");
     // logging goes on after the restart (the switches are rebuilt from the saved properties)
     e.put_blob("cnt", "after.txt", "z").await;
     assert!(svc.log_queue_for_tests().1 > 0);

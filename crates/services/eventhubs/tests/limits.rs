@@ -71,7 +71,8 @@ async fn a_namespace_holds_at_most_1000_event_hubs() {
 }
 
 #[tokio::test]
-async fn a_hub_holds_at_most_100_consumer_groups() {
+async fn a_receiver_never_adds_a_consumer_group_so_the_limit_does_not_apply_to_attaching() {
+    // Azure takes any group name on a receiver link and keeps its list of groups as it is (November 2026)
     let env = env().await;
     env.hub("h", 1);
     {
@@ -83,7 +84,8 @@ async fn a_hub_holds_at_most_100_consumer_groups() {
     }
     let mut c = env.client().await;
     assert!(consume(&mut c, "h", "g0", 0, &from_start()).await.is_ok());
-    assert_eq!(condition(consume(&mut c, "h", "one-too-many", 0, &from_start()).await.unwrap_err()), "amqp:resource-limit-exceeded");
+    assert!(consume(&mut c, "h", "one-too-many", 0, &from_start()).await.is_ok());
+    assert_eq!(env.shared.state.lock().hub("myns", "h").unwrap().consumer_groups.len(), MAX_CONSUMER_GROUPS);
 }
 
 #[tokio::test]

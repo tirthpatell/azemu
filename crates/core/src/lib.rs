@@ -9,6 +9,7 @@ mod private_dir;
 mod refusals;
 mod request;
 mod routing;
+mod seed;
 mod server;
 mod service;
 mod tls;

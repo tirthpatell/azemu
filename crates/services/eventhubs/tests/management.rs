@@ -108,12 +108,28 @@ async fn bad_partition_unknown_type_and_unknown_operation() {
     let links = mgmt_links(&mut c).await;
     let (status, _, _) = mgmt(&mut c, links, partition_request("h", "7")).await;
     assert_eq!(status, 400);
-    let (status, desc, _) = mgmt(&mut c, links, vec![("name", "h"), ("operation", "READ"), ("type", "com.microsoft:nope")]).await;
-    assert_eq!(status, 501);
-    assert!(desc.contains("management type 'com.microsoft:nope'"), "{desc}");
-    let (status, desc, _) = mgmt(&mut c, links, vec![("name", "h"), ("operation", "DELETE"), ("type", "com.microsoft:eventhub")]).await;
-    assert_eq!(status, 501);
-    assert!(desc.contains("'DELETE'"), "{desc}");
+    // a type Azure does not know is answered 200 with no body; the answer carries `operation` and `status-code` and nothing else
+    let (status, _, body) = mgmt(&mut c, links, vec![("name", "h"), ("operation", "READ"), ("type", "com.microsoft:nope")]).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, Value::Null);
+    // any other operation, in any spelling, is refused when the request is received (a real namespace, November 2026)
+    for op in ["DELETE", "read", ""] {
+        let mut m = TestClient::value_message(
+            Value::Null,
+            vec![("name", "h"), ("operation", op), ("type", "com.microsoft:eventhub")]
+                .into_iter()
+                .map(|(k, v)| (k, Value::str(v)))
+                .collect(),
+        );
+        m.body = azemu_amqp::message::Body::Empty;
+        match c.send_message_wait(links.0, &m).await {
+            Some(azemu_amqp::terminus::DeliveryState::Rejected { error: Some(e) }) => {
+                assert_eq!(e.condition, "amqp:not-allowed", "{op}");
+                assert_eq!(e.description.as_deref(), Some(format!("Invalid command '{op}'.").as_str()));
+            }
+            other => panic!("operation {op:?} must be rejected: {other:?}"),
+        }
+    }
     let (status, _, _) = mgmt(&mut c, links, vec![("operation", "READ"), ("type", "com.microsoft:eventhub")]).await;
     assert_eq!(status, 400);
 }

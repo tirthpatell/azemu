@@ -64,6 +64,8 @@ pub struct Query {
     pub group_by: Vec<Expr>,
     /// ORDER BY items.
     pub order_by: Vec<OrderItem>,
+    /// The text `ORDER BY ...`.
+    pub order_span: Option<Span>,
     /// OFFSET ... LIMIT ...
     pub offset_limit: Option<OffsetLimit>,
     /// True when the query aggregates (an aggregate function in SELECT/ORDER BY, or GROUP BY).
@@ -79,6 +81,8 @@ pub struct Select {
     pub distinct: bool,
     /// `TOP n` (a literal or a parameter).
     pub top: Option<Expr>,
+    /// The text `TOP n`.
+    pub top_span: Option<Span>,
     /// What is selected.
     pub spec: SelectSpec,
     /// Text of the select list (after DISTINCT/TOP).
@@ -103,6 +107,8 @@ pub struct SelectItem {
     pub expr: Expr,
     /// Explicit alias (`AS x` or implicit).
     pub alias: Option<String>,
+    /// Where the alias is written.
+    pub alias_span: Option<Span>,
 }
 
 /// FROM clause.
@@ -119,6 +125,8 @@ pub struct From {
 pub struct FromSource {
     /// Alias (explicit or inferred; generated for unnamed subqueries).
     pub alias: String,
+    /// Where an explicit alias is written.
+    pub alias_span: Option<Span>,
     /// `alias IN expr`: iterate the array elements.
     pub iterate: bool,
     /// Where the values come from.
@@ -152,6 +160,8 @@ pub struct OffsetLimit {
     pub offset: Expr,
     /// `LIMIT m`
     pub limit: Expr,
+    /// The text `OFFSET n LIMIT m`.
+    pub span: Span,
 }
 
 /// An expression with its source position.

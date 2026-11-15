@@ -39,6 +39,8 @@ def test_get_root_is_database_account_json(raw, endpoint):
     assert body["writableLocations"] and body["readableLocations"]
 
 
+# Azure lists a regional address (<account>-<region>) next to the account address.
+@pytest.mark.emulator_only
 def test_account_locations_point_back_at_the_emulator_host(raw, endpoint):
     body = raw.get("", resource_type="", signed_link="").json()
     host = urllib.parse.urlparse(endpoint).netloc
@@ -131,7 +133,11 @@ def test_partition_key_ranges_of_a_new_container(raw, rcoll):
     assert first["minInclusive"] == ""
     assert ranges[-1]["maxExclusive"] == "FF"
     assert body["_rid"]
-    assert r.headers.get("etag")
+
+
+def test_partition_key_ranges_answer_has_no_etag(raw, rcoll):
+    db, c = rcoll
+    assert "etag" not in raw.get(f"dbs/{db}/colls/{c}/pkranges").headers
 
 
 def test_query_post_with_query_json_content_type(raw, rcoll):

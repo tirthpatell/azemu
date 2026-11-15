@@ -39,7 +39,7 @@ use crate::errors::{blob_not_found, err, ApiError, ApiResult};
 use crate::headers::blob_headers;
 use crate::lease::{self, Scope};
 use crate::state::{BlobKind, Piece};
-use crate::store::check_cpk;
+use crate::store::check_cpk_read;
 use crate::util::hdr;
 
 pub use exec::Limits;
@@ -50,7 +50,6 @@ pub struct QueryJob {
     plan: Arc<Plan>,
     pieces: Vec<Piece>,
     limits: Limits,
-    pub dfs: bool,
 }
 
 /// The queries running now.
@@ -76,8 +75,9 @@ pub fn prepare(body: &[u8]) -> Prepared {
     request::parse(body).map(Arc::new)
 }
 
-/// The handler: everything that needs the state. `dfs`: the request came through the Data Lake endpoint.
-pub fn query_blob(cx: &mut Cx, container: &str, name: &str, dfs: bool) -> ApiResult {
+/// The handler: everything that needs the state. Only the Blob endpoint has it: the `dfs` host answers the same request
+/// `400 MissingRequiredHeader` (it reads a `POST` as a lease), also on Azure.
+pub fn query_blob(cx: &mut Cx, container: &str, name: &str) -> ApiResult {
     let req = cx.req;
     let now = cx.now;
     let snapshot = snapshot_param(req)?;
@@ -92,16 +92,15 @@ pub fn query_blob(cx: &mut Cx, container: &str, name: &str, dfs: bool) -> ApiRes
         || (snapshot.is_none() && version.is_none());
     let b = e.find(snapshot.as_deref(), version.as_deref()).ok_or_else(blob_not_found)?;
 
-    check_cpk(b, req)?;
+    check_cpk_read(b, req)?;
     if snapshot.is_none() && version.is_none() {
         lease::check_read(&b.lease, hdr(req, "x-ms-lease-id"), Scope::Blob)?;
     }
     cond::check(req, "", Some((&b.etag, b.last_modified)), Kind::Read)?;
     cond::check_tags(req, Some(&b.tags))?;
+    // Azure: `400` with the code as the message, for a page blob and for an append blob (checked in November 2026)
     if b.kind != BlobKind::Block {
-        return Err(
-            err("InvalidBlobType").msg("The blob type is invalid for this operation: Query Blob Contents works on block blobs only.")
-        );
+        return Err(err("QueryBlobContentsNotSupportedForPageBlobsOrAppendBlobs"));
     }
     if b.tier.as_deref() == Some("Archive") {
         return Err(err("BlobArchived"));
@@ -119,13 +118,61 @@ pub fn query_blob(cx: &mut Cx, container: &str, name: &str, dfs: bool) -> ApiRes
     let pieces = b.read_pieces(0, b.size);
     let r = blob_headers(Resp::new(200u16), b, is_current).header("Content-Type", "avro/binary");
     let r = apply_sas_overrides(r, &authz).header("Content-Type", "avro/binary");
-    cx.st.query_job = Some(QueryJob { plan, pieces, limits, dfs });
+    cx.st.query_job = Some(QueryJob { plan, pieces, limits });
     Ok(r.build())
 }
 
 /// Why a query could not run.
 pub enum Refused {
     Busy,
+    /// The expression does not fit the data (a name that is not in the header row, a file that is not Parquet).
+    Request(ApiError),
+}
+
+/// The checks that need the first bytes of the blob; Azure answers them with a `400` before any data.
+fn check_data(plan: &Plan, pieces: &[Piece], limits: &Limits) -> Result<(), ApiError> {
+    use request::{expression_error, InputFormat, NO_HEADER, UNKNOWN_COLUMN};
+    match &plan.input {
+        InputFormat::Parquet => {
+            // there is no Parquet reader: a blob that is not Parquet is refused as Azure does, a real one is not built
+            let total: usize = pieces.iter().map(Piece::len).sum();
+            let byte_at = |mut g: usize| -> u8 {
+                for p in pieces {
+                    if g < p.len() {
+                        return match p {
+                            Piece::Data(d) => d[g],
+                            Piece::Zeros(_) => 0,
+                        };
+                    }
+                    g -= p.len();
+                }
+                0
+            };
+            let head: Vec<u8> = (0..4.min(total)).map(byte_at).collect();
+            let tail: Vec<u8> = (total.saturating_sub(4)..total).map(byte_at).collect();
+            if head == b"PAR1" && tail == b"PAR1" {
+                return Err(ApiError::not_implemented("Query Blob Contents with parquet input").unsupported("Blob_Query (Parquet input)"));
+            }
+            Err(expression_error("Invalid parquet file. Corrupt footer."))
+        }
+        InputFormat::Delimited(d) if d.headers && (!plan.needs.names.is_empty() || plan.needs.max_ordinal > 0) => {
+            let mut stream = input::Stream::new(pieces.to_vec());
+            let Ok(first) = d.next(&mut stream, limits.max_record_bytes) else { return Ok(()) };
+            let Some((_, names)) = first else {
+                // an empty blob has no header row
+                return if plan.needs.names.is_empty() { Ok(()) } else { Err(expression_error(NO_HEADER)) };
+            };
+            if plan.needs.max_ordinal > names.len() {
+                return Err(expression_error("Invalid column ordinal(s)."));
+            }
+            let cols = eval::Columns::new(names);
+            if plan.needs.names.iter().any(|(n, quoted)| cols.find(n, *quoted).is_none()) {
+                return Err(expression_error(UNKNOWN_COLUMN));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
 }
 
 /// How many pieces of the answer wait between the scan and the connection (each about `data_chunk_bytes`).
@@ -171,6 +218,7 @@ async fn start(job: QueryJob, gate: &Gate, cancel: azemu_core::CancelToken) -> R
 
 /// Run the job and make the answer a stream.
 pub async fn finish(resp: &mut Response, job: QueryJob, gate: &Gate, cancel: azemu_core::CancelToken) -> Result<(), Refused> {
+    check_data(&job.plan, &job.pieces, &job.limits).map_err(Refused::Request)?;
     let answer = start(job, gate, cancel).await?;
     azemu_core::stream::attach(resp, answer);
     Ok(())
@@ -181,6 +229,7 @@ pub fn refused(r: Refused) -> ApiError {
         Refused::Busy => {
             ApiError::new("ServerBusy").status(503).msg("The server is busy: too many queries are already running. Try again in a moment.")
         }
+        Refused::Request(e) => e,
     }
 }
 
@@ -194,7 +243,7 @@ mod tests {
     fn job(expr: &str, data: Bytes, limits: Limits) -> QueryJob {
         let plan =
             Arc::new(exec::tests::request(expr, "", "<OutputSerialization><Format><Type>json</Type></Format></OutputSerialization>"));
-        QueryJob { plan, pieces: vec![Piece::Data(data)], limits, dfs: false }
+        QueryJob { plan, pieces: vec![Piece::Data(data)], limits }
     }
 
     fn rows() -> Bytes {

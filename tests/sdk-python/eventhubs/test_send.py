@@ -97,10 +97,14 @@ def test_send_from_two_threads_with_one_producer(emu, hub, producer):
 
 def test_empty_batch_sends_nothing(emu, hub, producer):
     # Microsoft's test_send_with_partition_key does `client.send_batch(client.create_batch())`
+    def ends():
+        return {p: producer.get_partition_properties(p)["last_enqueued_sequence_number"] for p in ALL}
+
+    before = ends()  # (a shared hub on Azure already holds events: nothing may be added to them)
     producer.send_batch(producer.create_batch())
     producer.send_batch([])
     read_exact(emu, hub, 0, partition_id="0")
-    assert all(producer.get_partition_properties(p)["is_empty"] for p in ALL)
+    assert ends() == before
 
 
 def test_two_producers_write_to_the_same_partition_in_the_order_they_finish(emu, hub, track):
@@ -200,6 +204,25 @@ def test_partition_key_given_to_send_batch_list(emu, hub, producer):
     assert len(by) == 1
     assert bodies(next(iter(by.values()))) == ["a", "b", "c"]
     assert {e.partition_key for e in next(iter(by.values()))} == {b"list-key"}
+
+
+# Where a real Standard namespace sent these keys on an event hub with four partitions (November 2026). The rule behind it (upper case, ASCII, lookup3,
+# modulo 32767, in-order ranges) is in docs/services/eventhubs.md; the 475 samples of all partition counts are in the Rust test partition_key.rs.
+AZURE_KEY_PARTITIONS = {
+    "a": "2", "alpha": "2", "gamma": "2", "beta": "0", "user-1": "1", "order-12345": "1", "hello world": "1", "device/42": "3",
+    "sensor-temperature-01": "2", "0123456789ab": "2", "0123456789abc": "0", "Z\u00fcrich-\u00df": "2", "\u65e5\u672c\u8a9e\u306e\u30ad\u30fc": "2",
+    "\U0001f600": "0", "tenant:acme:region:eu-west-1": "2", "x" * 40: "2", "The quick brown fox jumps over the lazy dog": "3", "k1": "2",
+    "partition-key-with-a-fairly-long-name-1234567890": "0",
+    "ALPHA": "2", "Beta": "0",  # upper case and lower case are one key
+}
+
+
+def test_partition_keys_go_where_azure_puts_them(emu, hub, producer):
+    # `hub` has four partitions. Not the hash of Microsoft's SDKs (alpha, beta, gamma would be 1, 3, 0 with it).
+    for key in AZURE_KEY_PARTITIONS:
+        producer.send_event(EventData(key), partition_key=key)
+    by = read_all_partitions(emu, hub, len(AZURE_KEY_PARTITIONS))
+    assert {bodies([e])[0]: pid for pid, evs in by.items() for e in evs} == AZURE_KEY_PARTITIONS
 
 
 def test_bytes_partition_key_goes_to_the_same_partition_as_the_str_key(emu, hub, producer):

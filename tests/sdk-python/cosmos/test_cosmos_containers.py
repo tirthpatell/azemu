@@ -203,13 +203,30 @@ def test_delete_missing_container_is_404(db):
         db.delete_container(uid("nope"))
 
 
-def test_recreated_container_is_empty(db):
+def test_recreated_container_cannot_be_read_with_the_session_token_of_the_old_one(db):
     cid = uid("c")
     c = db.create_container(id=cid, partition_key=PartitionKey(path="/pk"))
     c.create_item({"id": "a", "pk": "x"})
     db.delete_container(cid)
     c2 = db.create_container(id=cid, partition_key=PartitionKey(path="/pk"))
-    assert list(c2.read_all_items()) == []
+    # The SDK keeps the session token of the deleted container and sends it again, and it is ahead of the new container: Azure
+    # answers every read with 404, sub-status 1002 "The read session is not available for the input session token" (checked in
+    # November 2026). A client that has no token of the old container reads the new one (the next test).
+    for _ in range(2):
+        with pytest.raises(CosmosResourceNotFoundError) as e:
+            list(c2.read_all_items())
+        assert e.value.sub_status == 1002, e.value
+
+
+def test_recreated_container_is_empty_for_a_new_client(db, make_client):
+    cid = uid("c")
+    c = db.create_container(id=cid, partition_key=PartitionKey(path="/pk"))
+    c.create_item({"id": "a", "pk": "x"})
+    db.delete_container(cid)
+    db.create_container(id=cid, partition_key=PartitionKey(path="/pk"))
+    # a second client has no session token of the deleted container
+    again = make_client().get_database_client(db.id).get_container_client(cid)
+    assert list(again.read_all_items()) == []
 
 
 def test_list_containers(db):
@@ -288,12 +305,16 @@ def test_replace_container_with_different_partition_key_is_400(db):
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers outlive deleted resources and are matched to reused ids, so throughput reads are unreliable")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_manual_throughput(make_container):
     c = make_container("/pk", offer_throughput=1000)
     assert c.get_throughput().offer_throughput == 1000
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers outlive deleted resources and are matched to reused ids, so throughput reads are unreliable")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_replace_throughput_with_int(make_container):
     c = make_container("/pk", offer_throughput=1000)
     c.replace_throughput(2500)
@@ -301,6 +322,8 @@ def test_container_replace_throughput_with_int(make_container):
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers outlive deleted resources and are matched to reused ids, so throughput reads are unreliable")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_replace_throughput_with_object(make_container):
     c = make_container("/pk", offer_throughput=1000)
     c.replace_throughput(ThroughputProperties(offer_throughput=3000))
@@ -308,6 +331,8 @@ def test_container_replace_throughput_with_object(make_container):
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers point at the wrong resource link")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_throughput_offer_resource_properties(make_container):
     # Microsoft test_offer_read_and_query: the offer references its container
     c = make_container("/pk", offer_throughput=1000)
@@ -318,6 +343,8 @@ def test_container_throughput_offer_resource_properties(make_container):
 
 
 @pytest.mark.not_on_vnext(reason="vnext has no autoscale offers")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_autoscale_throughput(make_container):
     c = make_container("/pk", offer_throughput=ThroughputProperties(auto_scale_max_throughput=7000, auto_scale_increment_percent=0))
     t = c.get_throughput()
@@ -328,6 +355,8 @@ def test_container_autoscale_throughput(make_container):
 
 
 @pytest.mark.not_on_vnext(reason="vnext does not validate autoscale throughput")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_negative_autoscale_is_400(db):
     with pytest.raises(CosmosHttpResponseError) as e:
         db.create_container(
@@ -340,6 +369,8 @@ def test_container_negative_autoscale_is_400(db):
 
 
 @pytest.mark.not_on_vnext(reason="vnext reports an offer for every container")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_container_in_shared_throughput_database_has_no_offer(client):
     d = client.create_database(uid("db"), offer_throughput=1000)
     c = d.create_container(id=uid("c"), partition_key=PartitionKey(path="/pk"))
@@ -352,6 +383,8 @@ def test_container_in_shared_throughput_database_has_no_offer(client):
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers outlive deleted resources and are matched to reused ids, so throughput reads are unreliable")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_database_with_shared_throughput_has_offer(client):
     d = client.create_database(uid("db"), offer_throughput=1000)
     assert d.get_throughput().offer_throughput == 1000

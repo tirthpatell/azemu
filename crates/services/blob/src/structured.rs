@@ -33,7 +33,8 @@ const CRC: usize = 8;
 /// Segment size of the messages the service writes (the SDKs' default).
 const SEGMENT: usize = 4 * 1024 * 1024;
 
-/// A message that cannot be taken apart: what is wrong with it.
+/// A message that cannot be taken apart: what is wrong with it (the text is for tests; the answer names only the error).
+#[allow(dead_code)] // the text is read by nobody yet; it says what is wrong when a test or a debugger looks
 pub enum Fault {
     /// Layout is wrong (short, wrong version, wrong lengths).
     Malformed(String),
@@ -78,7 +79,9 @@ fn le_u64(b: &[u8]) -> u64 {
     u64::from_le_bytes(a)
 }
 
-/// Take a message apart: check the layout and every CRC-64, return the data.
+/// Take a message apart: check the layout first, then every CRC-64, and return the data. Azure answers a message whose layout
+/// is wrong with `InvalidStructuredMessage` even when a CRC is wrong too (a segment one byte short is one of those), so no CRC
+/// is looked at before the whole layout is known to be right (checked in November 2026).
 pub fn decode(msg: &[u8]) -> Result<Vec<u8>, Fault> {
     let bad = |s: String| Fault::Malformed(s);
     if msg.len() < HEADER_SIZE {
@@ -96,7 +99,8 @@ pub fn decode(msg: &[u8]) -> Result<Vec<u8>, Fault> {
         return Err(bad(format!("the structured message does not have the CRC-64 flag (flags {flags:#06x})")));
     }
     let segments = le_u16(&msg[11..13]);
-    let mut data = Vec::with_capacity(msg.len());
+    // (data, CRC found after it)
+    let mut parts: Vec<(&[u8], u64)> = Vec::new();
     let mut at = HEADER_SIZE;
     for want in 1..=segments {
         if msg.len() < at + SEGMENT_HEADER {
@@ -113,22 +117,26 @@ pub fn decode(msg: &[u8]) -> Result<Vec<u8>, Fault> {
             return Err(bad(format!("segment {want}: its length {len} does not fit in the message")));
         }
         let end = at + len as usize;
-        let part = &msg[at..end];
-        if le_u64(&msg[end..end + CRC]) != crc64(part) {
-            return Err(Fault::Crc(format!("the CRC64 of segment {want} does not match its data")));
-        }
-        data.extend_from_slice(part);
+        parts.push((&msg[at..end], le_u64(&msg[end..end + CRC])));
         at = end + CRC;
     }
     if msg.len() < at + CRC {
         return Err(bad("the message ends before its trailer".to_string()));
     }
-    if le_u64(&msg[at..at + CRC]) != crc64(&data) {
-        return Err(Fault::Crc("the CRC64 in the message trailer does not match the data".to_string()));
-    }
+    let trailer = le_u64(&msg[at..at + CRC]);
     at += CRC;
     if at != msg.len() {
         return Err(bad(format!("{} bytes follow the structured message trailer", msg.len() - at)));
+    }
+    let mut data = Vec::with_capacity(msg.len());
+    for (i, (part, crc)) in parts.iter().enumerate() {
+        if *crc != crc64(part) {
+            return Err(Fault::Crc(format!("the CRC64 of segment {} does not match its data", i + 1)));
+        }
+        data.extend_from_slice(part);
+    }
+    if trailer != crc64(&data) {
+        return Err(Fault::Crc("the CRC64 in the message trailer does not match the data".to_string()));
     }
     Ok(data)
 }
@@ -147,8 +155,11 @@ fn bad_header(name: &str, value: &str) -> ApiError {
 
 fn fault_error(f: Fault) -> ApiError {
     match f {
-        Fault::Crc(m) => err("Crc64Mismatch").status(400).msg(m),
-        Fault::Malformed(m) => err("InvalidInput").msg(format!("x-ms-structured-body: {m}.")),
+        // the text is Azure's (the detail of what is wrong is not sent)
+        Fault::Crc(_) => err("Crc64Mismatch")
+            .status(400)
+            .msg("The CRC64 value specified in the request did not match with the CRC64 value calculated by the server."),
+        Fault::Malformed(_) => err("InvalidStructuredMessage"),
     }
 }
 
@@ -164,10 +175,13 @@ pub fn unwrap_upload(req: &Request) -> Result<Option<Request>, ApiError> {
         None => return Err(ApiError::missing_header(LENGTH_HEADER)),
         Some(v) => v.trim().parse::<u64>().map_err(|_| bad_header(LENGTH_HEADER, v))?,
     };
+    // a body too short to be a message is refused for the length header (Azure, a 5 byte body with the value 5)
+    if req.body.len() < HEADER_SIZE {
+        return Err(bad_header(LENGTH_HEADER, &length.to_string()));
+    }
     let data = decode(&req.body).map_err(fault_error)?;
     if data.len() as u64 != length {
-        return Err(bad_header(LENGTH_HEADER, &length.to_string())
-            .msg(format!("x-ms-structured-content-length is {length}, the structured message holds {} bytes.", data.len())));
+        return Err(err("InvalidStructuredMessage"));
     }
     let mut out = req.clone();
     out.body = Bytes::from(data);
@@ -243,6 +257,10 @@ mod tests {
         let mut v2 = msg.clone();
         v2[0] = 2;
         assert!(matches!(decode(&v2), Err(Fault::Malformed(_))));
+        // a segment one byte short has a wrong layout first (Azure: InvalidStructuredMessage, not Crc64Mismatch)
+        let mut short_segment = msg.clone();
+        short_segment[HEADER_SIZE + 2..HEADER_SIZE + 10].copy_from_slice(&39u64.to_le_bytes());
+        assert!(matches!(decode(&short_segment), Err(Fault::Malformed(_))));
         let mut no_flag = msg;
         no_flag[9] = 0;
         assert!(matches!(decode(&no_flag), Err(Fault::Malformed(_))));

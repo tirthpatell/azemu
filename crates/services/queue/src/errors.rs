@@ -121,6 +121,51 @@ pub fn authentication_failed(ctx: &RequestCtx, detail: Option<&str>) -> Response
     }
 }
 
+/// 400: the `Authorization` header cannot be read.
+pub fn invalid_authentication_info(ctx: &RequestCtx) -> Response {
+    err(
+        ctx,
+        400,
+        "InvalidAuthenticationInfo",
+        "Authentication information is not given in the correct format. Check the value of Authorization header.",
+    )
+}
+
+/// What a request with no credentials is told (see `azemu_core::storage::credentials::without_credentials`).
+pub fn no_credentials(req: &azemu_core::Request) -> Response {
+    use storage::credentials::{without_credentials, Flavor, NoCredentials, CHALLENGE};
+    match without_credentials(req, Flavor::Queue) {
+        NoCredentials::NotFound => err(&req.ctx, 404, "ResourceNotFound", "The specified resource does not exist."),
+        NoCredentials::Challenge => {
+            let mut resp = err(
+                &req.ctx,
+                401,
+                "NoAuthenticationInformation",
+                "Server failed to authenticate the request. Please refer to the information in the www-authenticate header.",
+            );
+            if let Ok(v) = azemu_core::http::HeaderValue::from_str(CHALLENGE) {
+                resp.headers_mut().insert("www-authenticate", v);
+            }
+            resp
+        }
+    }
+}
+
+/// 400 for an `x-ms-version` Azure does not know.
+pub fn invalid_version(ctx: &RequestCtx, value: &str) -> Response {
+    err_with(
+        ctx,
+        400,
+        "InvalidHeaderValue",
+        "The value for one of the HTTP headers is not in the correct format.",
+        &[("HeaderName", "x-ms-version"), ("HeaderValue", value)],
+    )
+}
+
+pub fn authorization_failure(ctx: &RequestCtx) -> Response {
+    err(ctx, 403, "AuthorizationFailure", "This request is not authorized to perform this operation.")
+}
+
 pub fn permission_mismatch(ctx: &RequestCtx) -> Response {
     err(ctx, 403, "AuthorizationPermissionMismatch", "This request is not authorized to perform this operation using this permission.")
 }

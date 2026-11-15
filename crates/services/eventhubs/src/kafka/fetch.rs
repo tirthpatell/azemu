@@ -118,9 +118,15 @@ impl Broker {
                     continue;
                 };
                 let (start, high) = (p.first_seq(), p.next_seq);
-                if offset < start || offset > high {
+                if offset < start {
                     round.any_error = true;
                     out.push(PartRaw { index: idx, error: err::OFFSET_OUT_OF_RANGE, high, start, events: Vec::new() });
+                    continue;
+                }
+                // Past the end Azure answers with no error and no records, whatever `auto.offset.reset` is (a real namespace, November
+                // 2026): the fetch waits for the log to grow that far.
+                if offset > high {
+                    out.push(PartRaw { index: idx, error: 0, high, start, events: Vec::new() });
                     continue;
                 }
                 let mut events = Vec::new();
@@ -171,12 +177,12 @@ impl Broker {
                         Some(e) => (0, e.enqueued_ms, e.seq),
                         None => (0, -1, -1),
                     },
-                    // the first event at or after the time
+                    // the first event at or after the time; after the last event, the end offset (not -1, as in Apache Kafka) with the time that was asked for (a negative time would be refused by the Java client)
                     Some(p) => {
                         let i = p.events.partition_point(|e| e.enqueued_ms < ts);
                         match p.events.get(i) {
                             Some(e) => (0, e.enqueued_ms, e.seq),
-                            None => (0, -1, -1),
+                            None => (0, ts, p.next_seq),
                         }
                     }
                 };
@@ -195,14 +201,32 @@ impl Broker {
     }
 }
 
-/// One record batch holding the events (null when there are none).
+/// The record batches holding the events (empty bytes when there are none). A record that came in through Kafka is read as
+/// `LogAppendTime` (the batch attribute 8, and every record of the batch has the time of the batch), one that came in over AMQP as
+/// `CreateTime`: a real namespace does so (November 2026). So the events are cut into runs of the same kind, and a run of Kafka
+/// records also ends where the time they were stored changes.
 fn records_of(events: &[Arc<Event>]) -> Value {
-    let (Some(first), Some(last)) = (events.first(), events.last()) else { return Value::Bytes(Bytes::new()) };
+    let mut out = Vec::new();
+    let mut from = 0;
+    while from < events.len() {
+        let head = &events[from];
+        let to =
+            from + events[from..].iter().take_while(|e| e.kafka == head.kafka && (!e.kafka || e.enqueued_ms == head.enqueued_ms)).count();
+        out.extend_from_slice(&batch_of(&events[from..to]));
+        from = to;
+    }
+    Value::Bytes(Bytes::from(out))
+}
+
+const LOG_APPEND_TIME: i16 = 8;
+
+fn batch_of(events: &[Arc<Event>]) -> Vec<u8> {
+    let (first, last) = (&events[0], &events[events.len() - 1]);
     let records: Vec<_> = events.iter().map(|e| event_to_record(e, first.seq, first.enqueued_ms)).collect();
     let batch = Batch {
         base_offset: first.seq,
         partition_leader_epoch: 0,
-        attributes: 0,
+        attributes: if first.kafka { LOG_APPEND_TIME } else { 0 },
         last_offset_delta: (last.seq - first.seq) as i32,
         first_timestamp: first.enqueued_ms,
         max_timestamp: last.enqueued_ms,
@@ -212,5 +236,5 @@ fn records_of(events: &[Arc<Event>]) -> Value {
         records,
         wire_len: 0,
     };
-    Value::Bytes(Bytes::from(encode_batch(&batch, false)))
+    encode_batch(&batch, false)
 }

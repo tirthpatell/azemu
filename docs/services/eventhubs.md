@@ -30,7 +30,7 @@ same state: `crates/kafka` is the protocol library).
 | AMQP over WebSocket | yes | `transport_type=TransportType.AmqpOverWebsocket` with `custom_endpoint_address="http://myns.eventhub.localhost:{port}/"` (`https://` for TLS, plus `connection_verify`). Over WebSocket the SDK ignores the port in `Endpoint=`, so the custom endpoint is required. See `docs/services/websocket.md`. |
 
 The SDK dials `host:port` for TCP, sends the host (without port) as the `hostname` of the AMQP `open`, then `$cbs`
-`put-token` (answered 202; 404 for a missing event hub or consumer group unless auto-creation is on), then its links. Addresses arrive as full URLs
+`put-token` (answered 202; 404 for a missing event hub unless auto-creation is on), then its links. Addresses arrive as full URLs
 (`amqps://host:port/hub/ConsumerGroups/$Default/Partitions/0`); scheme and authority are dropped.
 Each SDK operation uses its own TCP connection.
 
@@ -86,19 +86,20 @@ data. Everything about it is in `docs/services/kafka.md`.
 Event hubs with N partitions (`"0"`..`"N-1"`), consumer groups (`$Default` always exists), retention. Created by:
 
 - **Defaults as on Azure.** Nothing comes into being by being named. A sender, a receiver or a management read on an event
-  hub nobody created, or a receiver on a consumer group nobody created, fails with `amqp:not-found` and Event Hubs' text
+  hub nobody created fails with `amqp:not-found` and Event Hubs' text
   ("The messaging entity 'sb://ns.servicebus.windows.net/hub' could not be found. To know more visit
   https://aka.ms/sbResourceMgrExceptions. TrackingId:..."); management reads answer status 404; a Kafka client gets
-  `UNKNOWN_TOPIC_OR_PARTITION` (`docs/services/kafka.md`). Create the hub first, as a team does against Azure: the admin API
+  `UNKNOWN_TOPIC_OR_PARTITION` (`docs/services/kafka.md`; but see the Kafka endpoint below: it makes the hub for a producer and an admin client, as Azure does). **A consumer group nobody created is not an error:** a receiver on it gets the events and
+  the group is not added to the hub's list (a real Standard namespace did so; checked in November 2026, not on other tiers). Create the hub first, as a team does against Azure: the admin API
   below (`curl -X PUT http://localhost:4577/_azemu/eventhubs/myns/hubs/orders -d '{"partitionCount":4,"consumerGroups":["workers"]}'`),
   the config file below, or ARM (Terraform `azurerm_eventhub`). **Namespaces are different:** the emulator has no way to create a
   namespace outside ARM, so any namespace name works; the first hub or the config file is what makes the name an Event Hubs
   namespace for the shared AMQP port (see the section above).
 - **Auto-creation** (`AZEMU_EVENTHUBS_AUTOCREATE=1`, or `AZEMU_LENIENT=1` / `--lenient`; the variable of the service switches this
   one on or off whatever `AZEMU_LENIENT` says): a sender, a receiver or a management read on a missing hub creates
-  it with 4 partitions and one day retention; a receiver on a missing consumer group creates the group. The Kafka endpoint does the
-  same for a producer's or an admin client's `Metadata` request that allows it (`allow.auto.create.topics`). It is a convenience
-  Azure does not have.
+  it with 4 partitions and one day retention. It is a convenience Azure does not have. (The Kafka endpoint makes the hub for a
+  producer's or an admin client's `Metadata` request that allows it (`allow.auto.create.topics`), as Azure does, with 1 partition and
+  7 days, whatever this setting says.)
 - **Config file** (`AZEMU_EVENTHUBS_CONFIG=/path/Config.json`), loaded at start and after every reset, in Microsoft's
   Event Hubs emulator format: `UserConfig.NamespaceConfig[]` (`Name`, optional `Type: "EventHub"`) with `Entities[]`
   (`Name`, `PartitionCount` as number or string, `ConsumerGroups[].Name`). Ours on top: `MessageRetentionInDays`,
@@ -124,60 +125,72 @@ Event hubs with N partitions (`"0"`..`"N-1"`), consumer groups (`$Default` alway
 
 | Area | Behaviour |
 |---|---|
-| Send | sender link to `{hub}` (partition by the `x-opt-partition-key` annotation with a stable FNV-1a hash, else round robin per event) and `{hub}/Partitions/{n}` (key ignored); single events and the batch format `0x80013700` (each data section one event; a batch without keys stays in one partition, keys split it per event; the batch is stored as a whole or rejected as a whole). Every delivery is settled `accepted`. Every body form is accepted and comes back as it was sent: one or several `data` sections, an `amqp-value` section (null included), `amqp-sequence` sections, no body section, and the JavaScript SDK's null body (a `data` section whose content is AMQP null, which is not valid AMQP; it is kept as sent). |
+| Send | sender link to `{hub}` (partition by the `x-opt-partition-key` annotation, hashed as Azure does it, see "Known differences"; else round robin per event) and `{hub}/Partitions/{n}` (key ignored); single events and the batch format `0x80013700` (each data section one event; a batch without keys stays in one partition, keys split it per event; the batch is stored as a whole or rejected as a whole). Every delivery is settled `accepted`. Every body form is accepted and comes back as it was sent: one or several `data` sections, an `amqp-value` section (null included), `amqp-sequence` sections, no body section, and the JavaScript SDK's null body (a `data` section whose content is AMQP null, which is not valid AMQP; it is kept as sent). |
 | Limits | link `max-message-size` 1 048 576 (the SDK reads it for `create_batch`); a larger message is rejected with `amqp:link:message-size-exceeded` (library behaviour: the delivery is rejected with the error, the link stays). |
 | Producer properties | `com.microsoft:idempotent-producer`, `producer-group-id`, `producer-owner-level`, `com.microsoft:georeplication`, `com.microsoft:timeout` are accepted and ignored: the Python SDK has no idempotent publishing, so there is no sequence bookkeeping. |
 | Stored event | all sections as sent (types kept: string, long, uuid, timestamp, data / value / sequence bodies, application properties, user annotations and delivery annotations); the broker-set annotations are removed on the way in, so a client cannot spoof them. |
-| Delivered event | pre-settled; message annotations `x-opt-sequence-number` (long, per partition from 0, never reused), `x-opt-offset` (string; increases by size + 32 per event, first event `0`), `x-opt-enqueued-time` (timestamp, never goes backwards in a partition), `x-opt-partition-key` when set. |
+| Delivered event | pre-settled; message annotations `x-opt-sequence-number-epoch` (int, always -1), `x-opt-sequence-number` (long, per partition from 0, never reused), `x-opt-offset` (string; a running byte count, first event `0`, see "Known differences"), `x-opt-enqueued-time` (timestamp, never goes backwards in a partition), `x-opt-partition-key` when set; an event a Kafka producer wrote also has `x-opt-kafka-key` (its key). No header section. |
 | Receive | receiver link from `{hub}/ConsumerGroups/{cg}/Partitions/{n}`; link credit and drain are honoured; reading removes nothing; every link has its own position; a receiver at the end gets new events as they arrive (live tailing). |
-| Start positions | selector filter `apache.org:selector-filter:string`: `amqp.annotation.x-opt-offset > '-1'` (start), `> '@latest'` (new events only, fixed at attach), `x-opt-offset >/>= '<offset>'`, `x-opt-sequence-number >/>= '<n>'` (beyond the end of the partition: `com.microsoft:argument-out-of-range`), `x-opt-enqueued-time >/>= '<ms>'`; quotes optional. No filter: from the start of the retained stream (assumption, Azure's default is not documented). A bad filter: `com.microsoft:argument-error`. |
-| Epochs | link property `com.microsoft:epoch`. Per hub, partition and consumer group: a receiver with an epoch takes over every receiver with a lower or **equal** epoch and every one without (they are detached with `amqp:link:stolen`, "New receiver with higher epoch of 'N' is created hence current receiver ... is getting disconnected"); a receiver with a lower epoch, or none, cannot attach next to an epoch receiver (`amqp:link:stolen`). At most 5 receivers without an epoch per partition and consumer group (`amqp:resource-limit-exceeded`, Event Hubs' quota). |
-| Runtime metrics | desired capability `com.microsoft:enable-receiver-runtime-metric` (echoed in the attach reply): every delivery carries delivery annotations `last_enqueued_sequence_number`, `last_enqueued_offset`, `last_enqueued_time_utc`, `runtime_info_retrieval_time_utc` (the state of the partition at delivery time) after any delivery annotations the sender set. |
+| Start positions | selector filter `apache.org:selector-filter:string`: `amqp.annotation.x-opt-offset > '-1'` (start), `> '@latest'` (new events only, fixed at attach), `x-opt-offset >/>= '<offset>'`, `x-opt-sequence-number >/>= '<n>'`, `x-opt-enqueued-time >/>= '<ms>'`; quotes optional. A sequence number or an offset **past the last one** is refused, inclusive or not (`com.microsoft:argument-error`, "The supplied sequence number '3' is invalid. The last sequence number in the system is '2' TrackingId:..."; for an offset "The supplied offset '145' is invalid. The last offset in the system is '144' ..."); the last one itself waits for the next event. An empty partition has last sequence number -1 and last offset `"-1"`, so `0` is refused there. A time is never refused (a time in the future gives nothing, one long ago everything). No filter: from the start of the retained stream (checked against Azure in November 2026). A filter that cannot be read (an offset that is not a number, a name that is not one of the three): `amqp:not-allowed`, "The filter '...' is not a valid amqp filter for EventHub entities". |
+| Epochs | link property `com.microsoft:epoch`. Per hub, partition and consumer group: a receiver with an epoch takes over every receiver with a lower or **equal** epoch and every one without (they are detached with `amqp:link:stolen`, "New receiver 'nil' with higher epoch of '2' is created hence current receiver 'nil' with epoch '1' is getting disconnected..."); a receiver with a lower epoch, or none, cannot attach next to an epoch receiver (`amqp:link:stolen`, "Receiver 'nil' with a higher epoch '2' already exists..." and "At least one receiver for the endpoint is created with epoch of '2', and so non-epoch receiver is not allowed..."). At most 5 receivers without an epoch per partition and consumer group (`amqp:resource-limit-exceeded`, "Exceeded the maximum number of allowed receivers per partition in a consumer group which is 5. List of connected receivers - nil, nil, nil, nil, nil."). The texts are those of a real namespace (November 2026); it names a receiver `nil` when the client gave no name, and so does the emulator for every receiver. |
+| Runtime metrics | desired capability `com.microsoft:enable-receiver-runtime-metric` (echoed in the attach reply): every delivery carries delivery annotations `last_enqueued_sequence_number`, `last_enqueued_offset`, `last_enqueued_time_utc`, `runtime_info_retrieval_time_utc` (the state of the partition at delivery time) after any delivery annotations the sender set, and `last_enqueued_sequence_number_epoch` (int, -1). |
 | Retention | time based, default one day (Azure's default), lazily applied by every append, read, management read and admin read against the clock; there are no timers. Sequence numbers keep counting after events expire; a receiver whose position was trimmed continues at the oldest retained event. |
-| Errors on attach | An attach that cannot be served (a missing hub, partition or consumer group, a start position that cannot exist, a sixth receiver without an owner level, an epoch conflict, a bad address) is refused the way AMQP 1.0 section 2.6.3 says and `Microsoft.Azure.Amqp` (the library under the real service) does it: an attach answer with a **null source and null target**, followed at once by a `detach` that carries the error (`amqp:not-found`, `com.microsoft:argument-out-of-range`, `amqp:resource-limit-exceeded`, `amqp:link:stolen`, ...). The same form is used by Service Bus; it lives in `azemu-amqp` (`AttachDecision::Refuse`). A complete attach followed by a detach would not do: the .NET SDK treats the complete attach as an open link and opens it again in a loop, with no exception. |
+| Errors on attach | An attach that cannot be served (a missing hub or partition, a start position that cannot exist, a sixth receiver without an owner level, an epoch conflict, a bad address) is refused the way AMQP 1.0 section 2.6.3 says and `Microsoft.Azure.Amqp` (the library under the real service) does it: an attach answer with a **null source and null target**, followed at once by a `detach` that carries the error (`amqp:not-found`, `com.microsoft:argument-out-of-range`, `amqp:resource-limit-exceeded`, `amqp:link:stolen`, ...). The same form is used by Service Bus; it lives in `azemu-amqp` (`AttachDecision::Refuse`). A complete attach followed by a detach would not do: the .NET SDK treats the complete attach as an open link and opens it again in a loop, with no exception. |
 
 ### `$management` and `$cbs`
 
-`$cbs`: `put-token` answers `status-code` 202 for SAS and JWT (the credential is not checked); other operations 501.
-Unless auto-creation is on, a token for an event hub or consumer group that does not exist is answered 404 with
+`$cbs`: `put-token` answers `status-code` 202 for SAS and JWT (the credential is not checked, see "Known differences"); other operations 501.
+Unless auto-creation is on, a token for an event hub that does not exist is answered 404 with
 Azure's "The messaging entity ... could not be found" text, as Azure does; the SDKs report it as `AuthenticationError`
-before they open a link.
-`$management` (the bare node the SDKs attach to, and `{hub}/$management`), `operation` `READ`:
-`type` `com.microsoft:eventhub` -> `name`, `created_at` (timestamp), `partition_count`, `partition_ids` (array of strings);
-`type` `com.microsoft:partition` -> `name`, `partition`, `begin_sequence_number`, `last_enqueued_sequence_number`,
-`last_enqueued_offset`, `last_enqueued_time_utc` (0001-01-01 for a partition that never had an event), `is_partition_empty`.
-An empty partition reports -1 / -1 / `"-1"`. Responses carry `status-code`, `status-description`, `error-condition`
-and the request's message id as correlation id; a response goes to the response link whose target address is the request's `reply-to`, else the one on the request's session. Bad
-partition: 400 `com.microsoft:argument-out-of-range`; missing hub (unless auto-creation is on): 404; other operations and
-types: 501 naming them. Checkpoint stores are client side (Blob Storage) and need nothing here.
+before they open a link. A token for a consumer group that was never created is accepted.
+`$management` (the bare node the SDKs attach to, and `{hub}/$management`), `operation` `READ` (spelled so):
+`type` `com.microsoft:eventhub` -> `name`, `created_at` (timestamp), `partition_count`, `partition_ids` (array of strings), `georeplication_factor` (1), `type`;
+`type` `com.microsoft:partition` -> `name`, `partition`, `begin_sequence_number`, `begin_sequence_number_epoch` (-1), `last_enqueued_sequence_number`,
+`last_enqueued_sequence_number_epoch` (-1), `last_enqueued_offset`, `last_enqueued_time_utc` (0001-01-01 for a partition that never had an event),
+`is_partition_empty`, `type`. An empty partition reports -1 / -1 / `"-1"`. A type it does not know is answered 200 with no body. Any other operation
+(`DELETE`, `CREATE`, `read`, an empty one) is refused when the request is received, `amqp:not-allowed`, "Invalid command 'DELETE'.".
+An answer carries the application properties `operation` (`READ`) and `status-code` (200), and the request's message id as correlation id; an error answer carries
+`status-code`, `status-description` and `error-condition`. A response goes to the response link whose target address is the request's `reply-to`, else the one on the request's session. Bad
+partition: 400 `com.microsoft:argument-out-of-range`, "The specified partition is invalid for an EventHub partition sender or receiver. It should be between 0 and 3." (a sender or receiver
+link gets a second line, `Parameter name: PartitionId`); missing hub (unless auto-creation is on): 404, with `SystemTracker:{namespace}.servicebus.windows.net:{hub}`. Checkpoint stores are client side (Blob Storage) and need nothing here.
 
 ## Known differences from Azure and from Microsoft's emulator
 
-- `$management` READ replies carry the keys the SDKs read: hub `name`, `created_at`, `partition_ids`, `partition_count`, `georeplication_factor` (always 1), `type`;
-  partition `name`, `partition`, `begin_sequence_number`, `last_enqueued_sequence_number`, `last_enqueued_offset`, `last_enqueued_time_utc`,
-  `is_partition_empty`, `type`, `last_enqueued_sequence_number_epoch` (always 0; the value is a guess, the Rust SDK only checks the key).
-- AMQP sessions whose `incoming-window` is 2^31 or more (the Rust SDK uses 2^32-1) work; windows, credits and ids are unsigned and wrap (`crates/amqp`).
+The Python suite (`tests/sdk-python/eventhubs`) was run against a real Standard namespace with one throughput unit in November 2026, and the emulator
+was changed to answer as it did. What follows is what is still different, and what was checked. Other tiers and regions were not tried; where a difference
+is a matter of tier, it says so.
 
-- No authentication, no rights, no SAS expiry checks; no per-namespace throughput limits; no Capture, Schema Registry (Kafka: `docs/services/kafka.md`).
-- Offsets are small numbers (byte-like, increasing) and sequence numbers have no gaps; real offsets are larger.
-- **Partition keys** go to the partition the Event Hubs service chooses. The hash is the one Microsoft's SDKs carry for their
-  buffered producers: Bob Jenkins' lookup3 over the UTF-8 bytes of the key, the two result words combined with XOR and cut to a
-  signed 16-bit number, then the absolute value of that modulo the number of partitions. It is a port of
-  `partitionKeyToIdMapper.js` of `@azure/event-hubs` (the .NET SDK's `PartitionResolver` is the same function) and is tested against
-  20 keys and 7 partition counts whose partitions were worked out by running that JavaScript function
-  (`crates/services/eventhubs/tests/partition_key.rs`, values made again by `partition_key_values.mjs`). It is used for every AMQP
-  send and batch to the hub without a partition id. A Kafka producer picks the partition itself (its partitioner) and the endpoint
-  stores the record where the producer said; the record key is kept as the partition key and is not mapped again, as on Event Hubs.
-  Events in a state saved before this change stay in the partitions they are in; only new events use the new hash. Event Grid
+- **Credentials are not checked.** Azure answers a bad key, an unknown key name, an expired SAS and a SAS for another event hub with 401 `com.microsoft:auth-failed`
+  at `$cbs` ("InvalidSignature: The token has an invalid signature.", "ExpiredToken: The token is expired. ...", "InvalidAudience: The authorization header contains a
+  token with a wrong audience."; a SAS for the whole namespace is accepted). The emulator knows no keys and accepts every credential, on purpose. Microsoft Entra tokens
+  were not tried against Azure.
+- **Partition keys** go to the partition the Event Hubs service chooses, which is **not** the one Microsoft's SDKs use for their buffered producers. Worked out from
+  where about 600 keys went on event hubs with 2 to 32 partitions (the rule fits every sample): the key is cut to ASCII (a character that is not ASCII, per UTF-16 unit,
+  becomes `?`) and put in upper case (`a` and `A` go together), hashed with Bob Jenkins' lookup3 (`hashlittle2`, both seeds 0), the two result words XOR-ed make a 32-bit number, and its remainder modulo 32767
+  is the position of the key. The 32767 positions are divided between the partitions in order, `32767 / n` each, with the first `32767 % n` partitions one position more
+  (`model::partition_for_key`; tests with the 475 samples: `crates/services/eventhubs/tests/partition_key.rs`). It is used for every AMQP send and batch to the hub without a partition id.
+  An empty key is no key (round robin). A Kafka producer picks the partition itself (its partitioner) and the endpoint stores the record where the producer said; the record key is
+  kept as the partition key and is not mapped again, as on Event Hubs. Events in a state saved by an older version stay where they are; only new events use the rule. Event Grid
   deliveries to an event hub carry no partition key and go round robin.
+- **Offsets** are running byte counts like Azure's, and the first event has `"0"`. The step from one event to the next fits what Azure gave for 45 events of 0 to 1,008 bytes (with and
+  without a partition key, properties and a content type): the size of the encoded message, plus 56, plus 3 once the message is 256 bytes or longer, rounded up to a multiple of 8
+  (a few bytes of body: 64 per event). The rule was fitted to those samples, not read from a specification; events that came in through Kafka use it with the size of their message
+  as the emulator keeps it.
+- **A start position that is a time** is compared in milliseconds. Azure compares finer than the millisecond it reports, so with the enqueued time of an event given inclusive the event came
+  back 2 times in 10; the emulator always returns it. A program cannot depend on either.
+- **Limits of the Standard tier are not copied** where Microsoft documents more for Premium or Dedicated: 10 event hubs per namespace, 20 consumer groups per event hub (excluding `$Default`; the 21st is 409
+  `MessagingGatewayForbidden`), 32 partitions per event hub, 7 days retention. The emulator allows 1,000 event hubs, 100 consumer groups (through the admin API and ARM, not by attaching), 1,024 partitions, any retention.
+- **Connection settings** in the `open` frame are Event Hubs' own (read from a real namespace): `max-frame-size` 65536, `idle-time-out` 120000 ms, so a client sends an empty frame every minute. Service Bus
+  connections on the same port keep the server's settings (1 MiB frames, 240 s).
+- **Transports.** Azure serves AMQP in TLS on port 5671 and AMQP over WebSocket on 443. On port 5672 it answers a header without SASL with `AMQP\x02\x01\x00\x00` (TLS required) and offers the mechanisms `MSSBCBS`, `PLAIN`, `ANONYMOUS`,
+  `EXTERNAL` after a SASL header (the emulator offers the same four). It does not answer on `ws://` port 80; the emulator serves plain `ws://` (`docs/services/websocket.md`).
+- AMQP sessions whose `incoming-window` is 2^31 or more (the Rust SDK uses 2^32-1) work; windows, credits and ids are unsigned and wrap (`crates/amqp`).
+- No rights, no per-namespace throughput limits (throttling), no Capture, Schema Registry (Kafka: `docs/services/kafka.md`). Idempotent and partitioned AMQP producer bookkeeping is accepted and ignored.
 - A hub made by auto-creation (opt-in) has 4 partitions (Azure requires the hub to exist). Microsoft's emulator has one fixed namespace and
   needs a config file; here namespaces appear when the first hub is made.
 - Partition count cannot change after creation; no partition scaling, no compaction.
-- Receiver without a filter reads from the start of the retained stream.
-- Message size limit is 1 MiB for every hub (Basic tier would be 256 KiB).
-- The empty-partition `begin_sequence_number` is -1 (assumed from the .NET and Python SDK docs).
+- Message size limit is 1 MiB for every hub (Basic tier would be 256 KiB). An event with a body of 1,048,500 bytes is accepted, 1,048,576 is not (the message is 8 bytes longer than the body); the text is Azure's.
 - Receivers are not limited per connection; the 5-receiver quota is the only one enforced.
-- Idle timeout 240 s and the other connection settings are those of the Service Bus server (shared library).
 - Retention is by time and by size: a hub keeps at most 512 MiB of events (split over its partitions, at least 16 MiB each) and
   drops the oldest first. Azure keeps 84 GB per throughput unit and refuses sends when storage is full. Every stored event counts its
   encoded size plus `EVENT_OVERHEAD` (576 bytes: what the event takes in memory besides its data), so a million empty events fill a
@@ -186,6 +199,13 @@ types: 501 naming them. Checkpoint stores are client side (Blob Storage) and nee
   otherwise be 200,000); a batch over it is rejected with `amqp:link:message-size-exceeded`. The 1 MiB link limit is the library's.
 - Limits of the emulator: 1,000 event hubs per namespace, 100 consumer groups per hub, 5,000 connections per server, 1,000
   sessions and 10,000 links per connection (library limits); `$cbs` / `$management` requests up to 1 MiB.
+
+### Checked against Azure in November 2026
+
+Behaviour that was a guess in earlier versions and was compared with a real Standard namespace: a receiver link without a filter reads from the start; an empty partition reports
+`begin_sequence_number` -1, `last_enqueued_sequence_number` -1, offset `"-1"` and 0001-01-01; `georeplication_factor` is 1; the epoch fields of a partition are -1; a lower owner level is refused, an equal one takes over, a
+receiver without a level is refused next to one with a level; five receivers without a level, the sixth is refused; the 1 MiB link limit and its text; `$Default` and the case of group names;
+max 32 partitions and 1 partition allowed on Standard. Not tried: Premium and Dedicated, other regions, expiry of events (retention is at least a day), throttling, Entra tokens, the HTTP APIs.
 
 ## Reset
 

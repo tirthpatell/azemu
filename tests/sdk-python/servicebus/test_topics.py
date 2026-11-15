@@ -281,17 +281,16 @@ def test_receiving_from_a_topic_name_is_an_error(sb, topic):
 
 
 @pytest.mark.no_autocreate
-@pytest.mark.emulator_only
 def test_send_to_missing_topic_raises_entity_not_found(sb):
-    from azure.servicebus.exceptions import MessagingEntityNotFoundError
+    # the token of a topic that is not there is refused (amqp:not-found), which the Python SDK shows as an authentication error
+    from azure.servicebus.exceptions import ServiceBusAuthenticationError
 
-    with pytest.raises(MessagingEntityNotFoundError):
+    with pytest.raises(ServiceBusAuthenticationError):
         with sb.get_topic_sender("no-such-topic") as s:
             s.send_messages(ServiceBusMessage("x"))
 
 
 @pytest.mark.no_autocreate
-@pytest.mark.emulator_only
 def test_receive_from_missing_subscription_raises_entity_not_found(sb, topic):
     from azure.servicebus.exceptions import MessagingEntityNotFoundError
 

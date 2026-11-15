@@ -570,7 +570,7 @@ fn a_client_that_goes_away_mid_script_has_its_worker_ended_by_the_time_limit_at_
     emu.sproc("spin", &format!("function () {{ {FIB} fib(60); }}"));
     let mut s = TcpStream::connect(("127.0.0.1", emu.port)).unwrap();
     let req = format!(
-        "POST /dbs/d/colls/c/sprocs/spin HTTP/1.1\r\nHost: acct.documents.localhost:{}\r\nauthorization: x\r\nx-ms-documentdb-partitionkey: [\"a\"]\r\nContent-Length: 2\r\n\r\n[]",
+        "POST /dbs/d/colls/c/sprocs/spin HTTP/1.1\r\nHost: acct.documents.localhost:{}\r\nauthorization: x\r\nx-ms-version: 2018-12-31\r\nx-ms-documentdb-partitionkey: [\"a\"]\r\nContent-Length: 2\r\n\r\n[]",
         emu.port
     );
     s.write_all(req.as_bytes()).unwrap();
@@ -601,7 +601,9 @@ async fn a_dropped_request_kills_its_worker_at_once() {
         query: Query::parse(""),
         headers: {
             let mut h = HeaderMap::new();
-            for (k, v) in [("authorization", "x"), ("content-type", "application/json")].iter().chain(extra.iter()) {
+            for (k, v) in
+                [("authorization", "x"), ("x-ms-version", "2018-12-31"), ("content-type", "application/json")].iter().chain(extra.iter())
+            {
                 h.insert(HeaderName::from_bytes(k.as_bytes()).unwrap(), HeaderValue::from_str(v).unwrap());
             }
             h

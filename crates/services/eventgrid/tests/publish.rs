@@ -27,11 +27,18 @@ async fn missing_credential_is_401_with_the_recorded_body_shape() {
     let j = r.json();
     assert_eq!(j["error"]["code"], "Unauthorized");
     assert_eq!(j["error"]["details"][0]["code"], "Unauthorized");
-    assert!(j["error"]["message"].as_str().unwrap().contains("LLAWTOPIC.EVENTGRID.LOCALHOST"));
+    // the words of the real service (tried in November 2026), then its report sentence
+    let m = j["error"]["message"].as_str().unwrap();
+    assert!(
+        m.starts_with("Request must contain one of the following authorization signature: aeg-sas-token, aeg-sas-key. Report '"),
+        "{m}"
+    );
+    assert!(m.ends_with(" (UTC)' to our forums for assistance or raise a support ticket."), "{m}");
+    assert_eq!(j["error"]["details"][0]["message"], j["error"]["message"]);
 }
 
 #[tokio::test]
-async fn any_of_the_three_credential_forms_is_accepted() {
+async fn the_credential_forms_azure_takes_are_accepted_by_a_topic_without_keys() {
     let t = Eg::new().await;
     let url = format!("{}/api/events?api-version=2018-01-01", t.host_url("t"));
     for (k, v) in [
@@ -39,7 +46,6 @@ async fn any_of_the_three_credential_forms_is_accepted() {
         ("aeg-sas-token", "r=x&e=y&s=z"),
         ("Authorization", "SharedAccessSignature r=x&e=y&s=z"),
         ("Authorization", "Bearer eyJ.fake.token"),
-        ("Authorization", "SharedAccessKey abc"),
     ] {
         let r = t
             .srv
@@ -51,6 +57,20 @@ async fn any_of_the_three_credential_forms_is_accepted() {
             .await;
         assert_eq!(r.status, 200, "{k}: {v}");
     }
+    // Azure does not take the scheme `SharedAccessKey` on a topic (it is the namespace scheme), whatever the key
+    let r = t
+        .srv
+        .request("POST", &url)
+        .header("Authorization", "SharedAccessKey abc")
+        .header("Content-Type", "application/json")
+        .body(json!([eg("1", "T", "s")]).to_string())
+        .send()
+        .await;
+    assert_eq!(r.status, 401);
+    assert!(r.json()["error"]["message"]
+        .as_str()
+        .unwrap()
+        .starts_with("Request has an unsupported Authorization scheme (must be SharedAccessSignature or Bearer)."));
 }
 
 #[tokio::test]
@@ -119,7 +139,10 @@ async fn event_grid_schema_validation_errors() {
     let j = r.json();
     assert_eq!(j["error"]["code"], "BadRequest");
     let msg = j["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("'EventGridEvent' schema") && msg.contains("'subject'") && msg.contains("[0]"), "{msg}");
+    assert!(
+        msg.starts_with("This resource is configured for 'EventGridEvent' schema and requires 'subject' property to be set. Report '"),
+        "{msg}"
+    );
     assert_eq!(j["error"]["details"][0]["code"], "InputJsonInvalid");
 
     let mut bad_time = eg("1", "T", "s");
@@ -167,6 +190,7 @@ async fn invalid_json_is_400() {
 #[tokio::test]
 async fn payload_over_the_recorded_limit_is_413() {
     let t = Eg::new().await;
+    // the request body limit is the recorded one: the answer for a body of 1.6 MB
     let big = "x".repeat(1_600_000);
     let r = t
         .publish_eg(
@@ -179,17 +203,10 @@ async fn payload_over_the_recorded_limit_is_413() {
     assert_eq!(j["error"]["code"], "RequestEntityTooLarge");
     assert_eq!(j["error"]["message"], "The maximum size (1536000) has been exceeded.");
     assert_eq!(j["error"]["details"][0]["code"], "PayloadTooLarge");
-    // just under the limit is fine
-    let ok = "x".repeat(1_400_000);
-    assert_eq!(
-        t.publish_eg(
-            "big",
-            json!([{"id":"1","subject":"s","eventType":"t","eventTime":"2024-05-23T22:06:35Z","dataVersion":"1","data":ok}])
-        )
-        .await
-        .status,
-        200
-    );
+    // a request of 1.4 MB is fine when it is made of events that are each small enough
+    let half = "x".repeat(700_000);
+    let ev = |id: &str| json!({"id":id,"subject":"s","eventType":"t","eventTime":"2024-05-23T22:06:35Z","dataVersion":"1","data":half});
+    assert_eq!(t.publish_eg("big", json!([ev("1"), ev("2")])).await.status, 200);
 }
 
 #[tokio::test]

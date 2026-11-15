@@ -38,9 +38,29 @@ pub fn invalid_argument(param: &str, detail: &str, pos: Option<usize>) -> Respon
     problem(400, "invalid-argument", &format!("Invalid request parameter '{param}'"), Some(param), Some(detail), pos)
 }
 
-/// `400` for a request body that cannot be used.
-pub fn invalid_body(detail: &str) -> Response {
-    problem(400, "invalid-argument", "Invalid request body", Some("body"), Some(detail), None)
+/// `400` for a request body that cannot be used. The service names the parameter (`key` for a body that is not
+/// JSON, `tags`, `filters`) and leaves `detail` empty (tried in November 2026).
+pub fn invalid_body(param: &str) -> Response {
+    invalid_argument(param, "", None)
+}
+
+/// `400` for an `api-version` the service does not take. `looks_like_one` is false for text that is no version at all.
+pub fn unsupported_api_version(uri: &str, version: &str, looks_like_one: bool) -> Response {
+    let title = if looks_like_one { "Unsupported API version" } else { "Invalid API version" };
+    let detail = format!("The HTTP resource that matches the request URI '{uri}' does not support the API version '{version}'.");
+    problem(400, "invalid-argument", title, Some("api-version"), Some(&detail), None)
+}
+
+/// `415` for a body that is not JSON.
+pub fn unsupported_media_type(request_id: &str) -> Response {
+    let trace: String = request_id.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let body = json!({
+        "type": "https://tools.ietf.org/html/rfc9110#section-15.5.16",
+        "title": "Unsupported Media Type",
+        "status": 415,
+        "traceId": format!("00-{trace:0<32}-{}-00", &trace.chars().rev().collect::<String>()[..16.min(trace.len())]),
+    });
+    problem_body(415, body)
 }
 
 /// `409` for a write or delete of a locked (read-only) setting.
@@ -56,8 +76,17 @@ pub fn key_locked(key: &str) -> Response {
 }
 
 /// `409` for a snapshot name that is taken.
-pub fn snapshot_exists(name: &str) -> Response {
-    problem(409, "already-exists", "The snapshot already exists", Some(name), Some("A snapshot with the same name already exists."), None)
+pub fn snapshot_exists() -> Response {
+    // key order as the service writes it (tried in November 2026)
+    problem_body(
+        409,
+        json!({
+            "type": format!("{ERROR_BASE}/already-exists"),
+            "title": "The resource already exists.",
+            "status": 409,
+            "detail": "",
+        }),
+    )
 }
 
 /// `501` naming the operation that is not built.
@@ -85,15 +114,9 @@ pub fn not_implemented(method: &str, path: &str) -> Response {
     azemu_core::unsupported::mark(resp, format!("AppConfig_Unknown ({method} /{})", shape.join("/")))
 }
 
-/// `401` for a request without usable credentials.
+/// `401` for a request without usable credentials: no body, and the schemes that are taken in `WWW-Authenticate`.
 pub fn unauthorized() -> Response {
-    let body = json!({
-        "type": format!("{ERROR_BASE}/unauthorized"),
-        "title": "Authentication failed",
-        "detail": "The request has no Authorization header. Use HMAC-SHA256 (connection string) or Bearer (Entra ID).",
-        "status": 401,
-    });
-    let mut r = problem_body(401, body);
+    let mut r = Resp::new(401u16).build();
     r.headers_mut().insert("WWW-Authenticate", azemu_core::http::HeaderValue::from_static("HMAC-SHA256, Bearer"));
     r
 }

@@ -140,7 +140,8 @@ async fn pinned_listener_uses_the_default_account() {
     let port = emu.pinned_addr("cosmos").unwrap().port();
     let client = Client::new();
     let url = format!("http://localhost:{port}");
-    let auth = [("authorization", "type%3Dmaster%26ver%3D1.0%26sig%3Dxyz"), ("content-type", "application/json")];
+    let auth =
+        [("authorization", "type%3Dmaster%26ver%3D1.0%26sig%3Dxyz"), ("content-type", "application/json"), ("x-ms-version", "2020-07-15")];
     let r = client.send("GET", &format!("{url}/"), &auth, "").await;
     assert_eq!(r.status, 200);
     let v = r.json();
@@ -161,8 +162,8 @@ async fn patch_body_may_be_a_bare_array_of_operations() {
     let r = h.json("PATCH", "dbs/d/colls/c/docs/a", &[(PK, "[\"k\"]")], &ops).await;
     assert_eq!(r.status, 200, "{}", r.text());
     assert_eq!((r.json()["n"].clone(), r.json()["x"].clone()), (json!(3), json!(true)));
-    // an empty array and a body that is neither form are still 400
-    assert_eq!(h.json("PATCH", "dbs/d/colls/c/docs/a", &[(PK, "[\"k\"]")], &json!([])).await.status, 400);
+    // an empty array changes nothing (304, as on Azure); a body that is neither form is a 400
+    assert_eq!(h.json("PATCH", "dbs/d/colls/c/docs/a", &[(PK, "[\"k\"]")], &json!([])).await.status, 304);
     assert_eq!(h.json("PATCH", "dbs/d/colls/c/docs/a", &[(PK, "[\"k\"]")], &json!({"ops": []})).await.status, 400);
 }
 

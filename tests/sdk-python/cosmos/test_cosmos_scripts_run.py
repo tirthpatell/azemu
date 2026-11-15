@@ -6,6 +6,7 @@ The scripts are the samples of "How to write stored procedures, triggers, and us
 github.com/Azure/azure-cosmosdb-js-server, or small variations of them.
 """
 
+import json
 import urllib.parse
 
 import pytest
@@ -191,10 +192,12 @@ def test_bulk_import_resumes_after_a_call_is_not_accepted(container):
 
 
 def test_script_logging_header_and_enable_flag(container):
+    # Azure (checked in November 2026): console.log writes its first argument as text, and the calls run together with
+    # nothing between them: `console.log('hello'); console.log('n =', 3)` is `hellon =`
     sproc(container, "log", "function () { console.log('hello'); console.log('n =', 3); getContext().getResponse().setBody(1); }")
     container.scripts.execute_stored_procedure("log", partition_key="p", enable_script_logging=True)
     seen = container.client_connection.last_response_headers
-    assert urllib.parse.unquote(seen["x-ms-documentdb-script-log-results"]) == "hello\nn = 3"
+    assert urllib.parse.unquote(seen["x-ms-documentdb-script-log-results"]) == "hellon ="
     container.scripts.execute_stored_procedure("log", partition_key="p")
     assert "x-ms-documentdb-script-log-results" not in container.client_connection.last_response_headers
 
@@ -212,6 +215,8 @@ def test_executing_a_missing_sproc_is_404(container):
         container.scripts.execute_stored_procedure("nope", partition_key="p")
 
 
+# Not repeated on the paid account: after a runaway script the serverless account answered the next call with 429 (sub-status 3200).
+@pytest.mark.emulator_only
 def test_an_infinite_loop_is_a_clean_error_and_the_service_goes_on(container):
     sproc(container, "spin", "function () { while (true) {} }")
     with pytest.raises(CosmosHttpResponseError) as e:
@@ -222,12 +227,40 @@ def test_an_infinite_loop_is_a_clean_error_and_the_service_goes_on(container):
 
 
 def test_the_javascript_query_api(container):
+    # Azure (checked in November 2026): a chain that ends in value() with no callback appends the result, as JSON text, to the
+    # response body, so the body is a string; flatten() with no argument leaves the arrays nested, flatten(true) flattens one level
     for n in range(5):
         container.create_item({"id": f"d{n}", "pk": "p", "n": n, "Tags": [f"t{n}", "all"]})
     sproc(container, "chain", """function () {
         __.chain().filter(function (d) { return d.n >= 3; }).sortByDescending(function (d) { return d.n; }).pluck("Tags").flatten().value();
     }""")
-    assert container.scripts.execute_stored_procedure("chain", partition_key="p") == ["t4", "all", "t3", "all"]
+    got = container.scripts.execute_stored_procedure("chain", partition_key="p")
+    assert isinstance(got, str) and json.loads(got) == [["t4", "all"], ["t3", "all"]]
+    sproc(container, "chain2", """function () {
+        __.chain().sortByDescending(function (d) { return d.n; }).pluck("Tags").flatten(true).value(function (e, feed) {
+            getContext().getResponse().setBody(feed.slice(0, 4));
+        });
+    }""")
+    assert container.scripts.execute_stored_procedure("chain2", partition_key="p") == ["t4", "all", "t3", "all"]
+
+
+def test_the_body_of_a_script_that_sets_none_is_an_empty_string(container):
+    sproc(container, "nobody", "function () { }")
+    assert container.scripts.execute_stored_procedure("nobody", partition_key="p") == ""
+    sproc(container, "appended", "function () { getContext().getResponse().setBody(1); getContext().getResponse().appendBody('x'); }")
+    assert container.scripts.execute_stored_procedure("appended", partition_key="p") == "1x"
+
+
+def test_console_has_log_only_and_logs_the_first_argument_as_text(container):
+    sproc(container, "logs", "function () { console.log({a: 1}); console.log([1, 2]); console.log(undefined); console.log(null); console.log('a\\nb'); }")
+    container.scripts.execute_stored_procedure("logs", partition_key="p", enable_script_logging=True)
+    seen = container.client_connection.last_response_headers
+    assert urllib.parse.unquote(seen["x-ms-documentdb-script-log-results"]) == "[object Object]1,2undefinednulla\nb"
+    sproc(container, "info", "function () { console.info('x'); }")
+    with pytest.raises(CosmosHttpResponseError) as e:
+        container.scripts.execute_stored_procedure("info", partition_key="p")
+    assert e.value.status_code == 400
+    assert "TypeError: Object doesn't support property or method 'info'" in e.value.message
 
 
 # ---- triggers ----------------------------------------------------------------
@@ -311,11 +344,26 @@ def test_udf_with_parameters_across_partitions(container):
 
 
 def test_udf_errors_and_unknown_udfs_are_400(container):
-    container.scripts.create_user_defined_function({"id": "Tax", "serverScript": TAX})
-    container.create_item({"id": "a", "pk": "p"})
+    container.scripts.create_user_defined_function({"id": "boom", "serverScript": "function (x) { throw 'bad input'; }"})
+    container.create_item({"id": "a", "pk": "p", "n": 1})
     with pytest.raises(CosmosHttpResponseError) as e:
-        list(container.query_items("SELECT VALUE udf.Tax(c.missing) FROM c", partition_key="p"))
-    assert e.value.status_code == 400 and "no input" in e.value.message
+        list(container.query_items("SELECT VALUE udf.boom(c.n) FROM c", partition_key="p"))
+    assert e.value.status_code == 400 and "bad input" in e.value.message
     with pytest.raises(CosmosHttpResponseError) as e:
         list(container.query_items("SELECT VALUE udf.Nope(1) FROM c", partition_key="p"))
     assert e.value.status_code == 400
+
+
+def test_a_udf_is_not_called_when_an_argument_is_undefined(container):
+    # Azure (checked in November 2026): the result is undefined, so the row is left out and nothing throws, even for a function
+    # that throws on undefined input; null is a value and the function is called
+    container.scripts.create_user_defined_function({"id": "Tax", "serverScript": TAX})
+    container.scripts.create_user_defined_function(
+        {"id": "two", "serverScript": "function (x, y) { return (x === undefined ? 'u' : x) + '-' + (y === undefined ? 'u' : y); }"})
+    container.create_item({"id": "a", "pk": "p", "n": 1})
+    assert list(container.query_items("SELECT VALUE udf.Tax(c.missing) FROM c", partition_key="p")) == []
+    assert list(container.query_items("SELECT VALUE udf.Tax(c.n) FROM c", partition_key="p")) == [0.1]
+    assert list(container.query_items("SELECT VALUE udf.two(c.n, c.missing) FROM c", partition_key="p")) == []
+    assert list(container.query_items("SELECT c.id FROM c WHERE udf.Tax(c.missing) = 1", partition_key="p")) == []
+    assert list(container.query_items("SELECT udf.Tax(c.missing) AS t, c.id FROM c", partition_key="p")) == [{"id": "a"}]
+    assert list(container.query_items("SELECT VALUE udf.two(null, 1) FROM c", partition_key="p")) == ["null-1"]

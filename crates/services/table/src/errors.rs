@@ -18,13 +18,34 @@ pub struct ApiError {
     pub challenge: Option<String>,
     /// For a 501: the operation that is not built, as `GET /_azemu/unsupported` shows it.
     pub unsupported: Option<String>,
+    /// How the body is written (see [`Form`]).
+    pub form: Form,
+}
+
+/// How an error is written, where Azure's answers differ.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Form {
+    /// OData JSON (or `m:error` XML for the operations with XML bodies), the Content-Type of the table operations.
+    #[default]
+    Table,
+    /// OData JSON with the plain Content-Type `application/json`: what the front end sends for a credential it refuses.
+    Credential,
+    /// The XML document `<error xmlns="...">` with indented elements, Content-Type `application/xml`: an `x-ms-version`
+    /// it does not know.
+    Version,
 }
 
 pub type Res<T> = Result<T, ApiError>;
 
 impl ApiError {
     pub fn new(status: u16, code: &str, message: &str) -> ApiError {
-        ApiError { status, code: code.to_string(), message: message.to_string(), challenge: None, unsupported: None }
+        ApiError { status, code: code.to_string(), message: message.to_string(), challenge: None, unsupported: None, form: Form::Table }
+    }
+
+    /// Written as an answer to a credential (see [`Form::Credential`]).
+    pub fn credential(mut self) -> ApiError {
+        self.form = Form::Credential;
+        self
     }
 
     /// Put the index of the failing batch operation in front of the message
@@ -88,14 +109,16 @@ pub fn auth_failed() -> ApiError {
         "AuthenticationFailed",
         "Server failed to authenticate the request. Make sure the value of Authorization header is formed correctly including the signature.",
     )
+    .credential()
 }
 
 pub fn authorization_failure() -> ApiError {
-    ApiError::new(403, "AuthorizationFailure", "This request is not authorized to perform this operation.")
+    ApiError::new(403, "AuthorizationFailure", "This request is not authorized to perform this operation.").credential()
 }
 
 pub fn permission_mismatch() -> ApiError {
     ApiError::new(403, "AuthorizationPermissionMismatch", "This request is not authorized to perform this operation using this permission.")
+        .credential()
 }
 
 pub fn resource_type_mismatch() -> ApiError {
@@ -104,14 +127,34 @@ pub fn resource_type_mismatch() -> ApiError {
         "AuthorizationResourceTypeMismatch",
         "This request is not authorized to perform this operation using this resource type.",
     )
+    .credential()
 }
 
 pub fn service_mismatch() -> ApiError {
     ApiError::new(403, "AuthorizationServiceMismatch", "This request is not authorized to perform this operation using this service.")
+        .credential()
 }
 
 pub fn protocol_mismatch() -> ApiError {
     ApiError::new(403, "AuthorizationProtocolMismatch", "This request is not authorized to perform this operation using this protocol.")
+        .credential()
+}
+
+/// 400: the `Authorization` header cannot be read.
+pub fn invalid_authentication_info() -> ApiError {
+    ApiError::new(
+        400,
+        "InvalidAuthenticationInfo",
+        "Authentication information is not given in the correct format. Check the value of Authorization header.",
+    )
+    .credential()
+}
+
+/// 400: an `x-ms-version` Azure does not know. The only error of the Table service that has no code header.
+pub fn invalid_version() -> ApiError {
+    let mut e = ApiError::new(400, "InvalidHeaderValue", "The value for one of the HTTP headers is not in the correct format.");
+    e.form = Form::Version;
+    e
 }
 
 fn detail(e: &ApiError, ctx: &RequestCtx) -> String {
@@ -136,14 +179,29 @@ pub fn xml_body(e: &ApiError, ctx: &RequestCtx) -> String {
     )
 }
 
+/// The indented XML document of an unknown `x-ms-version`.
+fn version_body(e: &ApiError, ctx: &RequestCtx) -> String {
+    format!(
+        "\u{feff}<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"yes\"?>\r\n<error xmlns=\"http://schemas.microsoft.com/ado/2007/08/dataservices/metadata\">\r\n  <code>{}</code>\r\n  <message xml:lang=\"en-US\">{}</message>\r\n</error>",
+        crate::xml::escape(&e.code),
+        crate::xml::escape(&detail(e, ctx)),
+    )
+}
+
 /// Render an error as a full HTTP response.
 pub fn render(e: &ApiError, ctx: &RequestCtx, xml: bool) -> Response {
-    let mut r = Resp::new(e.status).header("x-ms-error-code", &e.code);
-    if xml {
-        r = r.xml(xml_body(e, ctx));
-    } else {
-        r = r.header("Content-Type", crate::odata::CT_MINIMAL).header("X-Content-Type-Options", "nosniff").body(json_body(e, ctx));
+    let mut r = Resp::new(e.status);
+    if e.form != Form::Version {
+        r = r.header("x-ms-error-code", &e.code);
     }
+    r = match (e.form, xml) {
+        (Form::Version, _) => r.xml(version_body(e, ctx)),
+        (_, true) => r.xml(xml_body(e, ctx)),
+        (Form::Credential, false) => r.header("Content-Type", "application/json").body(json_body(e, ctx)),
+        (Form::Table, false) => {
+            r.header("Content-Type", crate::odata::CT_MINIMAL).header("X-Content-Type-Options", "nosniff").body(json_body(e, ctx))
+        }
+    };
     if let Some(c) = &e.challenge {
         r = r.header("WWW-Authenticate", c);
     }

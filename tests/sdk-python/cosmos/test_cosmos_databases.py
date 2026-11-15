@@ -99,6 +99,8 @@ def test_database_id_ending_with_space_is_rejected_by_sdk(client):
 
 
 @pytest.mark.not_on_vnext(reason="vnext offers outlive deleted resources and are matched to reused ids, so throughput reads are unreliable")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_database_manual_throughput_read_and_replace(client, db_id):
     db = client.create_database(db_id, offer_throughput=1000)
     assert db.get_throughput().offer_throughput == 1000
@@ -107,6 +109,8 @@ def test_database_manual_throughput_read_and_replace(client, db_id):
 
 
 @pytest.mark.not_on_vnext(reason="vnext has no autoscale offers")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_database_autoscale_throughput(client, db_id):
     db = client.create_database(
         db_id, offer_throughput=ThroughputProperties(auto_scale_max_throughput=5000, auto_scale_increment_percent=2)
@@ -120,6 +124,8 @@ def test_database_autoscale_throughput(client, db_id):
 
 
 @pytest.mark.not_on_vnext(reason="vnext does not validate autoscale throughput")
+# Throughput is never asked for on the Azure test account (serverless: a shared-throughput database is refused with 400).
+@pytest.mark.emulator_only
 def test_create_database_with_negative_autoscale_is_400(client, db_id):
     with pytest.raises(CosmosHttpResponseError) as e:
         client.create_database(

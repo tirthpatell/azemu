@@ -112,11 +112,14 @@ def test_logs_container_cannot_be_deleted_but_its_blobs_can(service, container, 
     logging_on(write=True)
     container.get_blob_client(blob_name).upload_blob(b"x")
     wait_for_line(service, lambda f: f[2] == "PutBlob" and has_key(f, container.container_name, blob_name))
-    with pytest.raises(HttpResponseError) as e:
-        service.get_container_client("$logs").delete_container()
-    assert e.value.status_code in (400, 409)
-    # one log blob can be deleted
+    # Azure (November 2026): 403 InsufficientAccountPermissions, for a delete, a write into it and a metadata change
     cc = service.get_container_client("$logs")
+    for call in (lambda: cc.delete_container(), lambda: cc.upload_blob("mine", b"x"), lambda: cc.set_container_metadata({"a": "1"})):
+        with pytest.raises(HttpResponseError) as e:
+            call()
+        assert e.value.status_code == 403
+        assert e.value.error_code == "InsufficientAccountPermissions"
+    # one log blob can be deleted
     name = log_blobs(service)[0].name
     cc.delete_blob(name)
     assert name not in [b.name for b in log_blobs(service)]

@@ -535,7 +535,7 @@ impl Shared {
         let mut seen = HashSet::new();
         for nd in defs.namespaces {
             let ns_key = key(&nd.name);
-            let mut ns = Namespace::default();
+            let mut ns = Namespace { name: ns_key.clone(), ..Default::default() };
             let load_core = |kind: &str, path: &str, core: &mut Core, saved: &mut Saved, seen: &mut HashSet<String>| -> io::Result<()> {
                 let file = hashed_name(kind, &[&ns_key, &path.to_lowercase()]);
                 if !seen.insert(file.clone()) {
@@ -557,6 +557,7 @@ impl Shared {
             };
             for q in nd.queues {
                 let mut core = Core::new(q.name.clone(), q.settings);
+                core.ns = ns_key.clone();
                 core.autocreated = q.autocreated;
                 load_core("queue", &q.name, &mut core, saved, &mut seen)?;
                 if ns.queues.insert(key(&q.name), Queue { name: q.name.clone(), core }).is_some() {
@@ -565,6 +566,7 @@ impl Shared {
             }
             for t in nd.topics {
                 let mut topic = Topic::new(&t.name, t.settings);
+                topic.ns = ns_key.clone();
                 let file = hashed_name("topic", &[&ns_key, &t.name.to_lowercase()]);
                 if !seen.insert(file.clone()) {
                     return Err(bad(&defs_path, format!("topic {} is listed twice in namespace {}", t.name, nd.name)));
@@ -582,6 +584,7 @@ impl Shared {
                 saved.entities.insert(file, (topic.scheduled.rev, topic.dup_rev, 0, 0));
                 for s in t.subs {
                     let mut core = Core::new(format!("{}/Subscriptions/{}", t.name, s.name), s.settings);
+                    core.ns = ns_key.clone();
                     core.autocreated = s.autocreated;
                     let path = format!("{}/{}", t.name, s.name);
                     load_core("sub", &path, &mut core, saved, &mut seen)?;
@@ -637,6 +640,7 @@ fn fill_core(core: &mut Core, f: EntityIn) -> Result<(), String> {
                 size: fw.size,
                 enq_seq: fw.enq_seq,
                 dead_letter_source: fw.dead_letter_source,
+                was_scheduled: false,
             },
         });
     }

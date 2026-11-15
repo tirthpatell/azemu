@@ -111,11 +111,17 @@ def test_assign_with_explicit_offsets(emu, topic1, track):
     assert [m.offset() for m in consume(c, 4)] == [6, 7, 8, 9]
 
 
-def test_offset_out_of_range_applies_auto_offset_reset(emu, topic1, track):
+@pytest.mark.parametrize("reset", ["earliest", "error"])
+def test_a_position_past_the_end_waits_whatever_auto_offset_reset_says(emu, topic1, track, reset):
+    # Azure answers a fetch beyond the end of the log with no error and no records, so auto.offset.reset never applies (a real namespace,
+    # November 2026: earliest, latest and error alike); the fetch waits until the log is that long
     fill(emu, topic1, 3)
-    c = track(consumer(plain(emu), kutil.uniq("g"), **{"auto.offset.reset": "earliest"}))
-    c.assign([TopicPartition(topic1, 0, 100)])  # beyond the end
-    assert [m.offset() for m in consume(c, 3)] == [0, 1, 2]
+    c = track(consumer(plain(emu), kutil.uniq("g"), **{"auto.offset.reset": reset}))
+    c.assign([TopicPartition(topic1, 0, 100)])
+    end = time.time() + 5
+    while time.time() < end:
+        m = c.poll(0.5)
+        assert m is None, m.error() or m.offset()
 
 
 def test_watermarks_and_offsets_for_times(emu, topic1, track):
@@ -126,8 +132,14 @@ def test_watermarks_and_offsets_for_times(emu, topic1, track):
     now_ms = int(time.time() * 1000)
     res = c.offsets_for_times([TopicPartition(topic1, 0, now_ms - 60_000)], timeout=10)
     assert res[0].offset == 0
-    res = c.offsets_for_times([TopicPartition(topic1, 0, now_ms + 3_600_000)], timeout=10)
-    assert res[0].offset == -1  # no event that new: the end of the log
+
+
+def test_offsets_for_a_time_after_the_last_event(emu, topic1, track):
+    # the end offset, not -1 as in Apache Kafka (a real namespace, November 2026)
+    fill(emu, topic1, 4)
+    c = track(consumer(plain(emu), kutil.uniq("g")))
+    res = c.offsets_for_times([TopicPartition(topic1, 0, int(time.time() * 1000) + 3_600_000)], timeout=10)
+    assert res[0].offset == 4
 
 
 def test_the_end_of_a_partition_is_reported_when_asked(emu, topic1, track):
@@ -193,11 +205,12 @@ def test_a_consumer_that_is_killed_is_dropped_after_the_session_timeout(emu, top
 
     group = kutil.uniq("g")
     child_code = (
-        "import sys, time\n"
+        "import json, os, sys, time\n"
         "from confluent_kafka import Consumer\n"
-        "c = Consumer({'bootstrap.servers': sys.argv[1], 'group.id': sys.argv[2], 'session.timeout.ms': 6000,"
-        " 'heartbeat.interval.ms': 1000, 'auto.offset.reset': 'earliest'})\n"
-        "c.subscribe([sys.argv[3]])\n"
+        "conf = json.loads(os.environ['KCONF'])\n"  # the connection settings come through the environment, not the argument list
+        "conf.update({'group.id': sys.argv[1], 'session.timeout.ms': 6000, 'heartbeat.interval.ms': 1000, 'auto.offset.reset': 'earliest'})\n"
+        "c = Consumer(conf)\n"
+        "c.subscribe([sys.argv[2]])\n"
         "while True:\n"
         "    c.poll(0.2)\n"
         "    if c.assignment():\n"
@@ -205,7 +218,11 @@ def test_a_consumer_that_is_killed_is_dropped_after_the_session_timeout(emu, top
         "        break\n"
         "time.sleep(600)\n"
     )
-    child = subprocess.Popen([sys.executable, "-c", child_code, f"127.0.0.1:{emu.port}", group, topic], stdout=subprocess.PIPE, text=True)
+    import json
+    import os
+
+    env = {**os.environ, "KCONF": json.dumps(plain(emu))}
+    child = subprocess.Popen([sys.executable, "-I", "-c", child_code, group, topic], stdout=subprocess.PIPE, text=True, env=env)
     try:
         assert child.stdout.readline().startswith("assigned")
         c2 = track(consumer(plain(emu), group))
@@ -225,6 +242,7 @@ def test_a_consumer_that_is_killed_is_dropped_after_the_session_timeout(emu, top
         child.wait(10)
 
 
+@pytest.mark.emulator_only  # the emulator's own admin API
 def test_group_state_is_visible_in_the_admin_api(emu, topic1, track):
     group = kutil.uniq("g")
     fill(emu, topic1, 2)

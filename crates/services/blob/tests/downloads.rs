@@ -95,9 +95,10 @@ async fn a_download_is_the_data_the_blob_had_when_it_was_asked_for() {
     // start the download and read only the first bytes; the rest waits in the connection
     let mut c = tokio::net::TcpStream::connect(("127.0.0.1", env.srv.port())).await.unwrap();
     let req = format!(
-        "GET /cnt/w HTTP/1.1\r\nHost: acct.blob.localhost:{}\r\nAuthorization: {}\r\nConnection: close\r\n\r\n",
+        "GET /cnt/w HTTP/1.1\r\nHost: acct.blob.localhost:{}\r\nAuthorization: {}\r\nx-ms-date: {}\r\nConnection: close\r\n\r\n",
         env.srv.port(),
-        AUTH.1
+        AUTH.1,
+        azemu_core::time::rfc1123(azemu_core::time::OffsetDateTime::now_utc())
     );
     tokio::io::AsyncWriteExt::write_all(&mut c, req.as_bytes()).await.unwrap();
     let mut first = vec![0u8; 400];

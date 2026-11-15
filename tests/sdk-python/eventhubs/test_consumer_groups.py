@@ -6,7 +6,7 @@ the group as "$default" and "$Default" against the real service, so names are no
 """
 
 import pytest
-from azure.eventhub.exceptions import AuthenticationError, ConnectError
+from azure.eventhub.exceptions import AuthenticationError
 
 import ehutil
 from ehutil import Collector, bodies, make_consumer, read_from_start, send_n, texts
@@ -65,7 +65,7 @@ def test_two_groups_read_at_the_same_time(emu, new_hub, track):
 
 def test_groups_of_one_hub_are_not_visible_on_another(emu, new_hub, track):
     a = new_hub(1, groups=["only-on-a"])
-    b = new_hub(1)
+    b = new_hub(2)  # (not the same hub: on Azure every hub with one partition is shared)
     p = track(ehutil.make_producer(emu, a))
     send_n(p, 1, partition_id="0")
     got, _ = read_group(emu, a, "only-on-a", 1, partition_id="0")
@@ -82,15 +82,22 @@ def test_group_with_a_long_name(emu, new_hub, track):
     assert len(got) == 1
 
 
-@pytest.mark.no_autocreate
-def test_unknown_group_is_an_error_when_auto_creation_is_off(emu, hub):
-    # The consumer's `$cbs` audience is `.../<hub>/consumergroups/<group>`; the real service refuses the token for a group that does
-    # not exist (404), which the SDK reports as AuthenticationError (a ConnectError). Only the base type is asserted.
-    # retry_total=0 matters: with retries the SDK's receive loop keeps reconnecting without ever calling on_error (as in
-    # Microsoft's test_client_invalid_credential, which also uses retry_total=0 for its consumers).
+def test_a_group_that_was_never_created_is_accepted(emu, hub, producer):
+    # Checked against a real namespace (Standard tier, November 2026): the `$cbs` token for `.../<hub>/consumergroups/<group>` is accepted for a group
+    # nobody made, the receiver gets the events, and the group does not show up in the list of the hub's groups. The SDKs open the link
+    # the same way for every group, so a program cannot tell. (Whether other tiers answer so was not tried.)
+    sent = send_n(producer, 3, partition_id="0")
     with Collector(make_consumer(emu, hub, "no-such-group", retry_total=0), partition_id="0", starting_position="-1", max_wait_time=1) as col:
-        col.wait_until(lambda c: c.errors, 10, "an on_error call")
-        assert isinstance(col.errors[0][1], ConnectError)
+        assert bodies(col.wait_events(3)) == sent
+        assert col.errors == []
+
+
+def test_groups_with_names_that_were_never_created_do_not_share_a_position(emu, hub, producer):
+    sent = send_n(producer, 2, partition_id="0")
+    for group in ("ghost-one", "ghost-two", "ghost-one"):
+        got, col = read_group(emu, hub, group, 2, partition_id="0")
+        assert bodies(got) == sent, group
+        assert col.errors == []
 
 
 @pytest.mark.no_autocreate

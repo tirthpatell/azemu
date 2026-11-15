@@ -123,6 +123,45 @@ fn event_hubs_and_service_bus_queues_can_be_made() {
 }
 
 #[test]
+fn blob_containers_and_cosmos_databases_and_containers_can_be_made_and_made_again() {
+    emulator_or_skip!();
+    let emu = shared();
+    let blob = unique_name("blobs");
+    emu.create_blob_container(&blob, "uploads");
+    emu.create_blob_container(&blob, "uploads"); // there already: not an error
+    let got = emu.call(Service::Blob, &blob, "GET", "/uploads?restype=container", &[BEARER], "");
+    assert_eq!(got.status, 200, "{}", got.body);
+    let cosmos = unique_name("cosmos");
+    emu.create_cosmos_database(&cosmos, "app");
+    emu.create_cosmos_database(&cosmos, "app");
+    emu.create_cosmos_container(&cosmos, "app", "items", "/tenantId");
+    emu.create_cosmos_container(&cosmos, "app", "items", "/tenantId");
+    let headers = [("x-ms-version", "2018-12-31"), ("Authorization", "type=master&ver=1.0&sig=x")];
+    let got = emu.call(Service::Cosmos, &cosmos, "GET", "/dbs/app/colls/items", &headers, "");
+    assert_eq!(got.status, 200, "{}", got.body);
+    assert!(got.body.contains("\"paths\":[\"/tenantId\"]"), "{}", got.body);
+    // used in a document: the container takes one with its partition key value
+    let doc = emu.call(
+        Service::Cosmos,
+        &cosmos,
+        "POST",
+        "/dbs/app/colls/items/docs",
+        &[headers[0], headers[1], ("x-ms-documentdb-partitionkey", "[\"t1\"]"), ("Content-Type", "application/json")],
+        "{\"id\":\"1\",\"tenantId\":\"t1\"}",
+    );
+    assert_eq!(doc.status, 201, "{}", doc.body);
+}
+
+#[test]
+#[should_panic(expected = "creating blob container")]
+fn a_container_name_the_emulator_refuses_stops_the_test_with_the_reason() {
+    if !have_azemu() {
+        panic!("creating blob container (skipped: azemu is not built)");
+    }
+    shared().create_blob_container(&unique_name("blobs"), "Not_Valid");
+}
+
+#[test]
 fn an_emulator_that_is_already_running_can_be_used_and_its_authority_is_fetched() {
     emulator_or_skip!();
     let running = Emulator::try_start(&[]).expect("start");

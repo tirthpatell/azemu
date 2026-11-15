@@ -111,7 +111,10 @@ class BlobQueryTest {
 
     @Test void aggregates_andLimit() {
         BlobClient b = blob("1\n2\n3\n4\n");
-        assertEquals("4,10,2.5\n", query(b, new BlobQueryOptions("SELECT COUNT(*), SUM(CAST(_1 AS INT)), AVG(CAST(_1 AS INT)) FROM BlobStorage")));
+        // one aggregate is the whole select list on Azure (two are a syntax error)
+        assertEquals("4\n", query(b, new BlobQueryOptions("SELECT COUNT(*) FROM BlobStorage")));
+        assertEquals("10\n", query(b, new BlobQueryOptions("SELECT SUM(CAST(_1 AS INT)) FROM BlobStorage")));
+        assertEquals("2.5\n", query(b, new BlobQueryOptions("SELECT AVG(CAST(_1 AS INT)) FROM BlobStorage")));
         assertEquals("1\n2\n", query(b, new BlobQueryOptions("SELECT * FROM BlobStorage LIMIT 2")));
     }
 
@@ -173,11 +176,12 @@ class BlobQueryTest {
         assertEquals(sb.toString(), read(b.openQueryInputStream("SELECT * FROM BlobStorage")));
     }
 
-    @Test void parquetInput_andArrowOutput_areRefusedWith501() {
+    @Test void parquetInputOfAnotherBlob_is400_andArrowOutput_isRefusedWith501() {
         BlobClient b = blob(CSV);
         BlobStorageException e = assertThrows(BlobStorageException.class, () -> query(b,
             new BlobQueryOptions("select * from blobstorage").setInputSerialization(new BlobQueryParquetSerialization())));
-        assertEquals(501, e.getStatusCode());
+        // Azure reads Parquet; a blob that is not Parquet is "Invalid parquet file. Corrupt footer."
+        assertEquals(400, e.getStatusCode());
         BlobStorageException e2 = assertThrows(BlobStorageException.class, () -> query(b,
             new BlobQueryOptions("SELECT _2 FROM BlobStorage").setOutputSerialization(
                 new BlobQueryArrowSerialization().setSchema(List.of(new BlobQueryArrowField(BlobQueryArrowFieldType.DECIMAL).setName("abc").setPrecision(4).setScale(2))))));
