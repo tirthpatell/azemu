@@ -11,7 +11,7 @@ administration client uses https on the same port, so the container needs the em
 is Event Hubs and not Service Bus (`docs/services/eventhubs.md`). Queues, topics and subscriptions must be created first (administration client, config
 file, ARM) unless `--lenient`; a namespace needs no creation.
 
-**Not built.** Authentication, rights and SAS expiry (every credential is accepted), partitioned entities (the flag is stored), `AutoDeleteOnIdle` (stored, nothing
+**Not built.** Authentication, rights and SAS expiry (every credential is accepted, unless `--strict-auth`: see "Auth"), partitioned entities (the flag is stored), `AutoDeleteOnIdle` (stored, nothing
 is deleted), Azure's "one entity per transaction unless via" rule (not enforced), the REST message operations (`/{entity}/messages`, 501), geo-replication and
 Premium features. Timing is not Azure's. The suite was never compared with Microsoft's own Service Bus emulator.
 
@@ -41,6 +41,16 @@ namespace `default`).
 - Namespaces exist for any name (nothing creates them; an entity is what makes one visible). Entity names are case-insensitive (original casing is kept).
 
 ## Auth
+
+**With `--strict-auth` the credentials are checked** ([`../strict-auth.md`](../strict-auth.md)); this section is about the default, where they are not.
+In strict mode: `$cbs` `put-token` checks a SAS token (key name, signature with either key, audience, which must name this namespace in its host, expiry with five minutes of grace) or an Entra token (signature,
+expiry, audience) and answers a bad one `401` `com.microsoft:auth-failed` with Azure's text; a good one is accepted whatever its rights, and the missing `Send` or `Listen` claim
+is refused at the **link attach** (`amqp:unauthorized-access`, "Unauthorized access. 'Send' claim(s) are required to perform this operation. Resource: ..."). A principal needs
+`Azure Service Bus Data Sender` / `Receiver` / `Owner` at the namespace or the entity. The administration API answers `401` for a missing right (a rule needs `Manage`; a token needs
+the `queues/read` and `write` actions of a role). A namespace made through Resource Manager has its rules (keys from `listKeys`); any other has `RootManageSharedAccessKey` with the key
+`SAS_KEY_VALUE`, and more rules come from the config file (`AuthorizationRules` on a namespace, queue or topic) or `PUT /_azemu/servicebus/{ns}/authorization-rules/{name}`.
+Compared with Azure in November 2026 (four principals, four kinds of rule, expired and wrong tokens); not tried: topics and sessions with rules of their own, the claim each `$management`
+operation needs (a guess: `Send` for schedule and cancel, `Manage` for rules, `Listen` for the rest), a link whose token runs out while it is open.
 
 Every SASL mechanism and every credential is accepted. `$cbs` accepts `put-token` (SAS and JWT) with
 `status-code` 202 `Accepted`; any other `$cbs` operation answers 501. The emulator does not check tokens,
@@ -139,7 +149,7 @@ the answer. Tested with the JavaScript SDK (`tests/sdk-js`, `servicebus_rules`) 
 
 - A duration just below `TimeSpan.MaxValue` (what the Python SDK writes back for the maximum, `P10675199DT2H48M5.477539S`) is kept as the maximum `P10675199DT2H48M5.4775807S`; Azure keeps the exact value (durations are stored in milliseconds here).
 
-- No authentication or authorization; no rights, no SAS expiry checks.
+- No authentication or authorization; no rights, no SAS expiry checks (with `--strict-auth` there are, see "Auth").
 - A settlement or session call after the session lock ran out fails with `com.microsoft:session-lock-lost`. That is inferred from the strings in the .NET and Java SDKs and from
   Microsoft Learn ("the session lock has expired"); the real service's exact answer is not recorded.
 - Rule texts: the text of a SQL syntax error follows Azure's layout (`There was an error parsing the SQL expression. [Token line=1, column=3, Token in error= =, Additional details= syntax error, unexpected EQ]`), but only `EQ`, `EOF` and `IDENTIFIER` are named as Azure names them and the "expecting ..." list is not given. The type of a number property in a `FilterException` text is `long` (Azure says `int` for a property sent as an AMQP int).
@@ -172,6 +182,7 @@ the answer. Tested with the JavaScript SDK (`tests/sdk-js`, `servicebus_rules`) 
   `DuplicateDetectionHistoryTimeWindow`, `AutoDeleteOnIdle`) refuses the file with a message naming the entity (logged at
   error level) and nothing from it is created. `config::try_apply_properties` does the same check for other callers;
   `config::apply_properties` stays lenient.
+- **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled send, connection or receiving link is refused with `com.microsoft:server-busy`; the administration API answers `429` with the Atom error. The description text, the status and the management form (a status in the response message, not built) are a guess.
 
 ## Transactions
 

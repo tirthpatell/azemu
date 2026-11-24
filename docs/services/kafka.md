@@ -10,8 +10,8 @@ other way round. Checked with librdkafka (Python, `kcat`-style clients), the Jav
 from a container. For TLS the client needs the emulator's certificate authority. A producer or an admin client that names a topic that does not exist makes the event hub (1 partition, 7 days), as on Azure; a consumer's request does not.
 
 **Not built.** Transactions, compaction, `DeleteRecords`, `DeleteGroups`, ACLs, `AlterConfigs`, changing a topic's partition count, `SCRAM` and `GSSAPI`, fetch sessions, quotas and
-throttling, Schema Registry, compression other than none and `gzip` (franz-go needs `ProducerBatchCompression(NoCompression())`). One broker (id 0) leads every
-partition. See "Differences" for the rest.
+throttling, compression other than none and `gzip` (franz-go needs `ProducerBatchCompression(NoCompression())`). One broker (id 0) leads every
+partition. See "Differences" for the rest. The Schema Registry of the namespace is served over HTTP, not by this endpoint, and it is Azure's registry, not Confluent's ([`schema-registry.md`](schema-registry.md), "Kafka").
 
 **Checked against Azure.** The Python suite (`tests/sdk-python/kafka`, librdkafka) was run against the Kafka endpoint of a real Standard namespace in November 2026, and the emulator was changed to answer as it
 did. "Differences" lists what is still different. Only librdkafka and hand-made `ApiVersions` requests were used; the Java client and franz-go were not run against Azure, and Premium and Dedicated were not tried.
@@ -61,7 +61,7 @@ the same ones AMQP uses (`sb://myns.eventhub.localhost:{port}`), so what one pro
 ### Authentication
 
 SASL `PLAIN` and `OAUTHBEARER` are offered (`SaslHandshake` v1, `SaslAuthenticate` v0 to 2) and every credential is accepted (the
-project's loose-auth rule); the shape is checked (PLAIN needs the three NUL-separated parts, OAUTHBEARER needs `auth=Bearer`). A client
+project's loose-auth rule; with `--strict-auth` they are checked, see below); the shape is checked (PLAIN needs the three NUL-separated parts, OAUTHBEARER needs `auth=Bearer`). A client
 that skips SASL is accepted too. The PLAIN password is read only for its `Endpoint=`. `SCRAM` and `GSSAPI` are refused with
 `UNSUPPORTED_SASL_MECHANISM`, and the list of mechanisms is in the answer.
 
@@ -131,6 +131,17 @@ kafka-go, Spring Kafka, Kafka Streams without transactions, Kafka Connect withou
 | `POST /_azemu/reset` | drops hubs, events, groups and committed offsets; waiting fetches end |
 
 `GET /_azemu/kafka/{namespace}/groups` lists the groups (state, members, committed offsets), for looking at what a test left behind.
+
+### Strict authorisation
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) the login is checked and nothing but `ApiVersions` and the login is answered before it succeeded (the connection is closed). `PLAIN`
+needs the user `$ConnectionString` ("Invalid SASL PLAIN user name.") and a connection string ("The Service Bus connection string is not of the expected format. ...") whose
+`SharedAccessKeyName` and `SharedAccessKey` are a rule of the namespace, or of the event hub in `EntityPath` ("Invalid SASL PLAIN password." for a wrong key and for an unknown name).
+`OAUTHBEARER` needs an Entra token ("Invalid SASL OAUTHBEARER message." for a string that is no token, `InvalidSignature: ...` for a changed signature, "Invalid URI: The format of the URI could
+not be determined." for another audience). A failed login is answered with `SASL_AUTHENTICATION_FAILED` and the connection is closed. After it a produce needs `Send`, a fetch, a list of
+offsets, an offset fetch and an offset commit need `Listen`, and creating or deleting a topic needs `Manage`: the answer is `TOPIC_AUTHORIZATION_FAILED` (29) for that topic (a consumer with a
+send-only key gets it at the offset fetch, as on Azure). A principal with no role is closed at the coordinator lookup, and after the answer to a produce. Checked against Azure in November 2026
+with the four principals and the root, send-only and listen-only strings; not tried: the admin calls, a produce that makes a topic, `DescribeConfigs`.
 
 ## APIs
 

@@ -7,7 +7,7 @@
 
 # azemu
 
-A local emulator of Azure services, in one program. Point your Azure SDK at it and write tests against Blob, Queue, Table, Key Vault, App
+A local emulator of Azure services, in one program. Point your Azure SDK at it and write tests against Blob, Queue, Table, Azure Files (the REST API, not mounts), Key Vault, App
 Configuration, Cosmos DB, Service Bus, Event Hubs, Event Grid and Resource Manager without an Azure account, on your machine or in CI. It is for building
 and testing code. It is not for production, and it is not a place to test security: bearer tokens and most keys and passwords are not checked (storage signatures for the
 development account are; see "Credentials are checked loosely"). State is in memory, or in a data directory if you ask. It starts in about 10 ms and uses about 15 MB when idle (release build).
@@ -41,7 +41,7 @@ builds the image (about 3 minutes). `azemu --version` prints the version and the
 When it is ready it prints one line to standard output:
 
 ```
-azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm version=0.2.0 commit=1a2b3c4d5e6f
+azemu ready gateway=http://127.0.0.1:4577 ca=/home/me/.azemu/ca.pem services=blob,dfs,queue,table,keyvault,appconfig,cosmos,eventgrid,identity,servicebus,eventhubs,kafka,arm,monitor,file,auth version=0.3.0 commit=1a2b3c4d5e6f
 ```
 
 `gateway` is the address of the main port (4577), `ca` is the certificate authority for https (see below), `services` is what is mounted. Logs go to standard
@@ -181,14 +181,16 @@ behaviour that could not be confirmed against Azure.
 | [Data Lake Gen2](docs/services/datalake.md) | `{acct}.dfs.core.localhost`, 10003 | filesystems, directories, rename, ACLs, same data as Blob | container sessions |
 | [Queue](docs/services/queue.md) | `{acct}.queue.core.localhost`, 10001 | all message operations, visibility, SAS | quotas |
 | [Table](docs/services/table.md) | `{acct}.table.core.localhost`, 10002 | `$filter`, batches, SAS | the Cosmos Table API |
+| [Azure Files](docs/services/file.md) (REST API only) | `{acct}.file.core.localhost`, 10004 | shares, directories, files and ranges, SMB properties, leases, snapshots, soft delete, copy, rename, SAS, stored access policies | **SMB and NFS** (a share cannot be mounted), links, copy from a blob, premium share settings |
 | [Key Vault](docs/services/keyvault.md) | `{vault}.vault.localhost`, 10010 (https) | secrets, keys with real cryptography, certificates, soft delete | key release and attestation, HSM administration, symmetric key operations |
-| [App Configuration](docs/services/appconfig.md) | `{store}.azconfig.localhost`, 10011 (https) | key-values, labels, revisions, locks, snapshots | throttling |
-| [Cosmos DB](docs/services/cosmos.md) (NoSQL API, gateway mode) | `{acct}.documents.localhost`, 8081 (https) | queries, patch, batch and bulk, change feed, TTL, stored procedures, triggers, functions | direct mode, vector and full-text search, 429, consistency levels |
-| [Service Bus](docs/services/servicebus.md) (AMQP) | `{ns}.servicebus.localhost`, 5672 | queues, topics, rules, sessions, dead-lettering, scheduling, transactions, management API, AMQP over WebSocket | authentication, partitioned entities |
-| [Event Hubs](docs/services/eventhubs.md) (AMQP and [Kafka](docs/services/kafka.md)) | `{ns}.eventhub.localhost`, 5672 (Kafka 9093) | send, partition keys, consumer groups, checkpoints in Blob, Kafka producers and consumers | Schema Registry, Capture |
-| [Event Grid](docs/services/eventgrid.md) | `{topic}.eventgrid.localhost`, 10012 (https) | publish, pull, push to webhooks, Storage queues, Service Bus, event hubs; [blob events](docs/services/storage-events.md) | partner topics in ARM, blob dead-letter |
+| [App Configuration](docs/services/appconfig.md) | `{store}.azconfig.localhost`, 10011 (https) | key-values, labels, revisions, locks, snapshots | quotas and throttling of its own (a fault rule can make it answer 429) |
+| [Cosmos DB](docs/services/cosmos.md) (NoSQL API, gateway mode) | `{acct}.documents.localhost`, 8081 (https) | queries, patch, batch and bulk, change feed, TTL, stored procedures, triggers, functions | direct mode, vector and full-text search, consistency levels, a 429 of its own (a fault rule or a request-unit budget can make it answer one) |
+| [Service Bus](docs/services/servicebus.md) (AMQP) | `{ns}.servicebus.localhost`, 5672 | queues, topics, rules, sessions, dead-lettering, scheduling, transactions, management API, AMQP over WebSocket | authentication (unless `--strict-auth`: keys, rights, expiry, roles), partitioned entities |
+| [Event Hubs](docs/services/eventhubs.md) (AMQP and [Kafka](docs/services/kafka.md)) | `{ns}.eventhub.localhost`, 5672 (Kafka 9093) | send, partition keys, consumer groups, checkpoints in Blob, Kafka producers and consumers, [Schema Registry](docs/services/schema-registry.md) (Avro, JSON, custom; compatibility modes) | Capture |
+| [Event Grid](docs/services/eventgrid.md) | `{topic}.eventgrid.localhost`, 10012 (https) | publish, pull, push to webhooks, Storage queues, Service Bus, event hubs, Azure Functions (a host you point it at), delivery properties, blob dead letters; [blob events](docs/services/storage-events.md) | partner topics in ARM, batching |
 | [Identity](docs/services/identity.md) | `login.localhost` or `/_azemu/identity`, 10014 | token endpoints for `DefaultAzureCredential` and the Entra flows | validating anything |
 | [Resource Manager](docs/services/arm.md) | `management.localhost`, 10013 (https) | resource groups, deployments, templates, the resource types above | every other resource type is stored only (below) |
+| [Monitor](docs/services/monitor.md) (a sink) | `{region}.in.localhost`, 10015 | Application Insights telemetry from the SDKs and OpenTelemetry exporters, Live Metrics pings, the Logs Ingestion API; read back through `/_azemu/monitor/` | queries (Log Analytics, the Application Insights REST API), metrics queries, alerts |
 
 Any account, vault, store or namespace name is a separate account, made on first use. Anything below the account is not (see "Behaves like Azure").
 
@@ -228,7 +230,7 @@ as they do on Azure (tried for a Service Bus queue, a Storage queue and an Event
 - with the SDK: Blob, Queue and Table create calls; the Service Bus administration client (`ServiceBusAdministrationClient.create_queue`);
 - with Resource Manager: Terraform, Bicep templates or the management SDKs (below);
 - for Event Hubs and Event Grid, whose SDK administration clients cannot create anything here, with the emulator's own admin API
-  (`curl -X PUT localhost:4577/_azemu/eventhubs/myns/hubs/orders -d '{"partitionCount":2}'`; tried) or Resource Manager;
+  (`curl -X PUT localhost:4577/_azemu/eventhubs/myns/hubs/orders -H 'Content-Type: application/json' -d '{"partitionCount":2}'`; tried) or Resource Manager;
 - from a file, loaded at start and again after every reset: `AZEMU_SERVICEBUS_CONFIG`, `AZEMU_EVENTHUBS_CONFIG`, `AZEMU_EVENTGRID_CONFIG`.
 
 **Blob versioning is off** for a storage account until it is turned on (`isVersioningEnabled` through Resource Manager), as on Azure.
@@ -240,7 +242,7 @@ are never made for you.
 
 **Credentials are checked loosely.** Precisely:
 
-- A bearer token is never decoded or checked: any token passes. A request with no credentials, where Azure would refuse one, is refused (Blob, Queue and Table 401 with the
+- A bearer token is never decoded or checked: any token passes (unless you start the emulator with `--strict-auth`: see the last point). A request with no credentials, where Azure would refuse one, is refused (Blob, Queue, Table and Files 401 with the
   bearer challenge, as Azure answers; Key Vault, Cosmos, App Configuration, Event Grid and Resource Manager 401). Blob has more answers, as Azure does: an anonymous read in an account
   that does not allow public access is 409 `PublicAccessNotPermitted`, and an `Authorization` header that cannot be read is 400 `InvalidAuthenticationInfo`
   ([details](docs/services/blob.md)).
@@ -251,9 +253,11 @@ are never made for you.
   emulator, so a changed signature or a SAS made for another blob is accepted if it is well formed. A signature that is made up (`sig=bad`, `replay`, `Sanitized`) is refused for every account; to replay
   recorded traffic, which carries such signatures and old dates, start the emulator with `AZEMU_LOOSE_AUTH=1` (it checks no signature and no date, and warns at start).
 - A SAS is checked for expiry, start time, permissions, resource type and protocol for **every** account.
-- Service Bus, Event Hubs and Kafka accept every credential and mechanism. Event Grid needs a key or token; a custom topic made through Resource Manager (or given `keys` in the admin API) compares a key and a signed token with its keys and answers 401 for a wrong one, a topic without keys takes any (a bearer token is never looked at). Cosmos and App Configuration
+- Service Bus, Event Hubs and Kafka accept every credential and mechanism, unless `--strict-auth` is on: then a shared access key must be one the namespace has (Resource Manager's keys for a namespace it made; `SAS_KEY_VALUE` for the root rule of any other), its rights (`Send`, `Listen`, `Manage`) and its expiry are checked as Azure checks them, and an Entra token needs a data role. Event Grid needs a key or token; a custom topic made through Resource Manager (or given `keys` in the admin API) compares a key and a signed token with its keys and answers 401 for a wrong one, a topic without keys takes any (a bearer token is never looked at). Cosmos and App Configuration
   accept any key (the Rust Cosmos SDK checks that the key is valid base64 before it sends anything: use the well-known emulator key in [`docs/services/cosmos.md`](docs/services/cosmos.md#using-it)).
-- No role assignments exist, so a missing role, a wrong key or a wrong tenant never fails here.
+- By default no role assignments are looked at, so a missing role, a wrong key or a wrong tenant never fails here. **`--strict-auth`** (or `AZEMU_STRICT_AUTH=1`) is the exception for identities: a bearer
+  token must be one the emulator's identity service issued (signature, expiry, audience) and the caller's role assignments decide, with Azure's own answers, for Blob, Data Lake, Queue, Table, Key Vault,
+  App Configuration, Cosmos DB, Event Grid, Service Bus, Event Hubs, Kafka and the Schema Registry. Account keys, SAS and the other keys are checked exactly as above (on Azure a key is full access too; the keys of Service Bus and Event Hubs have rights and an expiry, and are checked), Resource Manager is not checked ([`docs/strict-auth.md`](docs/strict-auth.md): what it checks and what it does not, how to give a role, how to find out why a request was refused).
 
 ## Using it in tests
 
@@ -263,6 +267,12 @@ are never made for you.
 - **Things that exist from the start.** On Azure, infrastructure code makes the blob containers, queues, tables, Cosmos databases and containers, secrets and settings; here nothing exists until
   something creates it. `--seed seed.json` (`AZEMU_SEED`) lists them in a JSON file; they are made at start and again after every reset, and a thing that already exists is left as it is.
   Format and an example: [`docs/seed.md`](docs/seed.md). Tried: all six kinds found with the Python SDKs, a reset and a partial reset; a restart with `--data-dir` in the Rust tests.
+- **Make it fail on purpose.** The emulator never throttles by itself, but you can ask it to: `POST /_azemu/faults` adds a rule such as "the first two downloads from this container
+  answer 503 ServerBusy with `Retry-After: 1`", "Cosmos answers 429 once 400 request units were used in a second", "every send to this queue is refused as server busy", "a delay of
+  300 ms", or "close the connection". Rules go away with a full reset, or come from `--faults faults.json` (`AZEMU_FAULTS`). Your retry and back-off code then runs. Tried with the
+  Python, Go and Rust SDKs: they retried, and most waited for the retry header. [`docs/faults.md`](docs/faults.md).
+- **Start it from the test with Testcontainers** (Rust, Go, Python): the published image, the mapped ports and a wait on `GET /_azemu/health`; a container starts in about a third of a second here. The page has plain http with the Azurite connection
+  string, https with a token (the container's own CA trusted by one client, `IDENTITY_ENDPOINT` at the mapped port), Service Bus, a reset, a seed file, and three tested projects: [`docs/testcontainers.md`](docs/testcontainers.md).
 - **Parallel runs** can share one emulator if each uses its own account names (any name is a fresh account) and resets only its own.
 - **Keep data between runs:** `--data-dir ~/.azemu-data`. It is saved every 15 seconds when something changed (`--save-interval`), on `POST /_azemu/save`, and on Ctrl-C
   and SIGTERM (and so on `docker stop`). **A crash loses what changed since the last save**, and services are saved at different moments, so two can be a few seconds
@@ -275,6 +285,7 @@ are never made for you.
 - **See what is running:** `GET /_azemu/` lists the admin endpoints with their methods (`health`, `config`, `ca.pem`, `reset`, `save`, `unsupported`, and the `/_azemu/<service>/...` prefix of each service that has one);
   `GET /_azemu/health` (version, commit, services), `GET /_azemu/config` (the settings in force, where each came from, and any `AZEMU_*`
   variable nobody reads: a typing mistake is also warned about at start).
+- **Look inside it:** `http://localhost:4577/_azemu/ui` is a page that shows what every service holds (blobs, queue messages including the hidden ones, Service Bus messages by state, Event Hubs partitions, Cosmos DB documents, Event Grid deliveries and dead letters, resources, the fault rules and the operations not built), and `GET /_azemu/inspect` is the same as JSON. It only reads; nothing is locked, received or counted. [`docs/inspector.md`](docs/inspector.md).
 - **The log** is one line per request on standard error. At `--log-level debug` it adds the query and headers, with `Authorization`, SAS signatures and other
   credentials replaced by `<redacted>` (tried). A request refused because it carries no credentials is logged, at the default level, with the reason (`refused PUT /c1 (restype=container): no Authorization header and no SAS in the query: the Blob SDK was probably built without a credential`; tried).
 
@@ -338,10 +349,13 @@ are never made for you.
   ([how to run a suite against Azure](tests/sdk-python/README.md#running-a-suite-against-azure)). For the HTTP services, the behaviour that had been a guess (storage credentials,
   anonymous access and CORS; Blob, Data Lake, Key Vault, App Configuration and Event Grid details) was settled by sending the same raw request to Azure and to the emulator.
   Where Azure answered differently the emulator was changed (`CHANGELOG.md`, "Changed to match Azure"); what was left as it is, and why, is in each service page.
+  What came with version 0.3.0 was compared the same way: the suites for Azure Files, the Schema Registry and strict authorisation pass on both sides (for strict authorisation with four
+  real identities: every role, read-only roles, none, and roles on single things, plus keys with fewer rights); the telemetry sink's answers are the real ingestion endpoint's; Event Grid's
+  delivery properties, dead-letter blobs and the events a storage account raises were read off a real topic; and about 230 template function results are the outputs of real deployments.
   This was one account, one region and the cheapest tiers, on those days: it is a check of the cases the tests hold, not a guarantee.
 - **Real clients of other kinds:** the Azure Functions host ([`tests/functions`](tests/functions/README.md)), Terraform ([`tests/terraform`](tests/terraform/README.md)) and a
   container test ([`tests/container`](tests/container/README.md)).
-- **The emulator's own tests:** about 2,500 unit and integration tests in the crates (`cargo test --workspace`).
+- **The emulator's own tests:** about 3,100 unit and integration tests in the crates (`cargo test --workspace`).
 
 ## How it was made
 
@@ -353,8 +367,8 @@ recordings of real Azure traffic, in which its answers are compared with the one
 are in this repository to run again.
 
 Version 0.1.0 was made without an Azure account. Since version 0.2.0 parts of it have been compared with a real subscription (see above), and a good number of guesses
-turned out wrong and were corrected. Much has still not been compared: the .NET, JavaScript, Java, Go and Rust suites were not run against Azure, nor were Resource Manager,
-the Premium tiers, or anything that needs more than one region. Where Azure's behaviour could not be confirmed from the account, a recording or Microsoft's
+turned out wrong and were corrected. Much has still not been compared: the .NET, JavaScript, Java, Go and Rust suites were not run against Azure, nor were Resource Manager
+(beyond the results of template functions), the fault answers (Azure cannot be made to throttle on request), the Premium tiers, or anything that needs more than one region. Where Azure's behaviour could not be confirmed from the account, a recording or Microsoft's
 documentation, the service's page says so. Treat it as a new tool: use it for development and tests, and keep a small set of tests that run against real Azure.
 
 ## What it cannot tell you
@@ -362,26 +376,28 @@ documentation, the service's page says so. Treat it as a new tool: use it for de
 An emulator that is always fast, always consistent and checks almost no credentials cannot show the failures that come from the outside. Keep a small set of tests
 that run against real Azure.
 
-- **Throttling and slowness:** there are no 429 or 503 answers, no request units, no retry-after, and timing is not Azure's (locks, TTLs, soft delete and leases use
-  real time and are fast). Your retry and back-off settings are never exercised.
-- **Access control:** no role-based access checks. A missing role assignment, a wrong key or a managed identity with the wrong rights is a common Azure failure and never
-  fails here.
+- **Throttling and slowness:** the emulator never throttles by itself: no quotas, no request units, no retry-after, and timing is not Azure's (locks, TTLs, soft delete and
+  leases use real time and are fast). Faults can be injected on request (429 and 503 answers in each service's own shape, a delay, a dropped connection, a Cosmos request-unit
+  budget; [`docs/faults.md`](docs/faults.md)), so your retry and back-off settings can be exercised, but when and how often Azure would throttle you is not something it can tell.
+- **Access control:** by default no role-based access checks: a missing role assignment, a wrong key or a managed identity with the wrong rights is a common Azure failure and never
+  fails here. With `--strict-auth` a missing role is caught for the services listed under "Credentials are checked loosely" ([`docs/strict-auth.md`](docs/strict-auth.md)); a wrong key (not for Service Bus, Event Hubs and Kafka: their keys, rights and expiry are checked) and a wrong tenant are still not.
 - **Cosmos DB:** one physical partition, no splits, no consistency levels (reads see the latest write), no regions, request charges are made up.
 - **Eventual consistency, regions, partition moves** and anything that depends on several machines.
 - **Where the documentation was silent.** Service Bus messaging, Event Hubs, the Kafka endpoint and most of Cosmos have no recordings to check against; the tests and the
   code come from the same documentation. They were never compared with Microsoft's own Service Bus or Event Hubs emulators. Each service page lists its guesses.
 - **Resource types that are stored only** (above), and operations that answer 501.
 - **Services that are not emulated.** Azure Functions' runtime (run the real host: see above), Azure SQL (run SQL Server or its container), Redis (run Redis), Azure Files
-  shares, Monitor and Application Insights (an app that exports telemetry will log errors), App Service, AKS, Virtual Machines, Event Hubs Schema Registry. Run the real
-  engine in a container for the first three.
+  as a mount (SMB and NFS; the REST API is emulated), App Service, AKS, Virtual Machines. Run the real
+  engine in a container for the first three. Monitor and Application Insights are a sink: the emulator takes the telemetry an app exports and a test reads it back, but
+  it runs no queries, metrics queries or alerts ([`docs/services/monitor.md`](docs/services/monitor.md)).
 - **Platforms:** Linux x86-64 and arm64 (release binaries and the container image) and macOS on Apple silicon (release binary). There is no native Windows build: use the container image or WSL there ([`docs/install.md`](docs/install.md)).
 - **Data directories** written by this version are tested to stay readable by later ones only for the state-file layouts that have a checked-in sample.
 
 ## Security
 
-It has no sign-in and does not check who is asking (whatever credential a client sends, a bearer token is never looked at): every program that can reach the port can read, change and wipe everything, including through `/_azemu/reset`. By default it listens on
+It has no sign-in and does not check who is asking (whatever credential a client sends, a bearer token is never looked at; `--strict-auth` checks tokens and roles to show a program its mistakes, and is **not** a security boundary, because the admin API can give any role to anyone): every program that can reach the port can read, change and wipe everything, including through `/_azemu/reset`. By default it listens on
 loopback only, and it refuses requests that web pages in your browser make (cross-site requests and DNS rebinding). Publish container ports to `127.0.0.1` only
-(`-p 127.0.0.1:4577:4577`, never `-p 4577:4577`). With `--data-dir` the Key Vault secrets and keys, and the identity signing key, are on disk unencrypted. A certificate
+(`-p 127.0.0.1:4577:4577`, never `-p 4577:4577`). The inspector (`/_azemu/ui`, `/_azemu/inspect`) shows everything the services hold to anyone who can reach the port, as the services themselves do; a Key Vault secret's value is only in the answer for that one secret with `?reveal=1`, and private key material never is. With `--data-dir` the Key Vault secrets and keys, and the identity signing key, are on disk unencrypted. A certificate
 authority made with `--tls-name core.windows.net` must never be installed system-wide. Event Grid webhooks may go only to local addresses unless you say otherwise. Cosmos
 stored procedures run client-written JavaScript in a separate process with limits. All of this, how each part was checked, and how to report a problem:
 [`SECURITY.md`](SECURITY.md).
@@ -399,8 +415,10 @@ stored procedures run client-written JavaScript in a separate process with limit
 --exit-on-stdin-close stop when standard input closes: for a test program that starts azemu with a pipe on its input
 --tls-name <name>     more names the certificate authority may sign for (AZEMU_TLS_NAME)
 --lenient             queues, topics, event hubs ... come into being when named (AZEMU_LENIENT=1)
+--strict-auth         check bearer tokens and decide by role assignments (AZEMU_STRICT_AUTH=1); --auth-config <file> gives assignments at start (AZEMU_AUTH_CONFIG); see docs/strict-auth.md
 --data-dir <path>     keep state between runs (AZEMU_DATA_DIR); --save-interval <seconds>, default 15
 --seed <file>         create what a JSON file lists at start and after every reset (AZEMU_SEED); see docs/seed.md
+--faults <file>       fault rules that exist from the start and after every full reset (AZEMU_FAULTS); see docs/faults.md
 --allow-host <name>   serve this host name and everything under it (a hosts file for real Azure names)
 --allow-origin <o>    let web pages from this origin use the emulator; `*` turns the cross-site check off
 --allow-webhook-host <name>   let Event Grid webhooks go to this host (`*`: any)

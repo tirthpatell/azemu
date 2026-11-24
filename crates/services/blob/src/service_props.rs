@@ -252,8 +252,11 @@ pub fn user_delegation_key(cx: &mut Cx) -> ApiResult {
     let exp = parse_iso8601(expiry).ok_or_else(|| ApiError::invalid_xml("Expiry is not a valid date."))?;
     let start = root.child_text("Start").and_then(parse_iso8601).unwrap_or(cx.now);
     let version = req.header("x-ms-version").unwrap_or("2020-02-10");
-    let oid = uuid::Uuid::new_v4().to_string();
-    let tid = uuid::Uuid::new_v4().to_string();
+    // in strict mode the key says whose it is: the principal that asked
+    let (oid, tid) = match &cx.pre.strict {
+        Some((_, who)) => (who.oid.clone(), who.tid.clone()),
+        None => (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string()),
+    };
     let (start_s, exp_s) = (time::iso8601_secs(start), time::iso8601_secs(exp));
     // Derived from the fields it returns, so a SAS signed with it can be verified
     // later without remembering the key.

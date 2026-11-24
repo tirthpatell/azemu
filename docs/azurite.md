@@ -19,6 +19,7 @@ With `--standard-ports` azemu listens on the Azurite ports and takes the account
 | Blob | `http://127.0.0.1:10000/devstoreaccount1` | the well-known development account `devstoreaccount1` and its well-known key (below) |
 | Queue | `http://127.0.0.1:10001/devstoreaccount1` | the same |
 | Table | `http://127.0.0.1:10002/devstoreaccount1` | the same |
+| Azure Files (Azurite has none) | `http://127.0.0.1:10004/devstoreaccount1` | the same; the REST API only, see [`services/file.md`](services/file.md) |
 
 The key is `Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==`. Both connection strings work:
 
@@ -173,31 +174,17 @@ Tried: `docker compose up -d`, wait for `healthy`, then from the host `UseDevelo
 **Other ports.** The image starts with `--host 0.0.0.0 --standard-ports`. Giving a command replaces that, so ask for the address as well: `--host 0.0.0.0 --pin blob=7777` and `-p 127.0.0.1:7777:7777`. Tried: Blob on 7777 with the Python SDK
 (`BlobEndpoint=http://127.0.0.1:7777/devstoreaccount1`). `--standard-ports --pin blob=7777` keeps the other standard ports and moves Blob (not tried).
 
-**testcontainers.** A generic image with port 10000 mapped and a wait on `GET /_azemu/health` (every port serves it). With the Rust `testcontainers` 0.28.0 crate, feature `http_wait_plain`, and the SAS function above:
+**Testcontainers.** The emulator needs the generic container of the library, the image, the ports and a wait on `GET /_azemu/health`; [`testcontainers.md`](testcontainers.md) has it for Rust, Go and Python, each from a project that was run against the published image.
+What differs from an Azurite test:
 
-```rust
-use testcontainers::core::{wait::HttpWaitStrategy, IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::GenericImage;
-
-let container = GenericImage::new("ghcr.io/tirthpatell/azemu", "latest")
-    .with_exposed_port(10000.tcp())
-    .with_wait_for(WaitFor::http(HttpWaitStrategy::new("/_azemu/health").with_expected_status_code(200u16)))
-    .start()
-    .await?;
-let port = container.get_host_port_ipv4(10000.tcp()).await?;
-let host = container.get_host().await?;
-let url = Url::parse(&format!("http://{host}:{port}/devstoreaccount1?{}", dev_sas()))?;     // plain http and a SAS: no certificate
-let blobs = BlobServiceClient::new(url, None, None)?;
-```
-
-Tried: a test that started the container, created a container and a blob, and read it back (about 1 second), run with an image built from this source, not the published one. The container is removed when the value is dropped. In another language
-the same two things are all it takes: map the port, and wait for a `200` from `/_azemu/health` (the image's own health check, `azemu __healthcheck`, is another way to wait; not tried with testcontainers). In a test that has to
-reach Queue or Table as well, map 10001 and 10002.
+- The connection string is Azurite's, with the published port in `BlobEndpoint`, `QueueEndpoint` and `TableEndpoint` (`http://<host>:<port>/devstoreaccount1`; Go and Python, tried for Blob, and for Queue and Table in Python). The account and its key are the same.
+- Testcontainers publishes the container's port 10000 on a free port of the host, so `UseDevelopmentStorage=true`, which means `127.0.0.1:10000`, does not reach it. Use the full connection string. (Publishing 10000 on 10000 would, and allows one container at a time; not tried.)
+- The Rust crates have no connection string: the page shows the account SAS that takes its place.
+- The image's own health check works as the wait in all three libraries, but with the 0.2.0 image it took about 3 seconds (from 0.3.0 the image checks every 250 ms while it starts and was healthy in under a second, see [`testcontainers.md`](testcontainers.md)); the wait on `/_azemu/health` takes a third of a second.
 
 ## What was not run
 
 - JavaScript, Java and .NET clients with the Azurite addresses.
 - `x-ms-version` checks for Queue and Table; Azurite's `--loose` and `--skipApiVersionCheck` themselves (Azurite 3.37.0 was run in its default mode, and its own README and error message name what the two options do).
-- `--standard-ports --pin blob=<port>`, `az storage account generate-sas`, testcontainers with the image's health check, and the Compose file with the published image instead of one built from this source.
+- `--standard-ports --pin blob=<port>`, `az storage account generate-sas`, and the Compose file with the published image instead of one built from this source.
 - Anything on macOS or Windows.

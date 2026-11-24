@@ -345,6 +345,12 @@ impl RequestBuilder<'_> {
         let hs: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         self.client.send(&self.method, &self.url, &hs, self.body).await
     }
+
+    /// Like [`send`](Self::send), but a transport error (a connection that was closed with no answer) is returned.
+    pub async fn try_send(self) -> anyhow::Result<TestResponse> {
+        let hs: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        self.client.try_send(&self.method, &self.url, &hs, self.body).await
+    }
 }
 
 /// Replies with a JSON description of the request it received. Mount

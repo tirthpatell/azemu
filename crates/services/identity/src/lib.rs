@@ -10,10 +10,12 @@
 #![allow(clippy::result_large_err)]
 
 mod entra;
+mod inspect;
 mod jwt;
 mod keys;
 mod msi;
 mod persist;
+mod strict;
 mod token;
 mod util;
 
@@ -134,6 +136,10 @@ impl Service for IdentityService {
         "identity"
     }
 
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        self.inspect_node(req)
+    }
+
     fn mounts(&self) -> Vec<Mount> {
         vec![Mount::Host("login"), Mount::PathPrefix("/_azemu/identity"), Mount::PathPrefix("/metadata/identity")]
     }
@@ -155,6 +161,24 @@ impl Service for IdentityService {
         Some(1024 * 1024)
     }
 
+    /// A token endpoint that throttles answers `429` with `Retry-After` and the OAuth error form
+    /// `{"error":"temporarily_unavailable","error_description":..}`. MSAL and the Azure Identity libraries read `Retry-After` on a
+    /// 429 or 503 from the token endpoint; the error name and text are not from a recorded answer (see docs/faults.md).
+    fn fault_response(&self, _req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(429);
+        let error = a.code_or(if a.throttle { "temporarily_unavailable" } else { "server_error" });
+        let description = a.message_or(if a.throttle {
+            "The request was throttled. Retry after the time in the Retry-After header."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let mut r = azemu_core::resp::Resp::new(status).json(&serde_json::json!({"error": error, "error_description": description}));
+        if let Some(s) = a.retry_after_secs() {
+            r = r.header("Retry-After", s);
+        }
+        r.build()
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let segs = req.segments();
         let s: Vec<&str> = segs.iter().map(String::as_str).collect();
@@ -162,6 +186,7 @@ impl Service for IdentityService {
         match s.as_slice() {
             [p, "identity", "msi", "token"] if *p == PREFIX => msi::app_service(self, &req).await,
             [p, "identity", "token"] if *p == PREFIX => msi::helper(self, &req).await,
+            [p, "identity", "principal"] if *p == PREFIX => strict::principal(&req),
             [p, "identity", "login", rest @ ..] if *p == PREFIX => self.entra(&req, &format!("{base}/{PREFIX}/identity/login"), rest).await,
             ["metadata", "identity", "oauth2", "token"] => msi::imds(self, &req).await,
             [p, "identity", ..] if *p == PREFIX => not_built(&req),

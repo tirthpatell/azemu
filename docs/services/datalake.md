@@ -228,6 +228,7 @@ as JSON (reads of paths in a container with public access are allowed).
   out-of-order or rewriting append) copies the whole file while the lock is held.
 * A `position` whose end (`position` plus the body) does not fit in 64 bits is `400 InvalidQueryParameterValue`,
   and an `x-ms-expiry-time` that is too far away to be a date is `400 InvalidHeaderValue`.
+* **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled request is `503 ServerBusy` in the JSON form of the `dfs` endpoint; `Retry-After` only when the rule gives a wait. Not checked against a recorded answer.
 
 ## Keeping data between runs
 
@@ -243,3 +244,13 @@ in the Blob files. An append that was not flushed is kept too.
 * `POST /_azemu/reset?account=<name>` empties the storage account for Blob and Data Lake together.
 * The Data Lake service asks core to drop a handler when the client goes away only for `GET`.
 * A 501 is named `Blob_Query (Parquet input)` / `DataLake_Unknown (PATCH action=...)` in `GET /_azemu/unsupported`.
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked as Blob's is (a file system is a container, a path a blob): list and read need `blobs/read`,
+create, append, flush and set properties `blobs/write`, delete `blobs/delete`, rename `blobs/move/action`, set access control `blobs/modifyPermissions/action`, and list and make file systems the container actions.
+A missing role is 403 `AuthorizationPermissionMismatch` in Data Lake's JSON (`{"error":{"code":...,"message":...}}` with `x-ms-error-code`); a token that is wrong has `detail.AuthenticationErrorDetail` and is 401 from
+`x-ms-version` 2017-11-09. **The POSIX ACLs are not checked**: Azure looks at them when no role grants the access, strict mode looks at roles only. A client that uses the Data Lake SDK to make a file system goes through the Blob endpoint
+and gets `AuthorizationFailure` as Blob's create container does.
+
+**Rename takes two file systems.** A path is moved out of the file system named in `x-ms-rename-source`, so the source needs `blobs/move/action` and `blobs/read` there as well as the destination's `move/action` (a source that carries a SAS is read with the SAS). A principal with a role on one file system cannot move a file out of another; the answer is `AuthorizationPermissionMismatch`. What Azure answers was not probed.

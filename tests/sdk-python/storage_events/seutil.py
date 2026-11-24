@@ -128,10 +128,20 @@ class Webhook:
 # refs/specs/specification/eventgrid/data-plane/EventGridSystemEvents/Microsoft.Storage/Storage.tsp
 BLOB_CREATED_DATA = {"api", "clientRequestId", "requestId", "eTag", "contentType", "contentLength", "blobType",
                      "accessTier", "url", "sequencer", "storageDiagnostics"}
-BLOB_DELETED_DATA = {"api", "clientRequestId", "requestId", "contentType", "blobType", "url", "sequencer",
-                     "storageDiagnostics"}
-BLOB_TIER_CHANGED_DATA = {"api", "clientRequestId", "requestId", "contentType", "contentLength", "blobType",
-                          "accessTier", "previousTier", "url", "sequencer", "storageDiagnostics"}
+# eTag and contentLength are in what Azure sent for a Delete Blob (seen in November 2026)
+BLOB_DELETED_DATA = {"api", "clientRequestId", "requestId", "eTag", "contentType", "contentLength", "blobType", "url",
+                     "sequencer", "storageDiagnostics"}
+
+
+# Every event type of a storage account. A subscription that names none gets only the default set (BlobCreated and BlobDeleted), as on Azure.
+ALL_TYPES = [
+    "Microsoft.Storage.BlobCreated", "Microsoft.Storage.BlobDeleted", "Microsoft.Storage.BlobTierChanged",
+    "Microsoft.Storage.AsyncOperationInitiated", "Microsoft.Storage.DirectoryCreated", "Microsoft.Storage.DirectoryDeleted",
+    "Microsoft.Storage.BlobRenamed", "Microsoft.Storage.DirectoryRenamed",
+    "Microsoft.Storage.BlobInventoryPolicyCompleted", "Microsoft.Storage.LifecyclePolicyCompleted",
+]
+BLOB_TIER_CHANGED_DATA = {"api", "requestId", "eTag", "contentType", "contentLength", "blobType", "accessTier", "previousTier", "url",
+                          "sequencer", "storageDiagnostics", "clientRequestId"}
 
 
 def subject_of(container: str, blob: str) -> str:

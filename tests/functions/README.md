@@ -135,6 +135,7 @@ The classic polling blob trigger also works with these https host-name URLs (`--
 | `blob_poll_host` | Blob trigger, polling, host-name style endpoints (group `blobhost`: the host is restarted with them) | works: Blob logging switched on by the host, `$logs` listed, the new blob found in a log blob (with `HOST_LOGLEVEL=Debug` the host log says `Log scan ... found 1 blobs` and `Source: 'LogScan'`) |
 | `blob_eventgrid` | Blob trigger, Event Grid source, storage events -> webhook | works (also with host-name and identity endpoints) |
 | `eg_trigger`, `http_eg_send` | Event Grid output -> custom topic -> webhook -> Event Grid trigger | works |
+| `eg_trigger`, `http_eg_send` | Event Grid output -> custom topic -> `AzureFunction` destination -> Event Grid trigger (the emulator is told the host's address with `PUT /_azemu/eventgrid/functions/{app}` and calls `{host}/runtime/webhooks/EventGrid?functionName=eg_trigger` itself, no key in the address) | works |
 | `http_table_put`, `http_table_get` | Table output and input binding | works |
 | `sb_queue` | HTTP -> Service Bus output; queue trigger, auto-complete, Blob output | works, queue empty afterwards |
 | `sb_topic` | Service Bus topic output; subscription trigger | works |

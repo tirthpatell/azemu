@@ -17,6 +17,9 @@
 //!
 //! or flat, with names instead of resource ids (easier to write by hand):
 //!
+//! An Azure Function is called by HTTP, not through a handler; it is here for the same checks ([`DestinationKind::AzureFunction`],
+//! `functions.rs`).
+//!
 //! ```json
 //! { "destination": { "endpointType": "StorageQueue", "storageAccount": "acct", "queueName": "q" } }
 //! { "destination": { "endpointType": "ServiceBusQueue", "namespace": "ns", "queueName": "q" } }
@@ -37,6 +40,8 @@ pub enum DestinationKind {
     ServiceBusQueue,
     ServiceBusTopic,
     EventHub,
+    /// `…/sites/{app}/functions/{name}`: delivered by HTTP to a Functions host the emulator was told about.
+    AzureFunction,
 }
 
 impl DestinationKind {
@@ -47,6 +52,7 @@ impl DestinationKind {
             DestinationKind::ServiceBusQueue => "ServiceBusQueue",
             DestinationKind::ServiceBusTopic => "ServiceBusTopic",
             DestinationKind::EventHub => "EventHub",
+            DestinationKind::AzureFunction => "AzureFunction",
         }
     }
 
@@ -56,6 +62,7 @@ impl DestinationKind {
             "servicebusqueue" => Some(DestinationKind::ServiceBusQueue),
             "servicebustopic" => Some(DestinationKind::ServiceBusTopic),
             "eventhub" => Some(DestinationKind::EventHub),
+            "azurefunction" => Some(DestinationKind::AzureFunction),
             _ => None,
         }
     }
@@ -80,6 +87,13 @@ pub struct DestinationConfig {
     pub properties: Map<String, Value>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// The blob container dead letters are written to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlobTarget {
+    pub account: String,
+    pub container: String,
 }
 
 /// A destination that has been checked: what to call and where.
@@ -125,6 +139,46 @@ impl DestinationConfig {
         None
     }
 
+    /// `deliveryAttributeMappings` of the destination, ARM style (in `properties`) or flat.
+    pub(crate) fn take_attribute_mappings(&mut self) -> Result<Vec<crate::delivery_props::DeliveryAttribute>, String> {
+        let mut found: Option<Value> = None;
+        for map in [&mut self.properties, &mut self.extra] {
+            let key = map.keys().find(|k| k.eq_ignore_ascii_case("deliveryAttributeMappings")).cloned();
+            if let Some(k) = key {
+                if let Some(v) = map.remove(&k) {
+                    if !v.is_null() {
+                        found = Some(v);
+                    }
+                }
+            }
+        }
+        match found {
+            None => Ok(Vec::new()),
+            Some(v) => serde_json::from_value(v).map_err(|e| format!("deliveryAttributeMappings is not valid: {e}.")),
+        }
+    }
+
+    /// Check a dead-letter destination (`endpointType` `StorageBlob`).
+    pub fn resolve_blob(&self) -> Result<BlobTarget, String> {
+        let kind = self.endpoint_type.trim();
+        if !kind.eq_ignore_ascii_case("storageblob") {
+            return Err(if kind.is_empty() {
+                "A dead-letter destination needs an endpointType (StorageBlob).".to_string()
+            } else {
+                format!("The dead-letter destination type '{kind}' is not supported (use StorageBlob).")
+            });
+        }
+        let account = self
+            .text(&["resourceId"])
+            .as_deref()
+            .and_then(|r| segment_after(r, "storageAccounts"))
+            .or_else(|| self.text(&["storageAccount", "accountName", "account"]))
+            .ok_or("The StorageBlob dead-letter destination has no storage account: give 'resourceId' (the storage account) or 'storageAccount'.")?;
+        let container =
+            self.text(&["blobContainerName", "container"]).ok_or("The StorageBlob dead-letter destination has no blobContainerName.")?;
+        Ok(BlobTarget { account, container })
+    }
+
     /// Check the destination and turn it into something deliverable. `Err` is the text of a 400.
     pub fn resolve(&self) -> Result<Resolved, String> {
         let kind_name = self.endpoint_type.trim();
@@ -134,9 +188,9 @@ impl DestinationConfig {
         }
         let kind = DestinationKind::parse(kind_name).ok_or_else(|| {
             if kind_name.is_empty() {
-                "A destination needs an endpointType (WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic or EventHub).".to_string()
+                "A destination needs an endpointType (WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic, EventHub or AzureFunction).".to_string()
             } else {
-                format!("The destination type '{kind_name}' is not supported (use WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic or EventHub).")
+                format!("The destination type '{kind_name}' is not supported (use WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic, EventHub or AzureFunction).")
             }
         })?;
         let resource = self.text(&["resourceId"]);
@@ -166,6 +220,13 @@ impl DestinationConfig {
                 resource.as_deref().and_then(|r| segment_after(r, "namespaces")).or_else(|| self.text(&["namespace", "eventHubNamespace"])),
                 resource.as_deref().and_then(|r| segment_after(r, "eventhubs")).or_else(|| self.text(&["eventHubName", "eventHub", "hub"])),
             ),
+            DestinationKind::AzureFunction => (
+                resource
+                    .as_deref()
+                    .and_then(|r| segment_after(r, "sites"))
+                    .or_else(|| self.text(&["functionApp", "functionAppName", "app"])),
+                resource.as_deref().and_then(|r| segment_after(r, "functions")).or_else(|| self.text(&["functionName", "function"])),
+            ),
         };
         let (what_ns, what_entity, ids) = match kind {
             DestinationKind::StorageQueue => ("storage account", "queueName", "'resourceId' (the storage account) or 'storageAccount'"),
@@ -177,6 +238,9 @@ impl DestinationConfig {
             }
             DestinationKind::EventHub => {
                 ("namespace", "event hub", "'resourceId' (.../namespaces/N/eventhubs/H) or 'namespace' and 'eventHubName'")
+            }
+            DestinationKind::AzureFunction => {
+                ("function app", "function", "'resourceId' (.../sites/APP/functions/NAME) or 'functionApp' and 'functionName'")
             }
         };
         let namespace = namespace.ok_or_else(|| format!("The {} destination has no {what_ns}: give {ids}.", kind.endpoint_type()))?;
@@ -208,7 +272,7 @@ pub struct DestinationDelivery {
     pub target: DestinationTarget,
     /// The event as JSON (one event, not an array), in the delivery schema of the subscription.
     pub body: Bytes,
-    /// `application/json` for the Event Grid schema, `application/cloudevents+json; charset=utf-8`
+    /// `application/json; charset=utf-8` for the Event Grid schema, `application/cloudevents+json; charset=utf-8`
     /// for CloudEvents.
     pub content_type: String,
     /// The `aeg-*` properties Event Grid sets: `aeg-subscription-name`, `aeg-delivery-count`
@@ -223,6 +287,11 @@ pub struct DestinationDelivery {
     /// Storage queue: message time to live in seconds, `None` for the default (7 days), `-1` for
     /// never.
     pub ttl_seconds: Option<i64>,
+    /// Delivery properties the subscription maps that this kind of destination gives a meaning to
+    /// (`delivery_props`): for Service Bus `MessageId`, `SessionId`, `PartitionKey`, `CorrelationId`, `Label`, `ReplyTo`,
+    /// `ReplyToSessionId`, `To`, `ViaPartitionKey`; for an event hub `PartitionKey`. Canonical names. The other mapped
+    /// properties are in `properties`, after the `aeg-*` ones.
+    pub system: Vec<(String, String)>,
 }
 
 /// What a destination handler does. `Err` is the reason, kept in the delivery log; the delivery
@@ -272,6 +341,44 @@ mod tests {
             .resolve()
             .unwrap();
         assert!(matches!(h, Resolved::Handler { kind: DestinationKind::EventHub, ref target, .. } if target.entity == "h"));
+    }
+
+    #[test]
+    fn azure_function_and_blob_destinations() {
+        let f = cfg(json!({"endpointType":"AzureFunction","properties":{
+            "resourceId":"/subscriptions/s/resourceGroups/r/providers/Microsoft.Web/sites/MyApp/functions/OnEvent"}}))
+        .resolve()
+        .unwrap();
+        assert_eq!(
+            f,
+            Resolved::Handler {
+                kind: DestinationKind::AzureFunction,
+                target: DestinationTarget { namespace: "MyApp".into(), entity: "OnEvent".into() },
+                ttl_seconds: None
+            }
+        );
+        let flat = cfg(json!({"endpointType":"AzureFunction","functionApp":"a","functionName":"b"})).resolve().unwrap();
+        assert!(matches!(flat, Resolved::Handler { kind: DestinationKind::AzureFunction, .. }));
+        assert!(cfg(json!({"endpointType":"AzureFunction","functionApp":"a"})).resolve().unwrap_err().contains("function"));
+
+        let b = cfg(json!({"endpointType":"StorageBlob","properties":{
+            "resourceId":"/subscriptions/s/resourceGroups/r/providers/Microsoft.Storage/storageAccounts/acct","blobContainerName":"dead"}}))
+        .resolve_blob()
+        .unwrap();
+        assert_eq!(b, BlobTarget { account: "acct".into(), container: "dead".into() });
+        assert!(cfg(json!({"endpointType":"StorageBlob","storageAccount":"a"})).resolve_blob().unwrap_err().contains("blobContainerName"));
+        assert!(cfg(json!({"endpointType":"StorageQueue"})).resolve_blob().unwrap_err().contains("StorageBlob"));
+    }
+
+    #[test]
+    fn attribute_mappings_are_taken_out_of_the_destination() {
+        let mut d = cfg(json!({"endpointType":"EventHub","namespace":"n","eventHubName":"h","properties":{
+            "deliveryAttributeMappings":[{"name":"a","type":"Static","properties":{"value":"1"}}]}}));
+        let got = d.take_attribute_mappings().unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].value.as_deref(), Some("1"));
+        assert!(d.take_attribute_mappings().unwrap().is_empty(), "taken once");
+        assert!(d.resolve().is_ok());
     }
 
     #[test]

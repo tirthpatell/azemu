@@ -1,0 +1,247 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "variables": {
+    "arrayString": [
+      "one",
+      "two",
+      "three"
+    ],
+    "resourceName": "prod-eastus-vm01"
+  },
+  "resources": [],
+  "outputs": {
+    "joinComma": {
+      "type": "string",
+      "value": "[join(variables('arrayString'), ',')]"
+    },
+    "joinSemi": {
+      "type": "string",
+      "value": "[join(variables('arrayString'), ';')]"
+    },
+    "likeContains": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), '*prod*')]"
+    },
+    "likeStarts": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), 'prod*')]"
+    },
+    "likeEnds": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), '*01')]"
+    },
+    "likeExact": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), 'prod-eastus-vm01')]"
+    },
+    "likeNo": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), '*westus*')]"
+    },
+    "likeCase": {
+      "type": "bool",
+      "value": "[like(variables('resourceName'), 'PROD*')]"
+    },
+    "dataUriOutput": {
+      "type": "string",
+      "value": "[dataUri('Hello')]"
+    },
+    "dataUriToStringOutput": {
+      "type": "string",
+      "value": "[dataUriToString('data:;base64,SGVsbG8sIFdvcmxkIQ==')]"
+    },
+    "dataUriRoundTrip": {
+      "type": "string",
+      "value": "[dataUriToString(dataUri('Gr\u00fc\u00dfe'))]"
+    },
+    "base64Output": {
+      "type": "string",
+      "value": "[base64('one, two, three')]"
+    },
+    "toStringOutput": {
+      "type": "string",
+      "value": "[base64ToString('b25lLCB0d28sIHRocmVl')]"
+    },
+    "toJsonOutput": {
+      "type": "object",
+      "value": "[base64ToJson('eyJvbmUiOiAiYSIsICJ0d28iOiAiYiJ9')]"
+    },
+    "uri1": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/firstpath', 'myscript.sh')]"
+    },
+    "uri2": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/firstpath/', 'myscript.sh')]"
+    },
+    "uri3": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/firstpath/', '/myscript.sh')]"
+    },
+    "uri4": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/firstpath/azuredeploy.json', 'myscript.sh')]"
+    },
+    "uri5": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/firstpath/azuredeploy.json/', 'myscript.sh')]"
+    },
+    "uriNoSlash": {
+      "type": "string",
+      "value": "[uri('http://contoso.org', 'myscript.sh')]"
+    },
+    "uriDots": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/a/b/c', '../x.json')]"
+    },
+    "uriQuery": {
+      "type": "string",
+      "value": "[uri('http://contoso.org/a/', 'x.json?y=1')]"
+    },
+    "uriFormat": {
+      "type": "string",
+      "value": "[uri('http://contoso.com/resources/', 'nested/azuredeploy.json')]"
+    },
+    "componentOutput": {
+      "type": "string",
+      "value": "[uriComponent(uri('http://contoso.com/resources/', 'nested/azuredeploy.json'))]"
+    },
+    "toStringUri": {
+      "type": "string",
+      "value": "[uriComponentToString('http%3A%2F%2Fcontoso.com%2Fresources%2Fnested%2Fazuredeploy.json')]"
+    },
+    "uriComponentSpecial": {
+      "type": "string",
+      "value": "[uriComponent('a b&c=d/\u00e9~-_.!*()')]"
+    },
+    "firstT": {
+      "type": "int",
+      "value": "[indexOf('test', 't')]"
+    },
+    "lastT": {
+      "type": "int",
+      "value": "[lastIndexOf('test', 't')]"
+    },
+    "firstString": {
+      "type": "int",
+      "value": "[indexOf('abcdef', 'CD')]"
+    },
+    "lastString": {
+      "type": "int",
+      "value": "[lastIndexOf('abcdef', 'AB')]"
+    },
+    "notFound": {
+      "type": "int",
+      "value": "[indexOf('abcdef', 'z')]"
+    },
+    "padLeftDefault": {
+      "type": "string",
+      "value": "[padLeft('5', 3)]"
+    },
+    "padLeftChar": {
+      "type": "string",
+      "value": "[padLeft('5', 3, '0')]"
+    },
+    "padLeftNumber": {
+      "type": "string",
+      "value": "[padLeft(123, 5, '*')]"
+    },
+    "padLeftShort": {
+      "type": "string",
+      "value": "[padLeft('12345', 3, '0')]"
+    },
+    "formatD": {
+      "type": "string",
+      "value": "[format('{0:D4}', 42)]"
+    },
+    "formatHex": {
+      "type": "string",
+      "value": "[format('{0:X}', 255)]"
+    },
+    "formatBraces": {
+      "type": "string",
+      "value": "[format('{{0}} {0}', 'x')]"
+    },
+    "formatMany": {
+      "type": "string",
+      "value": "[format('{0}-{1}-{0}', 'a', 7)]"
+    },
+    "substringTail": {
+      "type": "string",
+      "value": "[substring('abcdef', 2)]"
+    },
+    "replaceAll": {
+      "type": "string",
+      "value": "[replace('a-b-c', '-', '+')]"
+    },
+    "splitMany": {
+      "type": "array",
+      "value": "[split('a,b;c', createArray(',', ';'))]"
+    },
+    "trimOutput": {
+      "type": "string",
+      "value": "[trim('  x y  ')]"
+    },
+    "toUpperOutput": {
+      "type": "string",
+      "value": "[toUpper('abC')]"
+    },
+    "lengthUnicode": {
+      "type": "int",
+      "value": "[length('h\u00e9llo')]"
+    },
+    "firstChar": {
+      "type": "string",
+      "value": "[first('hello')]"
+    },
+    "lastChar": {
+      "type": "string",
+      "value": "[last('hello')]"
+    },
+    "takeString": {
+      "type": "string",
+      "value": "[take('hello', 2)]"
+    },
+    "skipString": {
+      "type": "string",
+      "value": "[skip('hello', 2)]"
+    },
+    "stringOfBool": {
+      "type": "string",
+      "value": "[string(true())]"
+    },
+    "stringOfObject": {
+      "type": "string",
+      "value": "[string(createObject('a', 1))]"
+    },
+    "stringOfArray": {
+      "type": "string",
+      "value": "[string(createArray(1, 'x'))]"
+    },
+    "intFromString": {
+      "type": "int",
+      "value": "[int('7')]"
+    },
+    "boolFromString": {
+      "type": "bool",
+      "value": "[bool('true')]"
+    },
+    "jsonOutput": {
+      "type": "object",
+      "value": "[json('{\"a\": [1, 2], \"b\": null}')]"
+    },
+    "concatNumbers": {
+      "type": "string",
+      "value": "[concat(1, 2, 'x', true())]"
+    },
+    "trueFunction": {
+      "type": "bool",
+      "value": "[true()]"
+    },
+    "falseFunction": {
+      "type": "bool",
+      "value": "[false()]"
+    }
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "definitions": {
+    "queueSetting": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "maxDelivery": {
+          "type": "int",
+          "nullable": true,
+          "minValue": 1
+        }
+      }
+    },
+    "skuName": {
+      "type": "string",
+      "allowedValues": [
+        "Standard",
+        "Premium"
+      ]
+    }
+  },
+  "functions": [
+    {
+      "namespace": "__bicep",
+      "members": {
+        "shout": {
+          "parameters": [
+            {
+              "name": "s",
+              "type": "string"
+            }
+          ],
+          "output": {
+            "type": "string",
+            "value": "[toUpper(parameters('s'))]"
+          }
+        }
+      }
+    }
+  ],
+  "parameters": {
+    "settings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/queueSetting"
+      },
+      "defaultValue": [
+        {
+          "name": "a"
+        },
+        {
+          "name": "b",
+          "maxDelivery": 3
+        }
+      ]
+    },
+    "sku": {
+      "$ref": "#/definitions/skuName",
+      "defaultValue": "Standard"
+    },
+    "maybe": {
+      "type": "string",
+      "nullable": true
+    }
+  },
+  "resources": {},
+  "outputs": {
+    "settingsOut": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/queueSetting"
+      },
+      "value": "[parameters('settings')]"
+    },
+    "skuOut": {
+      "type": "string",
+      "$ref": "#/definitions/skuName",
+      "value": "[parameters('sku')]"
+    },
+    "maybeIsNull": {
+      "type": "bool",
+      "value": "[equals(parameters('maybe'), null())]"
+    },
+    "maybeOut": {
+      "type": "string",
+      "nullable": true,
+      "value": "[parameters('maybe')]"
+    },
+    "tryGetMissing": {
+      "type": "string",
+      "nullable": true,
+      "value": "[tryGet(parameters('settings')[0], 'maxDelivery')]"
+    },
+    "names": {
+      "type": "array",
+      "copy": {
+        "count": "[length(parameters('settings'))]",
+        "input": "[parameters('settings')[copyIndex()].name]"
+      }
+    },
+    "namesUpper": {
+      "type": "array",
+      "value": "[map(parameters('settings'), lambda('s', toUpper(lambdaVariables('s').name)))]"
+    },
+    "fromFunction": {
+      "type": "string",
+      "value": "[__bicep.shout(parameters('sku'))]"
+    },
+    "coalesced": {
+      "type": "int",
+      "value": "[coalesce(tryGet(parameters('settings')[0], 'maxDelivery'), 10)]"
+    }
+  }
+}

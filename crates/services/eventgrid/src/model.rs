@@ -4,7 +4,9 @@
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
+use crate::delivery_props::DeliveryAttribute;
 use crate::destination::{DestinationConfig, Resolved};
 use crate::events::Schema;
 use crate::filter::Filter;
@@ -109,6 +111,25 @@ pub struct SubscriptionConfig {
     /// written ARM style). See `destination.rs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination: Option<DestinationConfig>,
+    /// `deliveryAttributeMappings` of the destination, whichever kind it is (`delivery_props.rs`). Written inside the destination
+    /// (ARM style or flat) or here; [`normalize`](Self::normalize) moves them here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_attribute_mappings: Vec<DeliveryAttribute>,
+    /// Where dead-lettered events are written as blobs (`endpointType` `StorageBlob`; `docs/services/eventgrid.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter_destination: Option<DestinationConfig>,
+    /// `deliveryWithResourceIdentity.identity` as given: `{type, userAssignedIdentity}`. Kept and shown, never used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_identity: Option<Value>,
+    /// `deadLetterWithResourceIdentity.identity`, likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dead_letter_identity: Option<Value>,
+    /// ARM form of destination plus identity: `{identity, destination}`. Input only: [`normalize`](Self::normalize) splits it.
+    #[serde(default, skip_serializing)]
+    pub delivery_with_resource_identity: Option<Value>,
+    /// ARM form of the dead-letter destination plus identity: `{identity, deadLetterDestination}`. Input only.
+    #[serde(default, skip_serializing)]
+    pub dead_letter_with_resource_identity: Option<Value>,
     /// Shape of delivered events. Default: as published (namespace topics: CloudEvents).
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "eventDeliverySchema")]
     pub delivery_schema: Option<Schema>,
@@ -150,6 +171,47 @@ impl SubscriptionConfig {
     /// A webhook written as `destination: {endpointType: WebHook, ...}` becomes `webhookUrl`.
     /// Call before `validate`. `Err` is the text of a 400.
     pub fn normalize(&mut self) -> Result<(), String> {
+        if let Some(v) = self.delivery_with_resource_identity.take() {
+            if self.destination.is_some() {
+                return Err("Give either destination or deliveryWithResourceIdentity, not both.".into());
+            }
+            self.delivery_identity = Some(identity_of(&v)?);
+            self.destination = Some(
+                v.get("destination")
+                    .filter(|d| d.is_object())
+                    .map(|d| {
+                        serde_json::from_value(d.clone())
+                            .map_err(|e| format!("deliveryWithResourceIdentity.destination is not valid: {e}."))
+                    })
+                    .transpose()?
+                    .ok_or("deliveryWithResourceIdentity needs a destination.")?,
+            );
+        }
+        if let Some(v) = self.dead_letter_with_resource_identity.take() {
+            if self.dead_letter_destination.is_some() {
+                return Err("Give either deadLetterDestination or deadLetterWithResourceIdentity, not both.".into());
+            }
+            self.dead_letter_identity = Some(identity_of(&v)?);
+            self.dead_letter_destination = Some(
+                v.get("deadLetterDestination")
+                    .filter(|d| d.is_object())
+                    .map(|d| {
+                        serde_json::from_value(d.clone())
+                            .map_err(|e| format!("deadLetterWithResourceIdentity.deadLetterDestination is not valid: {e}."))
+                    })
+                    .transpose()?
+                    .ok_or("deadLetterWithResourceIdentity needs a deadLetterDestination.")?,
+            );
+        }
+        if let Some(d) = self.destination.as_mut() {
+            let found = d.take_attribute_mappings()?;
+            if !found.is_empty() {
+                if !self.delivery_attribute_mappings.is_empty() {
+                    return Err("Give deliveryAttributeMappings in the destination or in the subscription, not both.".into());
+                }
+                self.delivery_attribute_mappings = found;
+            }
+        }
         if let Some(d) = &self.destination {
             if let Resolved::WebHook(url) = d.resolve()? {
                 if self.webhook_url.is_some() {
@@ -205,6 +267,13 @@ impl SubscriptionConfig {
         if mode == DeliveryMode::Pull && (self.webhook_url.is_some() || self.destination.is_some()) {
             return Err("A pull subscription cannot have a webhookUrl or a destination.".into());
         }
+        if mode == DeliveryMode::Pull && (self.dead_letter_destination.is_some() || !self.delivery_attribute_mappings.is_empty()) {
+            return Err("A pull subscription cannot have a deadLetterDestination or delivery attribute mappings.".into());
+        }
+        crate::delivery_props::validate(&self.delivery_attribute_mappings)?;
+        if let Some(d) = &self.dead_letter_destination {
+            d.resolve_blob()?;
+        }
         if let Some(v) = self.lock_duration_seconds {
             if !(v > 0.0 && v.is_finite()) {
                 return Err("lockDurationSeconds must be greater than zero.".into());
@@ -232,6 +301,25 @@ impl SubscriptionConfig {
 
 pub fn secs(v: f64) -> Duration {
     Duration::try_from_secs_f64(v.max(0.0)).unwrap_or(Duration::from_secs(u32::MAX as u64))
+}
+
+/// The identity of `deliveryWithResourceIdentity` / `deadLetterWithResourceIdentity` (`{type, userAssignedIdentity}`). The emulator
+/// checks no credentials inside its connections, so the identity is only checked for its shape.
+fn identity_of(v: &Value) -> Result<Value, String> {
+    let id = v
+        .get("identity")
+        .filter(|i| i.is_object())
+        .ok_or("The identity block needs an identity ({\"type\": \"SystemAssigned\"} or UserAssigned).")?;
+    match id.get("type").and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+        Some("systemassigned") => {}
+        Some("userassigned") => {
+            if id.get("userAssignedIdentity").and_then(Value::as_str).map(str::trim).unwrap_or("").is_empty() {
+                return Err("A UserAssigned identity needs userAssignedIdentity (the resource id of the identity).".into());
+            }
+        }
+        _ => return Err("The identity type must be SystemAssigned or UserAssigned.".into()),
+    }
+    Ok(id.clone())
 }
 
 /// A topic declared in the admin API or the config file.

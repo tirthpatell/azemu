@@ -1,0 +1,134 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "6160867250544904193"
+    }
+  },
+  "definitions": {
+    "queueSetting": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "maxDelivery": {
+          "type": "int",
+          "nullable": true,
+          "minValue": 1
+        }
+      }
+    }
+  },
+  "parameters": {
+    "skuName": {
+      "type": "string",
+      "defaultValue": "Standard",
+      "allowedValues": [
+        "Standard",
+        "Premium"
+      ]
+    },
+    "settings": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/queueSetting"
+      },
+      "defaultValue": [
+        {
+          "name": "a",
+          "maxDelivery": 3
+        },
+        {
+          "name": "b"
+        }
+      ]
+    },
+    "ns": {
+      "type": "string",
+      "defaultValue": "[format('probe{0}', uniqueString(resourceGroup().id))]"
+    }
+  },
+  "resources": {
+    "sa": {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2023-05-01",
+      "name": "[format('st{0}', uniqueString(resourceGroup().id))]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2"
+    },
+    "bus": {
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[parameters('ns')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "[parameters('skuName')]",
+        "tier": "[parameters('skuName')]"
+      }
+    },
+    "ex": {
+      "existing": true,
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[parameters('ns')]",
+      "dependsOn": [
+        "bus"
+      ]
+    },
+    "q": {
+      "copy": {
+        "name": "q",
+        "count": "[length(parameters('settings'))]"
+      },
+      "type": "Microsoft.ServiceBus/namespaces/queues",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[format('{0}/{1}', parameters('ns'), parameters('settings')[copyIndex()].name)]",
+      "properties": {
+        "maxDeliveryCount": "[coalesce(tryGet(parameters('settings')[copyIndex()], 'maxDelivery'), 10)]"
+      },
+      "dependsOn": [
+        "bus"
+      ]
+    }
+  },
+  "outputs": {
+    "saId": {
+      "type": "string",
+      "value": "[resourceId('Microsoft.Storage/storageAccounts', format('st{0}', uniqueString(resourceGroup().id)))]"
+    },
+    "saKeys": {
+      "type": "string",
+      "value": "[listKeys('sa', '2023-05-01').keys[0].keyName]"
+    },
+    "endpoint": {
+      "type": "string",
+      "value": "[reference('bus').serviceBusEndpoint]"
+    },
+    "qids": {
+      "type": "array",
+      "copy": {
+        "count": "[length(range(0, length(parameters('settings'))))]",
+        "input": "[resourceId('Microsoft.ServiceBus/namespaces/queues', parameters('ns'), parameters('settings')[range(0, length(parameters('settings')))[copyIndex()]].name)]"
+      }
+    },
+    "exname": {
+      "type": "string",
+      "value": "[parameters('ns')]"
+    },
+    "st": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/queueSetting"
+      },
+      "value": "[parameters('settings')]"
+    }
+  }
+}

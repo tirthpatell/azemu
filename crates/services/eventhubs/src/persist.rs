@@ -178,12 +178,15 @@ struct PartCopy {
 #[derive(Default)]
 pub struct Saved {
     defs_hash: Option<u64>,
+    /// the file of the Schema Registry (`schema_persist.rs`)
+    pub(crate) schemas_hash: Option<u64>,
     parts: std::collections::HashMap<String, u64>,
 }
 
 impl Saved {
     pub fn forget(&mut self) {
         self.defs_hash = None;
+        self.schemas_hash = None;
         self.parts.clear();
     }
 }
@@ -196,7 +199,7 @@ fn part_file(ns: &str, hub: &str, pid: usize) -> String {
     hashed_name("part", &[ns, hub, &pid.to_string()])
 }
 
-fn hash_bytes(b: &[u8]) -> u64 {
+pub(crate) fn hash_bytes(b: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     b.hash(&mut h);
@@ -303,10 +306,15 @@ impl Shared {
         }
         remove_stale(dir, "part", &keep)?;
         saved.parts.retain(|k, _| keep.contains(k));
-        Ok(())
+        self.save_schemas(dir, saved)
     }
 
     pub fn load_from(&self, dir: &Path, saved: &mut Saved) -> io::Result<()> {
+        self.load_defs(dir, saved)?;
+        self.load_schemas(dir)
+    }
+
+    fn load_defs(&self, dir: &Path, saved: &mut Saved) -> io::Result<()> {
         let defs_path = dir.join(DEFS_FILE);
         let Some((_, defs)) = read_state::<DefsFile>(&defs_path, DEFS_KIND, VERSION)? else {
             return Ok(());

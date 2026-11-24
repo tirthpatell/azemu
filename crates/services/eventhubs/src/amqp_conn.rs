@@ -40,6 +40,7 @@ impl HandlerFactory for EhFactory {
             ns: DEFAULT_NAMESPACE.to_string(),
             links: HashMap::new(),
             pairing: HashMap::new(),
+            claims: None,
         })
     }
 }
@@ -113,6 +114,8 @@ pub struct EhConn {
     pub(crate) links: HashMap<LinkId, EhLink>,
     /// request and response links of each node, paired by attach order within a session
     pairing: HashMap<Node, azemu_amqp::reply::Pairing>,
+    /// What the credentials put with `$cbs` give this connection (strict authorisation only; made at the first `put-token`).
+    pub(crate) claims: Option<Arc<azemu_core::auth::claims::ConnClaims>>,
 }
 
 fn refuse(e: EhError) -> AttachDecision {
@@ -343,7 +346,18 @@ impl ConnectionHandler for EhConn {
     }
 
     fn on_attach(&mut self, req: AttachRequest) -> AttachDecision {
-        self.decide(&req)
+        // strict authorisation: the connection must hold the claim (nothing happens with the mode off)
+        let tracked = match self.strict_attach(&req) {
+            Some(Err(e)) => return AttachDecision::Refuse(e),
+            Some(Ok(t)) => Some(t),
+            None => None,
+        };
+        let (link, handle) = (req.link, req.handle.clone());
+        let decision = self.decide(&req);
+        if let (Some(t), AttachDecision::Accept(_) | AttachDecision::Defer) = (tracked, &decision) {
+            self.strict_track(link, handle, t);
+        }
+        decision
     }
 
     fn on_transfer(&mut self, link: LinkId, d: IncomingDelivery) -> TransferAction {
@@ -385,6 +399,7 @@ impl ConnectionHandler for EhConn {
     }
 
     fn on_detach(&mut self, link: LinkId, _reason: DetachReason) {
+        self.strict_forget(link);
         for p in self.pairing.values_mut() {
             p.remove(link);
         }

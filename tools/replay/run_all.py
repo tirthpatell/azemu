@@ -69,6 +69,7 @@ PACKAGES = [
             why="the recorded publishes go to topics that were made outside the recordings (in the Azure portal); without auto-creation they answer 404"),
     Package("servicebus", "servicebus", "servicebus/azure-servicebus", env={"AZEMU_SERVICEBUS_TIER": "standard"},
             why="the recordings come from a Standard namespace, which takes 256 KB as the one message size (the emulator takes what Premium takes too unless told)"),
+    Package("file", "file", "storage/azure-storage-file-share", env=LOOSE_AUTH[0], why=LOOSE_AUTH[1]),
     Package("datalake", "dfs", "storage/azure-storage-file-datalake", env=LOOSE_AUTH[0], why=LOOSE_AUTH[1]),
     # the 34 azure-mgmt-* recordings (Resource Manager); the host management.azure.com is the emulator's `management`
     Package("arm", "arm", "*/azure-mgmt-*"),

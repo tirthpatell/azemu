@@ -141,6 +141,42 @@ async fn everything_in_the_file_exists_at_start_and_a_client_can_use_it() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// The seed file is the emulator's own call into its services: strict mode does not stand in its way, at the start and after a reset.
+#[tokio::test]
+async fn the_seed_file_works_in_strict_mode() {
+    let dir = scratch("strict");
+    let seed = write(&dir, "seed.json", SEED);
+    let azemu::Stack { services, raw } = azemu::full_stack_with(azemu_core::auth::Auth::strict());
+    let srv = TestServer::start_configured(services, raw, move |b| b.seed_file(seed)).await;
+    let listed = |what: &'static str, path: &'static str| {
+        let srv = &srv;
+        async move {
+            let r = srv.request("GET", &format!("{}/_azemu/inspect/{path}", srv.gateway_url())).send().await;
+            assert_eq!(r.status, 200, "{what}: {}", r.text());
+            assert!(r.text().contains(what), "{what} is not in {path}: {}", r.text());
+        }
+    };
+    for (what, path) in [("uploads", "blob/acct/containers"), ("jobs", "queue/acct/queues"), ("Orders", "table/acct/tables")] {
+        listed(what, path).await;
+    }
+    // a client with a bearer token of the same text is not the seed file
+    let r = call(
+        &srv,
+        "GET",
+        "blob",
+        "acct",
+        "/uploads?restype=container",
+        &[("authorization", "Bearer azemu-seed"), ("x-ms-version", "2024-11-04")],
+    )
+    .await;
+    assert_eq!(r.status, 401, "{}", r.text());
+    assert_eq!(reset(&srv, "").await, serde_json::json!({}));
+    for (what, path) in [("uploads", "blob/acct/containers"), ("jobs", "queue/acct/queues"), ("Orders", "table/acct/tables")] {
+        listed(what, path).await;
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[tokio::test]
 async fn a_reset_puts_everything_back_and_removes_what_a_test_added() {
     let dir = scratch("reset");

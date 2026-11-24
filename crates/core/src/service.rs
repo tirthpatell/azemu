@@ -66,6 +66,33 @@ pub trait Service: Send + Sync + 'static {
         false
     }
     async fn handle(&self, req: Request) -> Response;
+    /// The answer for a fault rule (`docs/faults.md`): what this service says when it throttles, or the error a rule spells out,
+    /// in the service's own error shape and with its own retry header. Core adds the headers the rule sets and `x-azemu-fault`.
+    /// The default is a JSON error `{"error":{"code":..,"message":..}}` with `Retry-After`.
+    fn fault_response(&self, _req: &Request, answer: &crate::faults::FaultAnswer) -> Response {
+        crate::faults::generic_response(answer)
+    }
+    /// Does this service check roles for bearer tokens in strict mode (`docs/strict-auth.md`)? `false` (the default): it takes any
+    /// token as before, and the start-up log says so when the mode is on.
+    fn enforces_strict_auth(&self) -> bool {
+        false
+    }
+    /// Is strict authorisation on? Only the auth service of core says `true`, when it is (`--strict-auth`); the start-up log and
+    /// `GET /_azemu/config` ask every service.
+    fn strict_auth_on(&self) -> bool {
+        false
+    }
+    /// Called once at start, after the saved state is read and before any listener opens. An `Err` stops the start with that message.
+    fn started(&self) -> Result<(), String> {
+        Ok(())
+    }
+    /// The inspector (`docs/inspector.md`): the node of this service's state at `req.segments` (empty: the service's own node, whose
+    /// children are its accounts and whose property `accounts` is how many there are). The default is "no inspector". An
+    /// implementation only reads: nothing is received, locked, counted as delivered or created, no clock moves, and an account
+    /// that does not exist is [`InspectError::NotFound`](crate::inspect::InspectError), never a new empty one.
+    fn inspect(&self, _req: &crate::inspect::InspectRequest) -> crate::inspect::InspectResult {
+        Err(crate::inspect::InspectError::NoInspector)
+    }
     /// Drop all state. Called by `POST /_azemu/reset`.
     fn reset(&self);
     /// Drop the state of one account (storage account, vault, store, namespace; whatever this service's
@@ -120,6 +147,9 @@ pub struct RawConn {
     /// The TLS server name the client asked for, if any. For a connection that arrived inside a
     /// WebSocket without a TLS server name, the host part of the HTTP `Host` header.
     pub server_name: Option<String>,
+    /// The fault rules (`docs/faults.md`). A protocol that wants to be slow or to drop a connection on request asks
+    /// [`Faults::messaging`](crate::faults::Faults::messaging); with no rule it answers at once.
+    pub faults: crate::faults::Faults,
 }
 
 /// For protocols that are not HTTP (AMQP). The handler owns the connection.

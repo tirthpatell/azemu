@@ -133,8 +133,18 @@ impl SasFields {
 /// What a service SAS was issued for, as the request names it (percent-decoded).
 #[derive(Debug, Clone, Copy)]
 pub enum SasTarget<'a> {
-    Blob { container: &'a str, blob: Option<&'a str> },
-    Queue { queue: Option<&'a str> },
+    Blob {
+        container: &'a str,
+        blob: Option<&'a str>,
+    },
+    Queue {
+        queue: Option<&'a str>,
+    },
+    /// `path` is the directory or file path inside the share, without a leading slash (`None`: the share itself).
+    File {
+        share: &'a str,
+        path: Option<&'a str>,
+    },
 }
 
 /// Account SAS string to sign.
@@ -184,7 +194,11 @@ pub fn service_sas_string_to_sign(
         v.push(&f.spr);
     }
     v.push(&f.sv);
-    if service == StorageService::Blob {
+    if service == StorageService::File {
+        // Azure Files: the response headers follow the version and `sr` is not signed (azure-storage-file-share
+        // `_shared_access_signature.py`, Azure.Storage.Files.Shares `FileSasBuilder`).
+        v.extend(rsc(f));
+    } else if service == StorageService::Blob {
         if ver >= "2018-11-09" {
             v.push(&f.sr);
             v.push(time);

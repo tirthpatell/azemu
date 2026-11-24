@@ -113,3 +113,95 @@ fn version_1_files_still_load() {
     let committed = shared.kafka.fetch_offset("fixture", "group-1", "telemetry", 1).expect("the committed Kafka offset");
     assert_eq!((committed.offset, committed.metadata.as_deref()), (5, Some("m")));
 }
+
+// ---- the Schema Registry's file ---------------------------------------------------------------------------------
+//
+// `schemas.state` (kind `eventhubs-schemas`, version 1) is a file of its own: a directory from before the registry has none, and
+// the files above are not changed by it. `tests/state-v1/eventhubs-schemas/` holds the file for the fixed state built below (the generator also writes `eventhubs.state`, which is left out).
+// To make it again (only when this state itself changes, which also means a new version):
+// `cargo test -p azemu-eventhubs --test state_v1 -- --ignored write_the_schema_fixture`.
+
+fn schema_fixture_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests").join("state-v1").join("eventhubs-schemas")
+}
+
+const ID_1: &str = "258e22ae9c4d463abe61dbd251bdaab4";
+const ID_2: &str = "6c9729268f974d3ebbd5dd14e8ad8f96";
+const ORDER_1: &str = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"}]}"#;
+const ORDER_2: &str = r#"{"type":"record","name":"Order","fields":[{"name":"id","type":"string"},{"name":"qty","type":"int"}]}"#;
+
+fn schema_state() -> (Arc<EventHubsService>, Arc<Shared>) {
+    use azemu_eventhubs::schema_registry::*;
+    let shared = Shared::new(false, None);
+    let (svc, _amqp) = azemu_eventhubs::pair_with(shared.clone());
+    {
+        let mut st = shared.state.lock();
+        let mut g = SchemaGroup::new("Orders", SchemaType::Avro, Compatibility::Forward, NOW);
+        g.updated_ms = NOW + 5;
+        g.etag = "a3583ada-c241-4a13-91d1-8e4c93545749".into();
+        g.properties.insert("owner".into(), "team".into());
+        let v = |version, id: &str, content: &str| SchemaVersion {
+            version,
+            kind: SchemaType::Avro,
+            id: id.into(),
+            content: content.into(),
+            created_ms: NOW + 10,
+        };
+        g.schemas.insert(
+            "order".into(),
+            SchemaEntry { name: "Order".into(), versions: vec![v(2, ID_2, ORDER_2)] }, // version 1 was deleted
+        );
+        g.schemas.insert("other".into(), SchemaEntry { name: "other".into(), versions: vec![v(1, ID_1, ORDER_1)] });
+        st.namespaces.entry("fixture".into()).or_default().schema_groups.insert("orders".into(), g);
+    }
+    (svc, shared)
+}
+
+#[test]
+#[ignore = "writes the checked-in fixture; see the text above"]
+fn write_the_schema_fixture() {
+    let (svc, _shared) = schema_state();
+    let dir = schema_fixture_dir();
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    svc.save(&dir).unwrap();
+}
+
+#[test]
+fn schema_registry_version_1_file_still_loads() {
+    let dir = std::env::temp_dir().join(format!("azemu-eh-schemas-v1-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::copy(schema_fixture_dir().join("schemas.state"), dir.join("schemas.state"))
+        .expect("tests/state-v1/eventhubs-schemas/schemas.state is checked in");
+    let shared = Shared::new(false, None);
+    let (svc, _amqp) = azemu_eventhubs::pair_with(shared.clone());
+    if let Err(e) = svc.load(&dir) {
+        panic!(
+            "The version 1 schema registry file no longer loads: {e}\nRaise VERSION in src/schema_persist.rs, keep a reader for version 1 and add a fixture for the \
+             new version. Do not edit tests/state-v1."
+        );
+    }
+    let st = shared.state.lock();
+    let g = st.schema_group("fixture", "ORDERS").expect("the group");
+    assert_eq!(
+        (g.name.as_str(), g.schema_type.name(), g.compatibility.name(), g.created_ms, g.updated_ms),
+        ("Orders", "Avro", "Forward", NOW, NOW + 5)
+    );
+    assert_eq!(g.etag, "a3583ada-c241-4a13-91d1-8e4c93545749");
+    assert_eq!(g.properties.get("owner").map(String::as_str), Some("team"));
+    let order = &g.schemas["order"];
+    assert_eq!(order.name, "Order");
+    assert_eq!(order.versions.iter().map(|v| (v.version, v.id.as_str(), v.content.as_str())).collect::<Vec<_>>(), vec![(2, ID_2, ORDER_2)]);
+    assert_eq!(g.schemas["other"].versions[0].id, ID_1);
+    assert_eq!(st.schema_by_id("fixture", ID_1).map(|f| (f.schema, f.version.version)), Some(("other".to_string(), 1)));
+    drop(st);
+    // saving it again gives the same file: nothing in the layout changed
+    let again = std::env::temp_dir().join(format!("azemu-eh-schemas-v1-again-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&again);
+    std::fs::create_dir_all(&again).unwrap();
+    svc.save(&again).unwrap();
+    assert_eq!(std::fs::read(again.join("schemas.state")).unwrap(), std::fs::read(dir.join("schemas.state")).unwrap());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&again);
+}

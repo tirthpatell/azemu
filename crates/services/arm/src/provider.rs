@@ -5,7 +5,7 @@ use azemu_core::{async_trait, Response};
 use serde_json::Value;
 
 use crate::cx::Cx;
-use crate::error::ArmResult;
+use crate::error::{ArmError, ArmResult};
 use crate::state::Stored;
 
 /// Status codes a provider answers with. The values come from the REST API specs.
@@ -40,8 +40,33 @@ pub trait Provider: Send + Sync {
         &[]
     }
 
+    /// The namespace has more types than the provider builds, and the rest are kept as plain JSON as before (`Microsoft.Insights`:
+    /// action groups, alert rules, diagnostic settings). Without this a type that is not listed answers 501.
+    fn other_types_stored(&self) -> bool {
+        false
+    }
+
+    /// Called before a GET, PUT, PATCH or DELETE of a resource of one of its built types, and before a list of them: the provider
+    /// may bring ARM's records in line with the service it drives (a share made through the service's own API). `names` are the
+    /// names above the type for a list and the resource's own names for the rest. `rg` is the canonical group name.
+    async fn sync(&self, _cx: &Cx<'_>, _sub: &str, _rg: &str, _type_path: &str, _names: &[String]) -> ArmResult<()> {
+        Ok(())
+    }
+
+    /// The error of a GET for a resource of one of its types that does not exist, when Azure's differs from the generic
+    /// `ResourceNotFound` (a share answers `ShareNotFound`).
+    fn missing(&self, _type_path: &str) -> Option<ArmError> {
+        None
+    }
+
     /// Names that are POST actions but are also read with GET (`readonlykeys`).
     fn get_actions(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Names that are written with PUT on the resource (`components/{c}/currentbillingfeatures`): handled by `action`, which reads
+    /// the method from the request.
+    fn put_actions(&self) -> &'static [&'static str] {
         &[]
     }
 

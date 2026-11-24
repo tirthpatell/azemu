@@ -1,0 +1,145 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "functions": [
+    {
+      "namespace": "contoso",
+      "members": {
+        "pad": {
+          "parameters": [
+            {
+              "name": "value",
+              "type": "string"
+            },
+            {
+              "name": "width",
+              "type": "int"
+            }
+          ],
+          "output": {
+            "type": "string",
+            "value": "[padLeft(parameters('value'), parameters('width'), '0')]"
+          }
+        },
+        "describe": {
+          "parameters": [
+            {
+              "name": "item",
+              "type": "object"
+            }
+          ],
+          "output": {
+            "type": "string",
+            "value": "[format('{0} is {1}', parameters('item').name, parameters('item').age)]"
+          }
+        },
+        "total": {
+          "parameters": [
+            {
+              "name": "numbers",
+              "type": "array"
+            }
+          ],
+          "output": {
+            "type": "int",
+            "value": "[reduce(parameters('numbers'), 0, lambda('c', 'n', add(lambdaVariables('c'), lambdaVariables('n'))))]"
+          }
+        },
+        "hello": {
+          "parameters": [],
+          "output": {
+            "type": "string",
+            "value": "hello"
+          }
+        },
+        "flag": {
+          "parameters": [
+            {
+              "name": "on",
+              "type": "bool"
+            }
+          ],
+          "output": {
+            "type": "bool",
+            "value": "[not(parameters('on'))]"
+          }
+        },
+        "wrap": {
+          "parameters": [
+            {
+              "name": "x",
+              "type": "string"
+            }
+          ],
+          "output": {
+            "type": "object",
+            "value": "[createObject('wrapped', parameters('x'))]"
+          }
+        }
+      }
+    },
+    {
+      "namespace": "Other",
+      "members": {
+        "twice": {
+          "parameters": [
+            {
+              "name": "s",
+              "type": "string"
+            }
+          ],
+          "output": {
+            "type": "string",
+            "value": "[concat(parameters('s'), parameters('s'))]"
+          }
+        }
+      }
+    }
+  ],
+  "variables": {
+    "fromFunction": "[contoso.pad('9', 2)]"
+  },
+  "resources": [],
+  "outputs": {
+    "padded": {
+      "type": "string",
+      "value": "[contoso.pad('7', 3)]"
+    },
+    "described": {
+      "type": "string",
+      "value": "[contoso.describe(createObject('name', 'Evie', 'age', 5))]"
+    },
+    "summed": {
+      "type": "int",
+      "value": "[contoso.total(createArray(1, 2, 3, 4))]"
+    },
+    "greeting": {
+      "type": "string",
+      "value": "[contoso.hello()]"
+    },
+    "flagged": {
+      "type": "bool",
+      "value": "[contoso.flag(true())]"
+    },
+    "wrapped": {
+      "type": "object",
+      "value": "[contoso.wrap('x')]"
+    },
+    "upperNamespaceCall": {
+      "type": "string",
+      "value": "[CONTOSO.PAD('1', 2)]"
+    },
+    "otherNamespace": {
+      "type": "string",
+      "value": "[other.twice('ab')]"
+    },
+    "insideLambda": {
+      "type": "array",
+      "value": "[map(createArray('1', '22'), lambda('s', contoso.pad(lambdaVariables('s'), 4)))]"
+    },
+    "insideVariable": {
+      "type": "string",
+      "value": "[variables('fromFunction')]"
+    }
+  }
+}

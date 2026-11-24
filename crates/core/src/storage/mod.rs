@@ -4,6 +4,7 @@ pub mod auth;
 pub mod cors;
 pub mod credentials;
 pub mod sig;
+pub mod strict;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -151,6 +152,33 @@ pub fn error_with_details(ctx: &RequestCtx, status: impl IntoStatus, code: &str,
     }
     body.push_str("</Error>");
     Resp::new(status).xml(Bytes::from(body)).header("x-ms-error-code", code).build()
+}
+
+/// The answer for a fault rule (`docs/faults.md`) in the storage XML error shape, with the common headers. A throttle is
+/// `503 ServerBusy`: the Azure Storage error code list gives "ServerBusy, Service Unavailable (503): The server is currently unable
+/// to receive requests. Please retry your request." (learn.microsoft.com/rest/api/storageservices/common-rest-api-error-codes).
+/// That page names no retry header; `Retry-After` is set only when the rule asks for it, because the Azure SDKs read it on a 503
+/// (azure-core `RetryPolicy.get_retry_after`: `retry-after-ms`, `x-ms-retry-after-ms`, `Retry-After`).
+pub fn fault_response(req: &Request, server: &str, a: &crate::faults::FaultAnswer) -> Response {
+    let status = a.status_or(503);
+    let default_code = match status {
+        500 => "InternalError",
+        503 => "ServerBusy",
+        s => crate::faults::FaultAnswer::default_code(s),
+    };
+    let code = a.code_or(default_code);
+    let message = a.message_or(if a.throttle {
+        "The server is currently unable to receive requests. Please retry your request."
+    } else {
+        crate::faults::FaultAnswer::DEFAULT_MESSAGE
+    });
+    let mut resp = error(&req.ctx, status, &code, &message);
+    if let Some(s) = a.retry_after_secs() {
+        if let Ok(v) = HeaderValue::from_str(&s.to_string()) {
+            resp.headers_mut().insert(http::header::RETRY_AFTER, v);
+        }
+    }
+    finish(resp, req, server)
 }
 
 /// Add the headers every storage response carries. Headers the service already set

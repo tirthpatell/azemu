@@ -311,6 +311,29 @@ impl Queue {
         (ready, locked, delayed)
     }
 
+    /// One page of the events still in the queue for the inspector: up to `limit` rows with a sequence number above `after`, each
+    /// (sequence, event, delivery count, state name). Nothing is locked or released; the lock token is not shown.
+    pub fn page(&self, now: &Now, after: Option<u64>, limit: usize) -> Vec<(u64, Value, u32, &'static str)> {
+        let from = after.map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded);
+        self.entries
+            .range((from, std::ops::Bound::Unbounded))
+            .take(limit)
+            .map(|(seq, e)| {
+                let st = match &e.state {
+                    State::Locked { .. } => "locked",
+                    State::Ready { not_before } if *not_before > now.mono => "delayed",
+                    State::Ready { .. } => "available",
+                };
+                (*seq, e.event.clone(), e.delivery_count, st)
+            })
+            .collect()
+    }
+
+    /// How many events are in the queue.
+    pub fn queued(&self) -> usize {
+        self.entries.len()
+    }
+
     /// Events still in the queue, for the admin API: (event, delivery count, state name).
     pub fn snapshot(&self, now: &Now) -> Vec<(Value, u32, &'static str)> {
         self.entries

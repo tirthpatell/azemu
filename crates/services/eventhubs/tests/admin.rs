@@ -8,7 +8,9 @@ fn url(env: &Env, path: &str) -> String {
 }
 
 async fn call(env: &Env, method: &str, path: &str, body: &str) -> (u16, Value) {
-    let r = env.srv.send(method, &url(env, path), &[], body.to_string()).await;
+    // a body is JSON, and says so (the admin API refuses another type)
+    let headers: &[(&str, &str)] = if body.is_empty() { &[] } else { &[("content-type", "application/json")] };
+    let r = env.srv.send(method, &url(env, path), headers, body.to_string()).await;
     let v = if r.body.is_empty() { Value::Null } else { serde_json::from_slice(&r.body).unwrap_or(Value::Null) };
     (r.status, v)
 }

@@ -10,6 +10,8 @@
 //! | `GET /_azemu/eventhubs/{ns}/hubs/{hub}/partitions[/{n}]` | counters |
 //! | `GET /_azemu/eventhubs/{ns}/hubs/{hub}/consumergroups` | consumer groups |
 //! | `PUT`, `GET`, `DELETE /_azemu/eventhubs/{ns}/hubs/{hub}/consumergroups/{cg}` | one consumer group |
+//! | `GET /_azemu/eventhubs/{ns}/authorization-rules`, `PUT`, `GET`, `DELETE .../authorization-rules/{name}` | shared access policies for strict authorisation (`azemu_core::auth::sas_admin`) |
+//! | `GET /_azemu/eventhubs/{ns}/schemagroups`, `PUT`, `GET`, `DELETE .../schemagroups/{group}` | Schema Registry groups (`schema_admin.rs`) |
 
 use azemu_core::resp::Resp;
 use azemu_core::time::{iso8601_7, OffsetDateTime};
@@ -94,6 +96,9 @@ fn handle_inner(shared: &Shared, req: Request) -> Response {
     let all = req.segments();
     let segs: Vec<&str> = all.iter().skip(PREFIX_SEGMENTS).map(String::as_str).collect();
     let method = req.method.as_str();
+    if let Some(r) = azemu_core::auth::sas_admin::handle(&shared.sas, &req, &segs) {
+        return r;
+    }
     match segs.as_slice() {
         ["namespaces"] if method == "GET" => {
             let st = shared.state.lock();
@@ -137,6 +142,7 @@ fn handle_inner(shared: &Shared, req: Request) -> Response {
             }
         }
         [ns, "hubs", hub, "consumergroups", cg] => cg_route(shared, &req, ns, hub, cg),
+        [ns, "schemagroups", rest @ ..] => crate::schema_admin::route(shared, &req, ns, rest),
         _ => unbuilt(&req),
     }
 }

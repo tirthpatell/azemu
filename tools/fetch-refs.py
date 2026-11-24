@@ -52,6 +52,7 @@ PINS = [
     ("storage/azure-mgmt-storage", "python/storage/azure-mgmt-storage_745b7ea500", "745b7ea5005360e10d6f1e2984f42a6f90a444c6"),
     ("storage/azure-storage-blob", "python/storage/azure-storage-blob_e151c28f39", "e151c28f39b921502cd04b2216711560dbefd3f8"),
     ("storage/azure-storage-file-datalake", "python/storage/azure-storage-file-datalake_77d87fd024", "77d87fd02444bc15b17ebdfcbe0dbc09064b82c3"),
+    ("storage/azure-storage-file-share", "python/storage/azure-storage-file-share_39f2370dd0", "39f2370dd0f36f0aa1cfa7e19f5f0e3f428894e0"),
     ("storage/azure-storage-queue", "python/storage/azure-storage-queue_5064253f11", "5064253f11426fa10e48b743602120fa5990eb4a"),
     ("tables/azure-data-tables", "python/tables/azure-data-tables_97970da74f", "97970da74f147e7b92839ce15557a7e682fcaf7b"),
 ]

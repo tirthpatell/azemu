@@ -19,6 +19,9 @@ pub struct CosmosError {
     pub headers: Vec<(String, String)>,
     /// How `message` is written into the body (the service uses three shapes, see [`Shape`]).
     pub shape: Shape,
+    /// What stands after the activity id in a `Wrapped` message instead of `, Microsoft.Azure.Documents.Common/2.14.0` (the replica a
+    /// refusal of a role came from, in strict mode).
+    pub tail: Option<String>,
 }
 
 /// The three shapes of an error `message` on Azure.
@@ -45,6 +48,7 @@ impl CosmosError {
             additional_info: None,
             headers: Vec::new(),
             shape: Shape::Wrapped,
+            tail: None,
         }
     }
 
@@ -170,7 +174,8 @@ impl CosmosError {
                     Some(s) => s.clone(),
                     None => json!({ "Errors": [self.message] }).to_string(),
                 };
-                format!("Message: {inner}\r\nActivityId: {activity}, Microsoft.Azure.Documents.Common/2.14.0")
+                let tail = self.tail.as_deref().unwrap_or(", Microsoft.Azure.Documents.Common/2.14.0");
+                format!("Message: {inner}\r\nActivityId: {activity}{tail}")
             }
         };
         let mut v = json!({

@@ -18,7 +18,7 @@ docker run --rm -p 127.0.0.1:4577:4577 -p 127.0.0.1:10000:10000 azemu:latest
 ```
 
 The container listens on every address *inside* the container and opens one port per service (`--standard-ports`: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data
-Lake, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 Resource Manager, 10014 Identity, 8081 Cosmos DB, 5672 and 5671 AMQP, 9093 Kafka; the gateway is
+Lake, 10004 Azure Files, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 Resource Manager, 10014 Identity, 10015 Monitor, 8081 Cosmos DB, 5672 and 5671 AMQP, 9093 Kafka; the gateway is
 4577). **The emulator has no sign-in and does not check who is asking**: publish ports to `127.0.0.1` only (`-p 127.0.0.1:...`), never `-p 4577:4577`, or to no host port at all.
 
 Other containers reach it by its container or Compose service name ([`examples/compose/compose.yaml`](../examples/compose/compose.yaml)). For https add that name to the
@@ -26,7 +26,8 @@ certificate (`-e AZEMU_TLS_NAME=azemu`) and fetch the authority from `http://aze
 `-v azemu-data:/data -e AZEMU_DATA_DIR=/data`; keep the certificate authority with a second volume on `/home/azemu/.azemu`. Without that volume the certificate authority is new at every
 container start, so a client that uses https must fetch `ca.pem` again each run: `curl -s http://localhost:4577/_azemu/ca.pem -o ca.pem`. With the volume (`-v azemu-ca:/home/azemu/.azemu`) the
 authority stays, and a client trusts it once. Both directories are private (mode 0700) in the image, so a first start logs no warning about them. The image runs as user 10001 and has no shell;
-`docker stop` ends it at once. If you start it with another `--port`, tell the health check: `--health-cmd "/usr/local/bin/azemu __healthcheck 5000"`.
+`docker stop` ends it at once. If you start it with another `--port`, tell the health check: `--health-cmd "/usr/local/bin/azemu __healthcheck 5000"`. The image checks every 250 ms during its first
+10 seconds (`--start-interval`, which needs Docker Engine 25.0 or newer) and every 5 seconds after that, so `docker ps` shows `healthy` soon after the start.
 
 The image is two stages: a build stage with the Rust toolchain, and a runtime stage on a small base (no shell, no package manager) with the binary, the licence files in
 `/licenses`, an empty `/data` and the user's certificate directory. It is about 60 MB. A Docker build uses memory outside any limit set on your shell: it compiles with two

@@ -613,6 +613,10 @@ pub struct Shared {
     txn_timeout_ms: AtomicU64,
     /// What open AMQP transactions hold in memory, against their limits.
     pub txn_budget: Arc<crate::txn::TxnBudget>,
+    /// Strict authorisation (`docs/strict-auth.md`): the handle, and the authorization rules (shared access policies) the checks use. With
+    /// the mode off nothing here is looked at.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
+    pub sas: azemu_core::auth::sas::SasRules,
 }
 
 impl Shared {
@@ -625,7 +629,19 @@ impl Shared {
             ticker_started: AtomicBool::new(false),
             txn_timeout_ms: AtomicU64::new(120_000),
             txn_budget: crate::txn::TxnBudget::new(crate::txn::TxnLimits::default()),
+            auth: parking_lot::RwLock::new(azemu_core::auth::Auth::disabled()),
+            sas: Default::default(),
         })
+    }
+
+    /// The strict authorisation handle (the mode is off until the program hands over one that is on).
+    pub fn auth(&self) -> azemu_core::auth::Auth {
+        self.auth.read().clone()
+    }
+
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("servicebus");
+        *self.auth.write() = auth;
     }
 
     /// From the environment, through `azemu_core::settings` (read here, when the service is built):
@@ -697,6 +713,7 @@ impl Shared {
     pub fn reset(&self) {
         let mut old = std::mem::take(&mut *self.state.lock());
         old.wake_receivers();
+        self.sas.clear();
         next_revision();
         self.load_config();
     }
@@ -716,8 +733,14 @@ impl Shared {
             (key, had)
         };
         next_revision();
+        self.sas.clear_namespace(&key);
         if let Some(path) = &self.config_path {
             if let Ok(cfg) = crate::config::load(path) {
+                for (ns, entity, rule) in crate::config::declared_rules(&cfg).unwrap_or_default() {
+                    if ns.eq_ignore_ascii_case(&key) {
+                        self.sas.declare(&ns, entity.as_deref(), rule);
+                    }
+                }
                 let mut fresh = State::default();
                 if crate::config::apply(&mut fresh, &cfg, now_ms()).is_ok() {
                     if let Some(ns) = fresh.namespaces.remove(&key) {
@@ -734,8 +757,13 @@ impl Shared {
             match crate::config::load(path) {
                 Ok(cfg) => {
                     let mut st = self.state.lock();
-                    if let Err(e) = crate::config::apply(&mut st, &cfg, now_ms()) {
-                        tracing::error!("servicebus config {} was not applied: {e}", path.display());
+                    match crate::config::apply(&mut st, &cfg, now_ms()) {
+                        Err(e) => tracing::error!("servicebus config {} was not applied: {e}", path.display()),
+                        Ok(()) => {
+                            for (ns, entity, rule) in crate::config::declared_rules(&cfg).unwrap_or_default() {
+                                self.sas.declare(&ns, entity.as_deref(), rule);
+                            }
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("servicebus config {}: {e}", path.display()),

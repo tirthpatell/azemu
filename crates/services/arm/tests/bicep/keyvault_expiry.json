@@ -1,0 +1,62 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "1639522050459805603"
+    }
+  },
+  "parameters": {
+    "vaultName": {
+      "type": "string",
+      "defaultValue": "[format('kv{0}', uniqueString(resourceGroup().id))]"
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    },
+    "baseTime": {
+      "type": "string",
+      "defaultValue": "[utcNow('u')]"
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2023-07-01",
+      "name": "[parameters('vaultName')]",
+      "location": "[parameters('location')]",
+      "tags": {
+        "reviewBy": "[dateTimeAdd(parameters('baseTime'), 'P1Y', 'yyyy-MM-dd')]"
+      },
+      "properties": {
+        "tenantId": "[subscription().tenantId]",
+        "sku": {
+          "family": "A",
+          "name": "standard"
+        },
+        "accessPolicies": []
+      }
+    }
+  ],
+  "outputs": {
+    "reviewBy": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('vaultName')), '2023-07-01', 'full').tags.reviewBy]"
+    },
+    "reviewEpoch": {
+      "type": "int",
+      "value": "[dateTimeToEpoch(dateTimeAdd(parameters('baseTime'), 'P1Y'))]"
+    },
+    "fixedExpiry": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-01-15T10:00:00Z', 'P30D')]"
+    },
+    "vaultUri": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.KeyVault/vaults', parameters('vaultName')), '2023-07-01').vaultUri]"
+    }
+  }
+}

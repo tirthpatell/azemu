@@ -110,9 +110,10 @@ fn parse_sub(part: &[u8], outer: &Request) -> Sub {
     Sub { content_id, req: Some(req) }
 }
 
-fn render(resp: &Response) -> Vec<u8> {
+fn render(resp: &Response, reason: Option<&str>) -> Vec<u8> {
     let status = resp.status();
-    let mut out = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("")).into_bytes();
+    let reason = reason.unwrap_or_else(|| status.canonical_reason().unwrap_or(""));
+    let mut out = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), reason).into_bytes();
     for (k, v) in resp.headers() {
         out.extend_from_slice(k.as_str().as_bytes());
         out.extend_from_slice(b": ");
@@ -159,8 +160,24 @@ pub fn run_batch(cx: &mut Cx, container: Option<&str>) -> ApiResult {
     let rboundary = format!("batchresponse_{}", uuid::Uuid::new_v4());
     let mut body: Vec<u8> = vec![];
     for part in raw {
-        let sub = parse_sub(part, req);
+        let mut sub = parse_sub(part, req);
+        // strict mode: a part carries no credential of its own; the batch's token covers it (and was judged for the batch)
+        if cx.pre.strict.is_some() {
+            if let (Some(r), Some(a)) = (sub.req.as_mut(), req.headers.get("authorization")) {
+                r.headers.entry("authorization").or_insert_with(|| a.clone());
+            }
+        }
+        // strict mode: the part is judged on its own, with the caller of the batch; the batch itself is 202 whatever the parts say
+        let mut reason: Option<String> = None;
+        let refused = match (&sub.req, &cx.pre.strict) {
+            (Some(r), Some((auth, who))) if allowed(r, container) => crate::strict::check_part(auth, who, r).map(|resp| {
+                reason = Some("This request is not authorized to perform this operation using this permission.".to_string());
+                azemu_core::storage::finish(resp, r, router::SERVER)
+            }),
+            _ => None,
+        };
         let resp = match &sub.req {
+            Some(_) if refused.is_some() => refused.unwrap_or_else(|| Resp::new(500u16).build()),
             Some(r) if allowed(r, container) => router::run(cx.st, r, None, &Pre::default()),
             Some(r) => {
                 let e = err("InvalidInput").msg("This operation is not supported in a batch request.");
@@ -174,7 +191,7 @@ pub fn run_batch(cx: &mut Cx, container: Option<&str>) -> ApiResult {
         body.extend_from_slice(
             format!("--{rboundary}\r\nContent-Type: application/http\r\nContent-ID: {}\r\n\r\n", sub.content_id).as_bytes(),
         );
-        body.extend_from_slice(&render(&resp));
+        body.extend_from_slice(&render(&resp, reason.as_deref()));
         // Azure writes the line break that ends a part only when the part has a body. Without a body
         // the blank line after the headers is that line break, so the delimiter follows it directly
         // (the Java batch client reads any text after the blank line as an error body).

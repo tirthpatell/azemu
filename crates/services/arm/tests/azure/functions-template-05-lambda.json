@@ -1,0 +1,173 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "variables": {
+    "dogs": [
+      {
+        "name": "Evie",
+        "age": 5,
+        "interests": [
+          "Ball",
+          "Frisbee"
+        ]
+      },
+      {
+        "name": "Casper",
+        "age": 3,
+        "interests": [
+          "Other dogs"
+        ]
+      },
+      {
+        "name": "Indy",
+        "age": 2,
+        "interests": [
+          "Butter"
+        ]
+      },
+      {
+        "name": "Kira",
+        "age": 8,
+        "interests": [
+          "Rubs"
+        ]
+      }
+    ],
+    "copy": [
+      {
+        "name": "itemForLoop",
+        "count": "[length(range(0, 10))]",
+        "input": "[range(0, 10)[copyIndex('itemForLoop')]]"
+      }
+    ],
+    "inputArray": [
+      "foo",
+      "bar",
+      "baz"
+    ],
+    "inputObject": {
+      "foo": "foo",
+      "bar": "bar"
+    },
+    "ages": "[map(variables('dogs'), lambda('dog', lambdaVariables('dog').age))]"
+  },
+  "resources": [],
+  "outputs": {
+    "oldDogs": {
+      "type": "array",
+      "value": "[filter(variables('dogs'), lambda('dog', greaterOrEquals(lambdaVariables('dog').age, 5)))]"
+    },
+    "dogNameIndex": {
+      "type": "array",
+      "value": "[filter(variables('dogs'), lambda('val', 'i', and(less(lambdaVariables('i'), 2), equals(substring(lambdaVariables('val').name, 0, 1), 'C'))))]"
+    },
+    "isEven": {
+      "type": "array",
+      "value": "[filter(range(0, 10), lambda('i', equals(0, mod(lambdaVariables('i'), 2))))]"
+    },
+    "filteredLoop": {
+      "type": "array",
+      "value": "[filter(variables('itemForLoop'), lambda('i', greater(lambdaVariables('i'), 5)))]"
+    },
+    "groupedByLetter": {
+      "type": "object",
+      "value": "[groupBy(variables('inputArray'), lambda('x', substring(lambdaVariables('x'), 0, 1)))]"
+    },
+    "dogNames": {
+      "type": "array",
+      "value": "[map(variables('dogs'), lambda('dog', lambdaVariables('dog').name))]"
+    },
+    "sayHi": {
+      "type": "array",
+      "value": "[map(variables('dogs'), lambda('dog', format('Hello {0}!', lambdaVariables('dog').name)))]"
+    },
+    "mapArray": {
+      "type": "array",
+      "value": "[map(range(0, length(variables('dogs'))), lambda('i', createObject('i', lambdaVariables('i'), 'dog', variables('dogs')[lambdaVariables('i')].name, 'greeting', format('Ahoy, {0}!', variables('dogs')[lambdaVariables('i')].name))))]"
+    },
+    "mapArrayIndex": {
+      "type": "array",
+      "value": "[map(variables('dogs'), lambda('x', 'i', createObject('index', lambdaVariables('i'), 'val', lambdaVariables('x').name)))]"
+    },
+    "mapObject": {
+      "type": "object",
+      "value": "[mapValues(variables('inputObject'), lambda('val', toUpper(lambdaVariables('val'))))]"
+    },
+    "totalAge": {
+      "type": "int",
+      "value": "[reduce(variables('ages'), 0, lambda('cur', 'next', add(lambdaVariables('cur'), lambdaVariables('next'))))]"
+    },
+    "totalAgeAdd1": {
+      "type": "int",
+      "value": "[reduce(variables('ages'), 1, lambda('cur', 'next', add(lambdaVariables('cur'), lambdaVariables('next'))))]"
+    },
+    "oddAge": {
+      "type": "int",
+      "value": "[reduce(variables('ages'), 0, lambda('cur', 'next', 'i', if(equals(mod(lambdaVariables('i'), 2), 0), add(lambdaVariables('cur'), lambdaVariables('next')), lambdaVariables('cur'))))]"
+    },
+    "reduceObjectUnion": {
+      "type": "object",
+      "value": "[reduce(createArray(createObject('foo', 123), createObject('bar', 456), createObject('baz', 789)), createObject(), lambda('cur', 'next', union(lambdaVariables('cur'), lambdaVariables('next'))))]"
+    },
+    "dogsByAge": {
+      "type": "array",
+      "value": "[sort(variables('dogs'), lambda('a', 'b', less(lambdaVariables('a').age, lambdaVariables('b').age)))]"
+    },
+    "dogsObject": {
+      "type": "object",
+      "value": "[toObject(variables('dogs'), lambda('entry', lambdaVariables('entry').name))]"
+    },
+    "dogsObjectValue": {
+      "type": "object",
+      "value": "[toObject(variables('dogs'), lambda('entry', lambdaVariables('entry').name), lambda('entry', lambdaVariables('entry')))]"
+    },
+    "dogsObjectProps": {
+      "type": "object",
+      "value": "[toObject(variables('dogs'), lambda('entry', lambdaVariables('entry').name), lambda('entry', lambdaVariables('entry').interests))]"
+    },
+    "sortedNumbers": {
+      "type": "array",
+      "value": "[sort(createArray(3, 1, 2, 1), lambda('a', 'b', less(lambdaVariables('a'), lambdaVariables('b'))))]"
+    },
+    "sortedDescending": {
+      "type": "array",
+      "value": "[sort(createArray(3, 1, 2), lambda('a', 'b', greater(lambdaVariables('a'), lambdaVariables('b'))))]"
+    },
+    "sortedStrings": {
+      "type": "array",
+      "value": "[sort(createArray('b', 'A', 'c'), lambda('a', 'b', less(lambdaVariables('a'), lambdaVariables('b'))))]"
+    },
+    "nestedLambda": {
+      "type": "array",
+      "value": "[map(createArray(1, 2), lambda('a', map(createArray(10, 20), lambda('b', add(lambdaVariables('a'), lambdaVariables('b'))))))]"
+    },
+    "emptyMap": {
+      "type": "array",
+      "value": "[map(createArray(), lambda('x', lambdaVariables('x')))]"
+    },
+    "reduceStrings": {
+      "type": "string",
+      "value": "[reduce(createArray('a', 'b', 'c'), '', lambda('cur', 'next', concat(lambdaVariables('cur'), lambdaVariables('next'))))]"
+    },
+    "filterNone": {
+      "type": "array",
+      "value": "[filter(createArray(1, 2, 3), lambda('x', greater(lambdaVariables('x'), 10)))]"
+    },
+    "groupByLength": {
+      "type": "object",
+      "value": "[groupBy(createArray('a', 'bb', 'c', 'dd', 'eee'), lambda('s', string(length(lambdaVariables('s')))))]"
+    },
+    "toObjectDuplicateFree": {
+      "type": "object",
+      "value": "[toObject(createArray('x', 'y'), lambda('k', lambdaVariables('k')), lambda('k', toUpper(lambdaVariables('k'))))]"
+    },
+    "mapValuesNumbers": {
+      "type": "object",
+      "value": "[mapValues(createObject('a', 1, 'b', 2), lambda('v', mul(lambdaVariables('v'), 10)))]"
+    },
+    "mapObjectsToNames": {
+      "type": "array",
+      "value": "[map(items(variables('inputObject')), lambda('e', lambdaVariables('e').key))]"
+    }
+  }
+}

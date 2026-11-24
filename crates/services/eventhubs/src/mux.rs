@@ -58,8 +58,12 @@ impl RawProtocol for AmqpMux {
 
     async fn serve(&self, conn: RawConn) {
         let info = ConnectionInfo { peer: conn.peer, local: conn.local, tls: conn.tls, server_name: conn.server_name.clone() };
-        let factory: SharedFactory =
-            Arc::new(MuxFactory { shared: self.shared.clone(), eventhubs: self.eventhubs.clone(), other: self.other.clone() });
+        let factory: SharedFactory = Arc::new(MuxFactory {
+            shared: self.shared.clone(),
+            eventhubs: self.eventhubs.clone(),
+            other: self.other.clone(),
+            faults: conn.faults.clone(),
+        });
         azemu_amqp::serve_connection(conn.io, info, factory, self.cfg.clone()).await;
     }
 }
@@ -68,6 +72,7 @@ struct MuxFactory {
     shared: Arc<Shared>,
     eventhubs: Arc<dyn HandlerFactory>,
     other: Arc<dyn HandlerFactory>,
+    faults: azemu_core::Faults,
 }
 
 impl HandlerFactory for MuxFactory {
@@ -78,6 +83,7 @@ impl HandlerFactory for MuxFactory {
             shared: self.shared.clone(),
             eventhubs_factory: self.eventhubs.clone(),
             other_factory: self.other.clone(),
+            faults: azemu_amqp::faults::FaultSetup::new(self.faults.clone(), "eventhubs", namespace_from_hostname),
             open: None,
             primary: Side::Other,
             eventhubs: None,
@@ -99,6 +105,8 @@ struct MuxHandler {
     shared: Arc<Shared>,
     eventhubs_factory: Arc<dyn HandlerFactory>,
     other_factory: Arc<dyn HandlerFactory>,
+    /// For the fault rules: each side's handler is wrapped, and the connection is asked about once.
+    faults: azemu_amqp::faults::FaultSetup,
     open: Option<Open>,
     primary: Side,
     eventhubs: Option<Box<dyn ConnectionHandler>>,
@@ -114,12 +122,13 @@ pub fn side_for_host(shared: &Shared, host: Option<&str>) -> bool {
 impl MuxHandler {
     /// The handler of a side, created on first use and told about the `open` frame.
     fn handler(&mut self, side: Side) -> Result<&mut Box<dyn ConnectionHandler>, AmqpError> {
-        let (slot, factory) = match side {
-            Side::EventHubs => (&mut self.eventhubs, &self.eventhubs_factory),
-            Side::Other => (&mut self.other, &self.other_factory),
+        let (slot, factory, service) = match side {
+            Side::EventHubs => (&mut self.eventhubs, &self.eventhubs_factory, "eventhubs"),
+            Side::Other => (&mut self.other, &self.other_factory, "servicebus"),
         };
         if slot.is_none() {
-            let mut h = factory.new_connection(&self.info, self.conn.clone());
+            let inner = factory.new_connection(&self.info, self.conn.clone());
+            let mut h = azemu_amqp::faults::wrap(inner, self.conn.clone(), self.faults.for_service(service));
             if let Some(open) = &self.open {
                 h.on_open(open)?;
             }

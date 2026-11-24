@@ -179,3 +179,153 @@ async fn subscriptions_at_subscription_scope_are_not_built() {
     let listed = a.get(&format!("/subscriptions/{SUB}/resourceGroups/ev4/resources")).await.json();
     assert!(listed["value"].as_array().unwrap().iter().all(|r| !r["type"].as_str().unwrap_or("").contains("eventSubscriptions")));
 }
+
+/// The events in the queue without taking them (`peekonly`): they stay visible.
+async fn peeked(a: &Arm, acct: &str) -> Vec<Value> {
+    let url = format!("{}/events/messages?peekonly=true&numofmessages=32", a.dp("queue", acct));
+    let r = a.dp_send("GET", &url, &[], "").await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    r.text()
+        .split("<MessageText>")
+        .skip(1)
+        .map(|part| {
+            let text = part.split("</MessageText>").next().unwrap_or("");
+            let raw = base64::engine::general_purpose::STANDARD.decode(text).expect("the event is base64");
+            serde_json::from_slice(&raw).expect("the event is JSON")
+        })
+        .collect()
+}
+
+/// What the account's container `name` holds, as the blob names listed.
+async fn blob_names(a: &Arm, acct: &str, container: &str) -> Vec<String> {
+    let url = format!("{}/{container}?restype=container&comp=list", a.dp("blob", acct));
+    let r = a.dp_send("GET", &url, &[], "").await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    r.text().split("<Name>").skip(1).map(|p| p.split("</Name>").next().unwrap_or("").to_string()).collect()
+}
+
+#[tokio::test]
+async fn delivery_properties_dead_letter_blob_and_identity_through_arm() {
+    let a = full().await;
+    account_with_queue(&a, "ev5", "evacct5").await;
+    let acct_id = rid("ev5", "Microsoft.Storage", "storageAccounts/evacct5");
+    let r = a
+        .put(
+            &rid("ev5", "Microsoft.Storage", "storageAccounts/evacct5/blobServices/default/containers/deadletters"),
+            json!({"properties": {}}),
+        )
+        .await;
+    assert!(r.status == 200 || r.status == 201, "{}", r.text());
+    let base = format!("{acct_id}/providers/Microsoft.EventGrid/eventSubscriptions");
+
+    // A subscription whose queue does not exist, with delivery properties and a blob dead-letter container.
+    let missing = json!({"endpointType": "StorageQueue", "properties": {
+        "resourceId": acct_id, "queueName": "no-such-queue",
+        "deliveryAttributeMappings": [
+            {"name": "x-static", "type": "Static", "properties": {"value": "abc", "isSecret": false}},
+            {"name": "x-secret", "type": "Static", "properties": {"value": "hush", "isSecret": true}},
+            {"name": "x-dyn", "type": "Dynamic", "properties": {"sourceField": "data.key1"}}]}});
+    let dead = json!({"endpointType": "StorageBlob", "properties": {"resourceId": acct_id, "blobContainerName": "deadletters"}});
+    let r = a
+        .put(
+            &format!("{base}/dead"),
+            json!({"properties": {"destination": missing, "deadLetterDestination": dead, "retryPolicy": {"maxDeliveryAttempts": 1}}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let p = &r.json()["properties"];
+    assert_eq!(p["deadLetterDestination"]["endpointType"], "StorageBlob");
+    assert_eq!(p["deadLetterDestination"]["properties"]["blobContainerName"], "deadletters");
+    let maps = &p["destination"]["properties"]["deliveryAttributeMappings"];
+    assert_eq!(maps[0]["properties"]["value"], "abc");
+    assert!(maps[1]["properties"].get("value").is_none(), "a secret value is not shown: {maps}");
+    assert_eq!(maps[2]["properties"]["sourceField"], "data.key1");
+    // the secret is given by getDeliveryAttributes
+    let got = a.post(&format!("{base}/dead/getDeliveryAttributes"), json!({})).await;
+    assert_eq!(got.status, 200, "{}", got.text());
+    assert_eq!(got.json()["value"][1]["properties"]["value"], "hush");
+
+    // A second subscription on the same account, to a queue that exists: it must see the upload and not the dead letter blob.
+    let r = a
+        .put(
+            &format!("{base}/watch"),
+            json!({"properties": {"destination": queue_destination("ev5", "evacct5"), "filter": {"includedEventTypes": ["Microsoft.Storage.BlobCreated"]}}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    upload(&a, "evacct5", "a.txt").await;
+    let mut names = Vec::new();
+    for _ in 0..100 {
+        names = blob_names(&a, "evacct5", "deadletters").await;
+        if !names.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(names.len(), 1, "one dead-letter blob: {names:?}");
+    let parts: Vec<&str> = names[0].split('/').collect();
+    assert_eq!(parts[1], "DEAD", "{}", names[0]);
+    assert_eq!(parts.len(), 7);
+    let body = a.dp_send("GET", &format!("{}/deadletters/{}", a.dp("blob", "evacct5"), names[0]), &[], "").await;
+    assert_eq!(body.status, 200);
+    let v = body.json();
+    assert_eq!(v[0]["deadLetterReason"], "MaxDeliveryAttemptsExceeded");
+    assert_eq!(v[0]["deliveryAttempts"], 1);
+    assert_eq!(v[0]["lastDeliveryOutcome"], "NotFound");
+    assert_eq!(v[0]["subject"], "/blobServices/default/containers/inbox/blobs/a.txt");
+    // the watcher got exactly the upload: writing the dead letter raised no blob event
+    for _ in 0..100 {
+        if !peeked(&a, "evacct5").await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let ev = peeked(&a, "evacct5").await;
+    assert_eq!(ev.len(), 1, "{ev:?}");
+    assert_eq!(ev[0]["subject"], "/blobServices/default/containers/inbox/blobs/a.txt");
+
+    // The same subscription, delivering with a managed identity: accepted, read back as written, delivered as before.
+    let r = a
+        .put(
+            &format!("{base}/ident"),
+            json!({"properties": {
+                "deliveryWithResourceIdentity": {"identity": {"type": "SystemAssigned"}, "destination": queue_destination("ev5", "evacct5")},
+                "deadLetterWithResourceIdentity": {"identity": {"type": "SystemAssigned"}, "deadLetterDestination": dead},
+                "filter": {"subjectEndsWith": "id.txt"}}}),
+        )
+        .await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let p = &r.json()["properties"];
+    assert_eq!(p["deliveryWithResourceIdentity"]["identity"]["type"], "SystemAssigned");
+    assert_eq!(p["deliveryWithResourceIdentity"]["destination"]["endpointType"], "StorageQueue");
+    assert_eq!(p["deadLetterWithResourceIdentity"]["deadLetterDestination"]["properties"]["blobContainerName"], "deadletters");
+    assert!(p.get("destination").is_none());
+    assert_eq!(
+        a.get(&format!("{base}/ident")).await.json()["properties"]["deliveryWithResourceIdentity"]["identity"]["type"],
+        "SystemAssigned"
+    );
+    upload(&a, "evacct5", "id.txt").await;
+    let mut all = Vec::new();
+    for _ in 0..100 {
+        all = peeked(&a, "evacct5").await;
+        if all.len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(all.iter().any(|e| e["subject"].as_str().is_some_and(|s| s.ends_with("id.txt"))), "{all:?}");
+
+    // A bad identity is a 400; an Azure Function destination is accepted and read back.
+    let bad = a
+        .put(&format!("{base}/badid"), json!({"properties": {"deliveryWithResourceIdentity": {"identity": {"type": "Nope"}, "destination": queue_destination("ev5", "evacct5")}}}))
+        .await;
+    assert_eq!(bad.status, 400, "{}", bad.text());
+    let func = json!({"endpointType": "AzureFunction", "properties": {
+        "resourceId": rid("ev5", "Microsoft.Web", "sites/app1/functions/fn1")}});
+    let r = a.put(&format!("{base}/func"), json!({"properties": {"destination": func}})).await;
+    assert_eq!(r.status, 201, "{}", r.text());
+    let p = &r.json()["properties"]["destination"];
+    assert_eq!(p["endpointType"], "AzureFunction");
+    assert_eq!(p["properties"]["maxEventsPerBatch"], 1);
+}

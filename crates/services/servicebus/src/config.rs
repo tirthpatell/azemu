@@ -230,11 +230,41 @@ fn parse_rule(r: &Value, now: i64) -> Result<Rule, String> {
     Ok(rule)
 }
 
+/// The authorization rules the file declares, as `(namespace, entity, rule)`: `AuthorizationRules` on a namespace, a queue or a topic, each
+/// `{"Name", "Rights": ["Send", "Listen", "Manage"], "PrimaryKey"?, "SecondaryKey"?}`. Used in strict authorisation mode; a mistake is an error
+/// that names the entity.
+pub fn declared_rules(cfg: &Config) -> Result<Vec<(String, Option<String>, azemu_core::auth::sas::SasRule)>, String> {
+    use azemu_core::auth::sas::SasRule;
+    let user = get(&cfg.raw, "UserConfig").unwrap_or(&cfg.raw);
+    let mut out = Vec::new();
+    for n in list(user, "Namespaces") {
+        let ns = name_of(n).ok_or("namespace without a name")?.to_ascii_lowercase();
+        let mut level = |holder: &Value, entity: Option<String>, what: String| -> Result<(), String> {
+            for r in list(holder, "AuthorizationRules") {
+                let rule = SasRule::from_json(&ns, entity.as_deref(), r).map_err(|e| format!("{what}: {e}"))?;
+                out.push((ns.clone(), entity.clone(), rule));
+            }
+            Ok(())
+        };
+        level(n, None, format!("namespace '{ns}'"))?;
+        for q in list(n, "Queues") {
+            let name = name_of(q).ok_or("queue without a name")?;
+            level(q, Some(name.to_ascii_lowercase()), format!("queue '{name}'"))?;
+        }
+        for t in list(n, "Topics") {
+            let name = name_of(t).ok_or("topic without a name")?;
+            level(t, Some(name.to_ascii_lowercase()), format!("topic '{name}'"))?;
+        }
+    }
+    Ok(out)
+}
+
 /// Create everything in the config. Entities that already exist are left alone. A bad value
 /// (a duration that is not ISO 8601, a rule that does not parse) is an error that names the
 /// entity, and then nothing from the file is created: the file is checked on a scratch state
 /// first.
 pub fn apply(state: &mut State, cfg: &Config, now: i64) -> Result<(), String> {
+    declared_rules(cfg)?;
     apply_to(&mut State::default(), cfg, now)?;
     apply_to(state, cfg, now)
 }

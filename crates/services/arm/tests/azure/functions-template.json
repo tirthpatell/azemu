@@ -1,0 +1,81 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "baseTime": {
+      "type": "string",
+      "defaultValue": "2020-04-07 14:53:14Z"
+    }
+  },
+  "resources": [],
+  "outputs": {
+    "addOneYearNonLeap": {
+      "type": "string",
+      "value": "[dateTimeAdd('2023-01-01 00:00:00Z', 'P1Y')]"
+    },
+    "addOneYearLeap": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-01-01 00:00:00Z', 'P1Y')]"
+    },
+    "addOneMonthNonLeap": {
+      "type": "string",
+      "value": "[dateTimeAdd('2023-02-01 00:00:00Z', 'P1M')]"
+    },
+    "addOneMonthLeap": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-02-01 00:00:00Z', 'P1M')]"
+    },
+    "add3Years": {
+      "type": "string",
+      "value": "[dateTimeAdd(parameters('baseTime'), 'P3Y')]"
+    },
+    "subtract9Days": {
+      "type": "string",
+      "value": "[dateTimeAdd(parameters('baseTime'), '-P9D')]"
+    },
+    "add1Hour": {
+      "type": "string",
+      "value": "[dateTimeAdd(parameters('baseTime'), 'PT1H')]"
+    },
+    "add1HourFormatU": {
+      "type": "string",
+      "value": "[dateTimeAdd(parameters('baseTime'), 'PT1H', 'u')]"
+    },
+    "add1HourFormatBasic": {
+      "type": "string",
+      "value": "[dateTimeAdd(parameters('baseTime'), 'PT1H', 'yyyyMMddTHHmmssZ')]"
+    },
+    "epochValue": {
+      "type": "int",
+      "value": "[dateTimeToEpoch('2023-05-02T15:16:13Z')]"
+    },
+    "datetimeValue": {
+      "type": "string",
+      "value": "[dateTimeFromEpoch(1683040573)]"
+    },
+    "epochRoundTrip": {
+      "type": "int",
+      "value": "[dateTimeToEpoch(dateTimeAdd('2023-05-02T15:16:13Z', 'P1Y'))]"
+    },
+    "epochZero": {
+      "type": "string",
+      "value": "[dateTimeFromEpoch(0)]"
+    },
+    "epochBeforeZero": {
+      "type": "string",
+      "value": "[dateTimeFromEpoch(-86400)]"
+    },
+    "epochOfBaseTime": {
+      "type": "int",
+      "value": "[dateTimeToEpoch(parameters('baseTime'))]"
+    },
+    "addDaysAcrossMonth": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-02-28T10:00:00Z', 'P2D')]"
+    },
+    "subtractAcrossYear": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-01-01T00:00:00Z', '-PT1S')]"
+    }
+  }
+}

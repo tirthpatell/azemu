@@ -102,13 +102,13 @@ impl Seed {
             let plan = send::plan(&e.item);
             let mut exists = false;
             for probe in &plan.probes {
-                if svc.handle(probe.request()).await.status() == http::StatusCode::OK {
+                if crate::auth::in_process(svc.handle(probe.request())).await.status() == http::StatusCode::OK {
                     exists = true;
                     break;
                 }
             }
             if !exists {
-                let r = svc.handle(plan.create.request()).await;
+                let r = crate::auth::in_process(svc.handle(plan.create.request())).await;
                 if r.status().is_success() {
                     done.created += 1;
                     continue;

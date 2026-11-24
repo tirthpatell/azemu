@@ -18,18 +18,21 @@ use crate::state::{join, Blob, BlobKind, CopyInfo, Piece, SourceWait};
 use crate::store::{install, new_spec};
 use crate::util::*;
 
-struct ParsedUrl {
-    account: String,
-    container: String,
-    blob: String,
-    query: Query,
+pub(crate) struct ParsedUrl {
+    /// Lower case, without a `-secondary` suffix and with percent escapes undone: the account the way the copy itself resolves it.
+    pub(crate) account: String,
+    pub(crate) container: String,
+    pub(crate) blob: String,
+    pub(crate) query: Query,
 }
 
 fn decode(s: &str) -> String {
     percent_decode_str(s).decode_utf8_lossy().to_string()
 }
 
-fn parse_url(url: &str) -> Option<ParsedUrl> {
+/// The account, container and blob a copy source URL names. Strict mode asks about the very same resolution (`strict.rs`), so that a source
+/// written another way (the `-secondary` host, an escaped account name) is judged as the copy will read it.
+pub(crate) fn parse_url(url: &str) -> Option<ParsedUrl> {
     let rest = url.split_once("://").map(|(_, r)| r)?;
     let (authority, path_q) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
@@ -53,7 +56,7 @@ fn parse_url(url: &str) -> Option<ParsedUrl> {
     Some(ParsedUrl { account, container: decode(container), blob: decode(blob), query: Query::parse(query) })
 }
 
-fn cannot_verify(status: u16, code: &str, msg: &str) -> ApiError {
+pub(crate) fn cannot_verify(status: u16, code: &str, msg: &str) -> ApiError {
     ApiError::new("CannotVerifyCopySource")
         .status(status)
         .msg(msg)

@@ -33,8 +33,8 @@ struct Cli {
 
     /// One fixed port per service next to the gateway port, so that any host name works and no name under
     /// .localhost has to resolve (inside a container, for example). On such a port the port alone chooses the
-    /// service: 10000 blob (http://azemu:10000/{account}/...), 10001 queue, 10002 table, 10003 data lake,
-    /// 10010 key vault, 10011 app configuration, 10012 event grid, 10013 ARM, 10014 identity, 8081 cosmos,
+    /// service: 10000 blob (http://azemu:10000/{account}/...), 10001 queue, 10002 table, 10003 data lake, 10004 files,
+    /// 10010 key vault, 10011 app configuration, 10012 event grid, 10013 ARM, 10014 identity, 10015 monitor (Application Insights and Azure Monitor), 8081 cosmos,
     /// 5672 AMQP and 5671 AMQP over TLS (Service Bus; Event Hubs when the host name has the label eventhub), 9093
     /// Kafka, and 443 for ARM (where the Azure SDKs dial it with no port: the management API, and AMQP over
     /// WebSocket, which any port serves). Port 443 needs permission to listen below 1024: when the system
@@ -91,6 +91,22 @@ struct Cli {
     #[arg(long, value_name = "FILE")]
     seed: Option<PathBuf>,
 
+    /// A JSON file of fault rules that exist from the start and are put back after every full POST /_azemu/reset
+    /// ({"rules": [...]}): throttling answers, errors, delays, dropped connections. Also AZEMU_FAULTS. Without it (and without
+    /// rules added through /_azemu/faults) the emulator never fails a request on purpose. The format is in docs/faults.md.
+    #[arg(long, value_name = "FILE")]
+    faults: Option<PathBuf>,
+
+    /// Check bearer tokens and decide by role assignments what the caller may do (also AZEMU_STRICT_AUTH=1). A missing role is refused with
+    /// Azure's own answer. Keys and SAS are checked as without it, except those of Service Bus and Event Hubs (they have rights and an expiry). Read before the services are built (`settings::apply_early_options`).
+    #[arg(long)]
+    strict_auth: bool,
+
+    /// A JSON file of role assignments, custom roles, Cosmos DB role assignments and Key Vault access policies that exist from the start and
+    /// again after every reset (also AZEMU_AUTH_CONFIG). The format is in docs/strict-auth.md.
+    #[arg(long, value_name = "FILE")]
+    auth_config: Option<PathBuf>,
+
     /// Seconds between saves of changed state when --data-dir is set (also AZEMU_SAVE_INTERVAL). 0: save only on
     /// POST /_azemu/save and at shutdown.
     #[arg(long, value_name = "SECONDS")]
@@ -119,11 +135,13 @@ pub(crate) const STANDARD_PORTS: &[(&str, u16)] = &[
     ("queue", 10001),
     ("table", 10002),
     ("dfs", 10003),
+    ("file", 10004),
     ("keyvault", 10010),
     ("appconfig", 10011),
     ("eventgrid", 10012),
     ("arm", 10013),
     ("identity", 10014),
+    ("monitor", 10015),
     ("cosmos", 8081),
     ("servicebus", 5672),
     // The Azure SDKs dial 5671 for AMQP over TLS when a client uses an identity (the host name has no port), so the same
@@ -549,6 +567,10 @@ pub async fn run_cli(services: Vec<Arc<dyn Service>>, raw: Vec<Arc<dyn RawProtoc
     // `--seed` and AZEMU_SEED
     if let Some(file) = cli.seed.clone().or_else(|| crate::settings::text("AZEMU_SEED").map(PathBuf::from)) {
         b = b.seed_file(file);
+    }
+    // `--faults` and AZEMU_FAULTS
+    if let Some(file) = cli.faults.clone().or_else(|| crate::settings::text("AZEMU_FAULTS").map(PathBuf::from)) {
+        b = b.faults_file(file);
     }
     for (i, ip) in hosts.iter().enumerate() {
         // With the default host list only the first (IPv4) address is mandatory:

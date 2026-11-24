@@ -212,8 +212,18 @@ async fn the_index_lists_the_admin_endpoints_and_the_prefixes_of_the_mounted_ser
         assert!(r.header("content-type").unwrap().starts_with("application/json"));
         let list = r.json()["endpoints"].as_array().unwrap().clone();
         let path = |p: &str| list.iter().find(|e| e["path"] == p).unwrap_or_else(|| panic!("{p} missing in {list:?}"));
-        for p in ["/_azemu/", "/_azemu/health", "/_azemu/config", "/_azemu/ca.pem", "/_azemu/reset", "/_azemu/save", "/_azemu/unsupported"]
-        {
+        for p in [
+            "/_azemu/",
+            "/_azemu/health",
+            "/_azemu/config",
+            "/_azemu/ca.pem",
+            "/_azemu/reset",
+            "/_azemu/save",
+            "/_azemu/faults",
+            "/_azemu/inspect/...",
+            "/_azemu/ui",
+            "/_azemu/unsupported",
+        ] {
             let e = path(p);
             assert!(e["description"].as_str().is_some_and(|d| !d.is_empty()), "{p}");
             assert!(e["methods"].as_array().is_some_and(|m| !m.is_empty()), "{p}");
@@ -222,7 +232,7 @@ async fn the_index_lists_the_admin_endpoints_and_the_prefixes_of_the_mounted_ser
         // only the /_azemu/ prefixes of services, not their other mounts
         assert_eq!(path("/_azemu/idp/...")["service"], "idp");
         assert!(list.iter().all(|e| e["path"] != "/metadata/idp/..."), "{list:?}");
-        assert_eq!(list.len(), 8);
+        assert_eq!(list.len(), 11);
     }
     let r = srv.send("HEAD", &format!("http://localhost:{port}/_azemu/"), &[], "").await;
     assert_eq!(r.status, 200);
@@ -241,4 +251,76 @@ async fn an_unknown_admin_path_is_an_error_that_points_at_the_index() {
         assert_eq!(r.json()["error"]["code"], "NotFound", "{p}");
         assert!(r.json()["error"]["message"].as_str().unwrap().contains("GET /_azemu/"), "{p}");
     }
+}
+
+/// A web page can send a form or `text/plain` request to `localhost` without asking first (no preflight). `application/json` is not one of the
+/// types a page may send that way, so an admin request with a body from a browser has to say it, and the answer to a page that does not is a 415.
+/// A program that is not a browser (`curl -d` sends a form type) is not held to it.
+#[tokio::test]
+async fn an_admin_request_with_a_body_from_a_browser_must_say_it_is_json() {
+    const BROWSER: &str =
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Safari/605.1.15";
+    let svc = Arc::new(Probe::new("idp", vec![Mount::PathPrefix("/_azemu/identity")]));
+    let alpha = Arc::new(Probe::new("alpha", vec![Mount::AccountHost("alpha")]));
+    let srv = TestServer::start(vec![svc as Arc<dyn Service>, alpha as Arc<dyn Service>]).await;
+    let base = srv.gateway_url();
+    let rule = r#"{"fault":{"kind":"drop"},"path":"/never/*"}"#;
+    for (method, path) in
+        [("POST", "/_azemu/faults"), ("PUT", "/_azemu/faults"), ("POST", "/_azemu/identity/anything"), ("PUT", "/_azemu/identity/x")]
+    {
+        for ct in
+            ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x", "application/octet-stream", "text/json"]
+        {
+            let r = srv.send(method, &format!("{base}{path}"), &[("content-type", ct), ("user-agent", BROWSER)], rule).await;
+            assert_eq!(r.status, 415, "{method} {path} as {ct}: {}", r.text());
+            assert_eq!(r.json()["error"]["code"], "UnsupportedMediaType");
+            assert!(r.text().contains("application/json"), "{}", r.text());
+        }
+        // no Content-Type at all, with a body
+        let r = srv.send(method, &format!("{base}{path}"), &[("user-agent", BROWSER)], rule).await;
+        assert_eq!(r.status, 415, "{method} {path} with no type: {}", r.text());
+    }
+    // nothing was added
+    assert_eq!(srv.send("GET", &format!("{base}/_azemu/faults"), &[], "").await.json()["rules"], serde_json::json!([]));
+    // JSON, with parameters and in any case, and the `+json` types, go through, from a browser too
+    for ct in ["application/json", "Application/JSON; charset=utf-8", "application/merge-patch+json"] {
+        let r = srv.send("POST", &format!("{base}/_azemu/faults"), &[("content-type", ct), ("user-agent", BROWSER)], rule).await;
+        assert_eq!(r.status, 201, "{ct}: {}", r.text());
+    }
+    // a program that is not a browser is not held to the rule: `curl -d` sends a form type, and scripts written before the rule send none
+    for headers in [
+        vec![("content-type", "application/x-www-form-urlencoded"), ("user-agent", "curl/8.5.0")],
+        vec![("content-type", "application/x-www-form-urlencoded")],
+        vec![("user-agent", "python-requests/2.32.3")],
+        vec![],
+    ] {
+        let r = srv.send("POST", &format!("{base}/_azemu/faults"), &headers, rule).await;
+        assert_eq!(r.status, 201, "{headers:?}: {}", r.text());
+    }
+    let r = srv.send("POST", &format!("{base}/_azemu/identity/anything"), &[("content-type", "application/json")], "{}").await;
+    assert_ne!(r.status, 415);
+    // a request without a body needs no type: reset, save, a DELETE (many HTTP libraries send a form type with an empty body)
+    assert_eq!(srv.send("POST", &format!("{base}/_azemu/reset"), &[], "").await.status, 200);
+    assert_eq!(srv.send("DELETE", &format!("{base}/_azemu/faults"), &[], "").await.status, 200);
+    let r = srv.send("POST", &format!("{base}/_azemu/reset"), &[("content-type", "application/x-www-form-urlencoded")], "").await;
+    assert_eq!(r.status, 200, "{}", r.text());
+    // the sign-in protocol of the identity service is a form, as OAuth 2.0 says (a doubled slash is the same path the server routes)
+    for path in ["/_azemu/identity/login/t1/oauth2/v2.0/token", "/_azemu//identity/login/t1/oauth2/v2.0/devicecode"] {
+        let r = srv
+            .send(
+                "POST",
+                &format!("{base}{path}"),
+                &[("content-type", "application/x-www-form-urlencoded")],
+                "client_id=x&grant_type=client_credentials",
+            )
+            .await;
+        assert_ne!(r.status, 415, "{path}: {}", r.text());
+    }
+    // but the rest of the identity service's admin paths are JSON
+    let r =
+        srv.send("POST", &format!("{base}/_azemu/identity/loginx"), &[("content-type", "text/plain"), ("user-agent", BROWSER)], "x").await;
+    assert_eq!(r.status, 415, "{}", r.text());
+    // the rule is for the admin API only: a service request keeps any type
+    let r = srv.send("POST", &format!("http://thing.alpha.localhost:{}/x", srv.port()), &[("content-type", "text/plain")], "hello").await;
+    assert_eq!(r.status, 200, "{}", r.text());
 }

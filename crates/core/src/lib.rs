@@ -13,11 +13,15 @@ mod seed;
 mod server;
 mod service;
 mod tls;
+mod ui;
 mod websocket;
 
+pub mod auth;
 pub mod cancel;
 pub mod conditions;
 pub mod etag;
+pub mod faults;
+pub mod inspect;
 pub mod json_error;
 pub mod persist;
 pub mod redact;
@@ -36,6 +40,8 @@ pub use {bytes, http, serde, serde_json};
 
 pub use cancel::{CancelGuard, CancelToken};
 pub use cli::{health_check_if_requested, init_logging_with, run_cli};
+pub use faults::FaultAnswer;
+pub use faults::Faults;
 pub use persistence::{SaveOutcome, ServiceSave};
 pub use request::{Endpoint, Query, Request, RequestCtx};
 pub use server::{Emulator, EmulatorBuilder, RunningEmulator, DEFAULT_MAX_BODY_BYTES};

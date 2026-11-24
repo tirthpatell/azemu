@@ -4,7 +4,7 @@
 # on the standard ports. No name under .localhost has to resolve and nothing is published to the host.
 #
 #   tests/container/run.sh [path-to-azemu-binary]        which emulator image is tested, first match:
-#     1. AZEMU_IMAGE=azemu:0.2.0 tests/container/run.sh   an image you built from the release Dockerfile (or pulled): it is
+#     1. AZEMU_IMAGE=azemu:0.3.0 tests/container/run.sh   an image you built from the release Dockerfile (or pulled): it is
 #                                                         tested as it is, and left in place afterwards
 #     2. a binary given as the argument                   put into a small image with Dockerfile.dev (removed afterwards)
 #     3. the image azemu:latest, when it exists           the release image: `docker build -t azemu:latest .`

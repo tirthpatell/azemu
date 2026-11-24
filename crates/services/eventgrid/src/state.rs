@@ -30,6 +30,13 @@ pub fn current_revision() -> u64 {
     REVISION.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+static OUTBOX_WORK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Has any subscription put a dead letter in its outbox since the last look? (`dead_letter::flush` asks, and clears the flag.)
+pub fn outbox_may_have_work() -> bool {
+    OUTBOX_WORK.swap(false, std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Number of delivery attempts kept per subscription.
 pub const DELIVERY_LOG_CAP: usize = 200;
 
@@ -118,6 +125,8 @@ pub struct Sub {
     pub pending_bytes: u64,
     /// Deliveries dead-lettered because the limits of `PushLimits` were passed.
     pub shed: u64,
+    /// Dead letters that are to be written as blobs and have not been yet (`dead_letter.rs`); never saved.
+    pub outbox: Vec<crate::dead_letter::Record>,
     /// Changes whenever anything saved about this subscription besides its queue changes (see [`next_revision`]).
     pub rev: u64,
 }
@@ -140,7 +149,38 @@ impl Sub {
             pending: BTreeMap::new(),
             pending_bytes: 0,
             shed: 0,
+            outbox: Vec::new(),
             rev: next_revision(),
+        }
+    }
+
+    /// Dead-letter an event of a push delivery: it goes to the list of dead letters, and, when the subscription has a blob
+    /// dead-letter destination, to the outbox that `dead_letter::flush` writes out once the state lock is let go.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dead_letter_push(
+        &mut self,
+        event: &Value,
+        bytes: u64,
+        reason: &str,
+        description: &str,
+        attempts: u32,
+        outcome: &str,
+        published_ms: i64,
+        now: &Now,
+    ) {
+        self.queue.dead_letter_sized(event.clone(), bytes, reason, description, attempts, now);
+        if let Some(target) = self.cfg.dead_letter_destination.as_ref().and_then(|d| d.resolve_blob().ok()) {
+            self.outbox.push(crate::dead_letter::Record {
+                target,
+                event: event.clone(),
+                reason: reason.to_string(),
+                attempts,
+                outcome: outcome.to_string(),
+                publish_time: crate::dead_letter::time_text(published_ms),
+                last_attempt: now_iso(now),
+                at: now.wall,
+            });
+            OUTBOX_WORK.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 
@@ -160,7 +200,7 @@ impl Sub {
         self.shed += 1;
         p.cancel.notify_one();
         let detail = "The retry queue of this subscription is full (azemu keeps a limited number of events waiting for a retry); the oldest was dead-lettered.";
-        self.queue.dead_letter_sized((*p.body).clone(), p.bytes, "PendingQueueFull", detail, 0, now);
+        self.dead_letter_push(&p.body, p.bytes, "PendingQueueFull", detail, 0, "Error", p.started_ms, now);
         self.log_attempt(DeliveryAttempt {
             time: now_iso(now),
             event_id: p.event_id,
@@ -244,8 +284,10 @@ pub struct PushJob {
     pub max_attempts: u32,
     pub ttl: std::time::Duration,
     pub intervals_ms: Option<Vec<u64>>,
-    /// A Storage queue, Service Bus or Event Hubs destination instead of a webhook.
+    /// A Storage queue, Service Bus, Event Hubs or Azure Function destination instead of a webhook.
     pub dest: Option<Dest>,
+    /// The delivery properties this event gets (`delivery_props::resolve`): headers for a webhook or a function, properties for a message.
+    pub attrs: Vec<(String, String)>,
 }
 
 /// Where a job goes when it is not a webhook.
@@ -313,7 +355,11 @@ impl State {
         };
         let mut matched = 0;
         let tk = topic.map(key);
-        let mut ctx = PushCtx { limits: *limits, next_id: next_push_id };
+        // A subscription on a storage account that names no event types gets only the default set of that topic type
+        // (Azure; `docs/services/storage-events.md`). Other sources and custom topics get every event.
+        let default_types: &'static [&'static str] =
+            if hk.starts_with("src:microsoft.storage/storageaccounts/") { STORAGE_DEFAULT_EVENT_TYPES } else { &[] };
+        let mut ctx = PushCtx { limits: *limits, next_id: next_push_id, default_types };
         // domain-wide / custom-topic subscriptions first, then the topic's own
         for (sk, sub) in h.subs.iter_mut() {
             let k = SubKey { host: hk.clone(), topic: None, sub: sk.clone() };
@@ -413,14 +459,27 @@ impl State {
     }
 }
 
+/// The event types of a storage account that are in its default set: the ones a subscription gets when it names none. Event Grid's list
+/// for `Microsoft.Storage.StorageAccounts` marks only these two (`BlobTierChanged`, `AsyncOperationInitiated`, the directory and rename events and the
+/// policy-completed events must be asked for).
+pub const STORAGE_DEFAULT_EVENT_TYPES: &[&str] = &["Microsoft.Storage.BlobCreated", "Microsoft.Storage.BlobDeleted"];
+
 /// The id counter and the limits, for the deliveries made while one event is routed.
 struct PushCtx<'a> {
+    /// The event types a subscription with no `includedEventTypes` gets; empty: every type.
+    default_types: &'static [&'static str],
     limits: PushLimits,
     next_id: &'a mut u64,
 }
 
 fn deliver_to(sub: &mut Sub, key: SubKey, ev: &Event, topic_id: &str, now: &Now, jobs: &mut Vec<PushJob>, ctx: &mut PushCtx<'_>) -> bool {
     if !sub.cfg.filter.matches(ev) {
+        return false;
+    }
+    if sub.cfg.filter.included_event_types.is_empty()
+        && !ctx.default_types.is_empty()
+        && !ev.event_type().is_some_and(|t| ctx.default_types.iter().any(|d| d.eq_ignore_ascii_case(t)))
+    {
         return false;
     }
     match sub.cfg.mode() {
@@ -470,6 +529,7 @@ fn deliver_to(sub: &mut Sub, key: SubKey, ev: &Event, topic_id: &str, now: &Now,
                 ttl,
                 intervals_ms,
                 dest,
+                attrs: crate::delivery_props::resolve(&sub.cfg.delivery_attribute_mappings, ev),
             };
             let started_ms = (now.wall.unix_timestamp_nanos() / 1_000_000) as i64;
             sub.pending.insert(id, Pending { bytes, body, event_id, cancel, job: job.clone(), attempts: 0, started_ms });

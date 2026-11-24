@@ -38,7 +38,7 @@ The testkit is a path dependency here so that the example works from a checkout.
 
 ```toml
 [dev-dependencies]
-azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.2.0" }
+azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.3.0" }
 ```
 
 CI for such a project: [`examples/ci/github-actions-rust.yml`](../ci/github-actions-rust.yml).

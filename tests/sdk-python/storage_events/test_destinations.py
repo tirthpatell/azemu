@@ -155,7 +155,7 @@ def test_service_bus_queue_gets_the_event(emu, container, sb):
     ev = json.loads(b"".join(msg.body))
     check_blob_created_event(ev, container.container_name, "sb.txt", 14)
     # Learn "Event handlers / Service Bus": the event is the body; aeg-* properties; MessageId is the event id
-    assert msg.content_type == "application/json"
+    assert msg.content_type == "application/json; charset=utf-8"  # as Azure sent it (November 2026)
     assert msg.message_id == ev["id"]
     p = props_of(msg)
     assert p["aeg-event-type"] == "Notification"
@@ -241,7 +241,7 @@ def test_event_hub_gets_the_event(emu, container):
     (event,) = receive_from_hub(emu, hub, 1)
     ev = json.loads(event.body_as_str())
     check_blob_created_event(ev, container.container_name, "eh.txt", 12)
-    assert event.content_type == "application/json"
+    assert event.content_type == "application/json; charset=utf-8"
     p = {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v) for k, v in event.properties.items()}
     assert p["aeg-event-type"] == "Notification"
     assert p["aeg-subscription-name"] == "tohub"

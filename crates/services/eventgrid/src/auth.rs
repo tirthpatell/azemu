@@ -51,6 +51,41 @@ pub fn check_api_version(req: &Request) -> Option<Response> {
 const BAD_BASE64: &str =
     "The input is not a valid Base-64 string as it contains a non-base 64 character, more than two padding characters, or an illegal character among the padding characters.";
 
+/// The domains a topic's own URL is under (`docs/strict-auth.md`, "Audiences"); a star takes the region label.
+const TOPIC_DOMAINS: &[&str] =
+    &["*.eventgrid.azure.net", "*.eventgrid.azure.cn", "*.eventgrid.azure.us", "eventgrid.azure.net.localhost", "eventgrid.localhost"];
+
+/// Strict mode (`docs/strict-auth.md`): a bearer token is verified, then the principal needs `EventGrid Data Sender` on the topic. Every refusal
+/// is 401, also a missing role (Azure sent that in November 2026). `None`: the request carries no bearer token, or the mode is off.
+pub fn check_token(auth: &azemu_core::auth::Auth, req: &Request) -> Option<Response> {
+    use azemu_core::auth::{Aud, Need, Resource, TokenFailure};
+    if !auth.applies(req) {
+        return None;
+    }
+    let topic = req.account.to_ascii_lowercase();
+    // the topic's own URL: `{topic}.{region}-1.eventgrid.azure.net` (the region is a label of its own), another cloud's domain, or the emulator's
+    let auds = [Aud::exact("https://eventgrid.azure.net"), Aud::host_in(&topic, TOPIC_DOMAINS)];
+    let who = match auth.authenticate(req, &auds) {
+        Ok(w) => w,
+        Err(TokenFailure::Malformed) => return Some(Fail::unauthorized("Unable to read access token.").into_response(req)),
+        Err(_) => {
+            return Some(
+                Fail::unauthorized("Invalid access token. Please ensure that the token is not expired and has the right audience.")
+                    .into_response(req),
+            )
+        }
+    };
+    let res = Resource::event_grid_topic(&topic);
+    let what = format!("{} {}", req.method, req.decoded_path());
+    auth.authorize(&what, &who, &Need::data("Microsoft.EventGrid/events/send/action"), &res).err().map(|_| {
+        let id = auth.registry().display_id(&res);
+        Fail::unauthorized(format!(
+            "The principal associated with access token presented with the incoming request does not have permission to send data to {id}."
+        ))
+        .into_response(req)
+    })
+}
+
 /// Credentials of `POST /api/events`, as Azure checks them (tried in November 2026). `keys` are the access keys the topic
 /// has (from ARM, or given when the topic was declared); a topic with none has nothing to compare with and, as before, takes
 /// any key or token that is there. Looked at in this order: `aeg-sas-key`, `aeg-sas-token`, `Authorization`. A bearer token

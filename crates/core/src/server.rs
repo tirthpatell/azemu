@@ -36,6 +36,22 @@ use crate::{json_error, Response};
 /// Default request body limit: 1 GiB.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024 * 1024;
 
+/// The fault rules the admin API takes in one body.
+const FAULTS_BODY_LIMIT: usize = 1024 * 1024;
+/// A `timeout` rule with no `ms` holds the request until the client gives up, but not longer than this.
+const FAULT_HOLD_LIMIT: Duration = Duration::from_secs(3600);
+
+/// Set on the answer of a `drop` or `timeout` rule: hold this long (`None`: no wait), then close the connection.
+#[derive(Clone)]
+struct FaultClose(Option<Duration>);
+
+/// Which rules fired for a request, for the log line (`fault=throttle rule=3`).
+#[derive(Clone)]
+struct FaultNote {
+    kinds: String,
+    rules: String,
+}
+
 /// How long to wait for the first bytes of a new connection before treating it as HTTP.
 const PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 /// With raw protocols registered, how long to wait for the 4 bytes a sniffer needs.
@@ -101,6 +117,8 @@ pub struct EmulatorBuilder {
     save_interval: Option<Duration>,
     discard_unreadable: bool,
     seed: Option<PathBuf>,
+    faults: Option<PathBuf>,
+    faults_seed: Option<u64>,
 }
 
 impl EmulatorBuilder {
@@ -110,6 +128,21 @@ impl EmulatorBuilder {
     /// known, or lists something a service refuses.
     pub fn seed_file(mut self, path: impl Into<PathBuf>) -> Self {
         self.seed = Some(path.into());
+        self
+    }
+
+    /// Fault rules that exist from the start and again after every full reset (`docs/faults.md`): a JSON file
+    /// `{"rules": [...]}`. `start` fails with a message that names the file and the rule when it cannot be read, has a field
+    /// that is not known, or a rule that cannot work.
+    pub fn faults_file(mut self, path: impl Into<PathBuf>) -> Self {
+        self.faults = Some(path.into());
+        self
+    }
+
+    /// A fixed seed for the draws of `probability` and `jitterMs`, so that a test sees the same sequence each time. Without it
+    /// the seed comes from the clock.
+    pub fn faults_seed(mut self, seed: u64) -> Self {
+        self.faults_seed = Some(seed);
         self
     }
 
@@ -269,6 +302,17 @@ impl EmulatorBuilder {
             }
             None => None,
         };
+        // The faults file is read with the seed file, for the same reason: a mistake in it is reported first.
+        let faults = match self.faults_seed {
+            Some(seed) => crate::faults::Faults::with_seed(seed),
+            None => crate::faults::Faults::new(),
+        };
+        let mounted: Vec<&str> = self.services.iter().map(|s| s.name()).collect();
+        if let Some(path) = &self.faults {
+            let rules = crate::faults::load_file(path, &mounted).map_err(anyhow::Error::msg)?;
+            tracing::info!(file = %path.display(), rules = rules.len(), "faults file read");
+            faults.set_file_rules(rules);
+        }
         let cert_dir = self.cert_dir.clone().unwrap_or_else(default_cert_dir);
         let names = crate::tls::TlsNames::parse(&self.tls_names)?;
         // Saved state is read before anything listens. The lock on the directory is released when `start`
@@ -284,6 +328,22 @@ impl EmulatorBuilder {
             }
             None => None,
         };
+        // Services that need to read a file of their own once their state is there (the auth config) do it now, before any listener opens.
+        for s in &self.services {
+            s.started().map_err(|e| anyhow::anyhow!("{}: {e}", s.name()))?;
+        }
+        if self.services.iter().any(|s| s.strict_auth_on()) {
+            let names: Vec<&str> = self.services.iter().filter(|s| s.name() != "auth").map(|s| s.name()).collect();
+            let (checked, open): (Vec<&str>, Vec<&str>) =
+                names.iter().partition(|n| self.services.iter().any(|s| s.name() == **n && s.enforces_strict_auth()));
+            tracing::info!("strict authorisation is ON: bearer tokens are verified and roles decide (GET /_azemu/auth/check says why a request is refused). Keys and SAS are checked as without it, except those of Service Bus and Event Hubs (they have rights and an expiry). Services that check roles: {}", checked.join(", "));
+            if !open.is_empty() {
+                tracing::warn!(
+                    "strict authorisation is on, but these services do not check roles and take any bearer token as before: {}",
+                    open.join(", ")
+                );
+            }
+        }
         // State read from the data directory is there now; the seed adds what is missing (and leaves the rest as it is).
         if let Some(seed) = &seed {
             let applied = seed.apply(&self.services, &Scope::default()).await.map_err(anyhow::Error::msg)?;
@@ -304,6 +364,7 @@ impl EmulatorBuilder {
                 .collect(),
             save_interval: self.save_interval,
             seed: seed.as_ref().map(|s| s.path().to_path_buf()),
+            faults: self.faults.as_ref().map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())),
         };
         let ca = Ca::load_or_create_with(&cert_dir, &names)?;
         let resolver = Arc::new(LeafResolver::new(ca)?);
@@ -323,7 +384,8 @@ impl EmulatorBuilder {
             refusals: crate::refusals::Refusals::default(),
             listeners: std::sync::OnceLock::new(),
             config,
-            raw_ws: Arc::new(RawOverWebSocket { raw: self.raw.clone() }),
+            raw_ws: Arc::new(RawOverWebSocket { raw: self.raw.clone(), faults: faults.clone() }),
+            faults,
             raw: self.raw,
             ws: self.ws,
             ws_max_frame: self.ws_max_frame.unwrap_or(websocket::DEFAULT_MAX_FRAME_BYTES),
@@ -602,9 +664,13 @@ struct ConfigSummary {
     save_interval: Option<Duration>,
     /// The seed file in force, as an absolute path when it could be resolved.
     seed: Option<PathBuf>,
+    /// The faults file in force, as an absolute path when it could be resolved.
+    faults: Option<PathBuf>,
 }
 
 struct Shared {
+    /// The fault rules (`docs/faults.md`).
+    faults: crate::faults::Faults,
     /// 501 answers and stored-only resource types (`GET /_azemu/unsupported`).
     registry: Arc<crate::unsupported::Registry>,
     /// Requests refused for lack of a valid credential, logged once per service and reason in a few seconds.
@@ -651,6 +717,7 @@ struct ConnMeta {
 impl Shared {
     /// Reset every service and put the seed back.
     fn reset_all(&self) {
+        self.faults.reset();
         self.reset_services();
         if let Some(seed) = &self.seed {
             let r = seed.apply_blocking(&self.services, &Scope::default());
@@ -808,7 +875,9 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, shared: Arc<Share
         Err(_) => return,
     };
     match detect(&stream, &shared.raw).await {
-        Proto::Raw(p) => p.serve(RawConn { io: Box::new(stream), peer, local, tls: false, server_name: None }).await,
+        Proto::Raw(p) => {
+            p.serve(RawConn { io: Box::new(stream), peer, local, tls: false, server_name: None, faults: shared.faults.clone() }).await
+        }
         Proto::Http => {
             let meta = ConnMeta { peer, local, scheme: "http", sni: None };
             serve_http(TokioIo::new(stream), meta, shared, kind, HttpMode::Http1).await
@@ -855,7 +924,7 @@ async fn serve_connection(stream: TcpStream, peer: SocketAddr, shared: Arc<Share
             let mode = if prefix.starts_with(H2_PREFACE_START) { HttpMode::Http2 } else { HttpMode::Http1 };
             let io = Prefixed::new(Bytes::from(prefix), tls);
             match raw {
-                Some(p) => p.serve(RawConn { io: Box::new(io), peer, local, tls: true, server_name }).await,
+                Some(p) => p.serve(RawConn { io: Box::new(io), peer, local, tls: true, server_name, faults: shared.faults.clone() }).await,
                 None => serve_http(TokioIo::new(io), meta, shared, kind, mode).await,
             }
         }
@@ -1090,7 +1159,7 @@ async fn handle_request(
     let others = other_authorities(req.headers(), req.uri(), &authority);
     let other_refs: Vec<&str> = others.iter().map(String::as_str).collect();
     let host_refusal = shared.access.check_host(&authority, &other_refs);
-    let browser = shared.access.classify(req.headers());
+    let browser = shared.access.classify(req.headers(), &authority);
     if host_refusal.is_none() {
         if let Some(resp) = try_websocket(&mut req, meta, shared, &browser) {
             return finalize(resp, false, time::OffsetDateTime::now_utc(), false);
@@ -1128,15 +1197,38 @@ async fn handle_request(
 
     let status = response.status();
     let ms = started.elapsed().as_millis() as u64;
-    tracing::info!(
-        service = %service_name,
-        account = %account,
-        method = %parts.method,
-        path = %raw_path,
-        status = status.as_u16(),
-        ms,
-        "request"
-    );
+    let close = response.extensions_mut().remove::<FaultClose>();
+    match response.extensions().get::<FaultNote>() {
+        Some(note) => tracing::info!(
+            service = %service_name,
+            account = %account,
+            method = %parts.method,
+            path = %raw_path,
+            status = if close.is_some() { 0 } else { status.as_u16() },
+            ms,
+            fault = %note.kinds,
+            rule = %note.rules,
+            "request"
+        ),
+        None => tracing::info!(
+            service = %service_name,
+            account = %account,
+            method = %parts.method,
+            path = %raw_path,
+            status = status.as_u16(),
+            ms,
+            "request"
+        ),
+    }
+    if let Some(FaultClose(hold)) = close {
+        // a `drop` or `timeout` rule: no answer. The connection task closes the socket when `kill` is told (the same way it
+        // ends a connection whose client stopped reading); this request then never finishes.
+        if let Some(d) = hold {
+            tokio::time::sleep(d).await;
+        }
+        kill.notify_one();
+        std::future::pending::<()>().await;
+    }
     tracing::debug!(query = %crate::redact::query(&raw_query), headers = %crate::redact::headers(&parts.headers), "request detail");
     if status == StatusCode::NOT_IMPLEMENTED && service_name != "core" {
         let operation = crate::unsupported::marked(&response).unwrap_or("(unnamed)").to_string();
@@ -1293,7 +1385,34 @@ async fn dispatch(
         return core(access::cross_site_refusal(browser, access::Target::Admin));
     }
     if is_admin_path {
-        if let Some(resp) = admin(&crate::routing::collapse_slashes(raw_path), raw_query, &parts.method, shared).await {
+        if let Some(resp) = access::admin_body_refusal(
+            &parts.method,
+            &crate::routing::collapse_slashes(raw_path),
+            &parts.headers,
+            !hyper::body::Body::is_end_stream(&body),
+        ) {
+            return core(resp);
+        }
+        let admin_path = crate::routing::collapse_slashes(raw_path);
+        if crate::faults::is_faults_path(&admin_path) {
+            // the only admin endpoints that take a body besides the services' own
+            let bytes = match read_body(body, FAULTS_BODY_LIMIT, shared.body_timeout).await {
+                Ok(b) => b,
+                Err(BodyError::TooLarge) => {
+                    return core(json_error::response(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "RequestBodyTooLarge",
+                        "The fault rules are larger than 1 MiB.",
+                    ))
+                }
+                Err(_) => {
+                    return core(json_error::response(StatusCode::BAD_REQUEST, "InvalidRequestBody", "The request body could not be read."))
+                }
+            };
+            let mounted: Vec<&str> = shared.services.iter().map(|s| s.name()).collect();
+            return core(crate::faults::handle_admin(&shared.faults, &mounted, &parts.method, &admin_path, &bytes));
+        }
+        if let Some(resp) = admin(&admin_path, raw_query, &parts.method, shared).await {
             return core(resp);
         }
     }
@@ -1380,6 +1499,56 @@ async fn dispatch(
     };
     let svc = routed.service;
     let shape_path = request.path.clone();
+
+    // 3b. fault rules (`docs/faults.md`): after the body is read, as a service that throttles has read the request; never for an admin path
+    let mut fault_note: Option<FaultNote> = None;
+    let mut charged_rules: Vec<u64> = Vec::new();
+    if !is_admin_path && shared.faults.is_active() {
+        let probe = crate::faults::Probe::Http {
+            service: &name,
+            account: &request.account,
+            method: parts.method.as_str(),
+            path: &request.path,
+            query: raw_query,
+        };
+        let outcome = shared.faults.decide(&probe);
+        if !outcome.delay.is_zero() {
+            tokio::time::sleep(outcome.delay).await;
+        }
+        let note = FaultNote { kinds: outcome.kinds(), rules: outcome.rules() };
+        match &outcome.action {
+            Some(crate::faults::Action::Answer(answer)) => {
+                let mut r = svc.fault_response(&request, answer);
+                for (k, v) in &answer.headers {
+                    if let (Ok(k), Ok(v)) = (http::HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+                        r.headers_mut().insert(k, v);
+                    }
+                }
+                let kind = outcome.fired.last().map_or("error", |(_, k)| *k);
+                if let Ok(v) = HeaderValue::from_str(kind) {
+                    r.headers_mut().insert(crate::faults::FAULT_HEADER, v);
+                }
+                r.extensions_mut().insert(note);
+                return (name, request.account, r);
+            }
+            Some(crate::faults::Action::Drop) | Some(crate::faults::Action::Timeout(_)) => {
+                let hold = match &outcome.action {
+                    Some(crate::faults::Action::Timeout(d)) => Some(d.unwrap_or(FAULT_HOLD_LIMIT)),
+                    _ => None,
+                };
+                let mut r =
+                    json_error::response(StatusCode::INTERNAL_SERVER_ERROR, "FaultInjected", "The connection is closed by a fault rule.");
+                r.extensions_mut().insert(FaultClose(hold));
+                r.extensions_mut().insert(note);
+                return (name, request.account, r);
+            }
+            None => {}
+        }
+        if !outcome.fired.is_empty() {
+            fault_note = Some(note);
+        }
+        charged_rules = outcome.charge;
+    }
     // The handler runs in its own task. When the service asks for it (`Service::abort_on_disconnect`), the task is
     // aborted when this future is dropped, and that is what hyper does when the client closes the connection or
     // resets the HTTP/2 stream; the token then reaches work on blocking threads, and stays armed in `cancel_out`
@@ -1408,6 +1577,14 @@ async fn dispatch(
     if resp.status() == StatusCode::NOT_IMPLEMENTED && crate::unsupported::marked(&resp).is_none() {
         let shape = crate::unsupported::request_shape(&parts.method, &shape_path, raw_query);
         resp.extensions_mut().insert(crate::unsupported::UnsupportedOperation(shape));
+    }
+    if !charged_rules.is_empty() {
+        // request units the answer reports, added to the budget of the `ruBudget` rules that let it through
+        let charge = resp.headers().get("x-ms-request-charge").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<f64>().ok());
+        shared.faults.add_charge(&charged_rules, charge.unwrap_or(0.0));
+    }
+    if let Some(note) = fault_note {
+        resp.extensions_mut().insert(note);
     }
     shared.refusals.note(&crate::refusals::Refused {
         service: &name,
@@ -1679,6 +1856,18 @@ async fn admin(path: &str, query: &str, method: &Method, shared: &Shared) -> Opt
             .json(&serde_json::json!({"error": {"code": "MethodNotAllowed", "message": "Method not allowed."}}))
             .build()
     };
+    if crate::ui::is_ui_path(path) {
+        return Some(crate::ui::handle(method, path));
+    }
+    if crate::inspect::route::is_inspect_path(path) {
+        let view = || crate::inspect::route::EmulatorView {
+            health: health_json(shared),
+            config: config_json(shared),
+            unsupported: shared.registry.to_json(Some(crate::unsupported::fallback())),
+            faults: shared.faults.list_json(),
+        };
+        return Some(crate::inspect::route::handle(&shared.services, method, path, query, view));
+    }
     match path {
         "/_azemu/" | "/_azemu" => Some(if allowed(&[Method::GET, Method::HEAD]) {
             Resp::new(StatusCode::OK).json(&index_json(shared)).build()
@@ -1686,16 +1875,7 @@ async fn admin(path: &str, query: &str, method: &Method, shared: &Shared) -> Opt
             method_not_allowed("GET, HEAD")
         }),
         "/_azemu/health" => Some(if allowed(&[Method::GET, Method::HEAD]) {
-            let mut body = serde_json::json!({
-                "status": "ok",
-                "version": crate::VERSION,
-                "commit": crate::GIT_COMMIT,
-                "services": shared.services.iter().map(|s| s.name()).collect::<Vec<_>>(),
-            });
-            if let Some(p) = &shared.persist {
-                body["persistence"] = p.health();
-            }
-            Resp::new(StatusCode::OK).json(&body).build()
+            Resp::new(StatusCode::OK).json(&health_json(shared)).build()
         } else {
             method_not_allowed("GET, HEAD")
         }),
@@ -1727,6 +1907,20 @@ async fn admin(path: &str, query: &str, method: &Method, shared: &Shared) -> Opt
     }
 }
 
+/// The body of `GET /_azemu/health`.
+fn health_json(shared: &Shared) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "status": "ok",
+        "version": crate::VERSION,
+        "commit": crate::GIT_COMMIT,
+        "services": shared.services.iter().map(|s| s.name()).collect::<Vec<_>>(),
+    });
+    if let Some(p) = &shared.persist {
+        body["persistence"] = p.health();
+    }
+    body
+}
+
 /// The body of `GET /_azemu/`: the admin endpoints, core's own and the prefix of each mounted service that has any.
 fn index_json(shared: &Shared) -> serde_json::Value {
     let mut endpoints = vec![
@@ -1736,8 +1930,14 @@ fn index_json(shared: &Shared) -> serde_json::Value {
         serde_json::json!({"path": "/_azemu/ca.pem", "methods": ["GET", "HEAD"], "description": "The certificate authority that signs the emulator's TLS certificates; trust it in your client."}),
         serde_json::json!({"path": "/_azemu/reset", "methods": ["POST"], "description": "Empty every service; ?service=<name> one service, ?account=<name> one account, save=true to write the empty state."}),
         serde_json::json!({"path": "/_azemu/save", "methods": ["POST"], "description": "Write changed state to the data directory now (409 when there is none)."}),
+        serde_json::json!({"path": "/_azemu/faults", "methods": ["GET", "HEAD", "POST", "PUT", "DELETE"], "description": "Fault rules that make requests fail, slow down or drop on purpose (none until added): POST adds one, PUT replaces the list, DELETE removes all, DELETE /_azemu/faults/{id} one. docs/faults.md."}),
+        serde_json::json!({"path": "/_azemu/inspect/...", "methods": ["GET", "HEAD"], "description": "The inspector: a read-only tree over the state of every service (/_azemu/inspect/{service}/{account}/...). docs/inspector.md."}),
+        serde_json::json!({"path": "/_azemu/ui", "methods": ["GET", "HEAD"], "description": "The inspector page: a browser view of that tree, read-only."}),
         serde_json::json!({"path": "/_azemu/unsupported", "methods": ["GET", "HEAD", "DELETE"], "description": "Operations that were asked for and are not built, with counts; DELETE empties the list."}),
     ];
+    if shared.services.iter().any(|s| s.name() == "auth") {
+        endpoints.push(serde_json::json!({"path": "/_azemu/auth/...", "methods": "varies", "description": "Strict authorisation (--strict-auth): role assignments (assignments), role definitions (roles), why a request is refused (check), Cosmos DB role assignments (cosmos/assignments), Key Vault access policies (keyvault/policies). docs/strict-auth.md."}));
+    }
     let mut service_prefixes: Vec<(String, &'static str)> = shared
         .services
         .iter()
@@ -1750,6 +1950,10 @@ fn index_json(shared: &Shared) -> serde_json::Value {
         .collect();
     service_prefixes.sort();
     for (prefix, name) in service_prefixes {
+        // core's own entry for the auth service is above, with a description
+        if prefix == "/_azemu/auth" {
+            continue;
+        }
         endpoints.push(serde_json::json!({
             "path": format!("{prefix}/..."),
             "service": name,
@@ -1801,6 +2005,7 @@ async fn reset_response(shared: &Shared, query: &str) -> Response {
     }
     let mut body = serde_json::json!({});
     if !restricted {
+        shared.faults.reset();
         shared.reset_services();
         shared.reseed(Scope::default()).await;
     } else {
@@ -1877,6 +2082,10 @@ fn config_json(shared: &Shared) -> serde_json::Value {
         "listeners": listeners,
         "dataDirectory": shared.persist.as_ref().map(|p| p.root().display().to_string()),
         "seedFile": shared.config.seed.as_ref().map(|p| p.display().to_string()),
+        "faultsFile": shared.config.faults.as_ref().map(|p| p.display().to_string()),
+        "faultRules": shared.faults.len(),
+        "strictAuth": shared.services.iter().any(|s| s.strict_auth_on()),
+        "authConfigFile": crate::settings::text("AZEMU_AUTH_CONFIG"),
         "saveIntervalSeconds": shared.persist.as_ref().map(|_| shared.config.save_interval.unwrap_or(Duration::from_secs(DEFAULT_SAVE_INTERVAL_SECS)).as_secs()),
         "allowedHosts": {
             "builtIn": ["IP addresses", "localhost", "*.localhost", "names with no dot", "host.docker.internal", "gateway.docker.internal"],

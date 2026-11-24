@@ -13,6 +13,7 @@
 
 use azemu_core::{Request, Response};
 
+mod auth;
 mod entities;
 mod error;
 mod misc;
@@ -93,6 +94,33 @@ impl<'a> Cx<'a> {
 }
 
 /// Entry point, called by `ServiceBusService::handle`.
+/// The answer of a fault rule on the administration API: the Atom `<Error><Code>..</Code><Detail>..</Detail></Error>` form every
+/// error of this API has, with `Retry-After` when the rule gives a wait. A throttle is `429`; the text names `ServerBusy`, the
+/// condition the AMQP side uses for the same thing (neither the status nor the text is from a recorded answer; docs/faults.md).
+pub fn fault_response(req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+    let status = a.status_or(429);
+    let cx = Cx::new(req);
+    let what = a.message_or(if a.throttle {
+        "ServerBusy. The request was throttled. Retry after the time in the Retry-After header."
+    } else {
+        azemu_core::FaultAnswer::DEFAULT_MESSAGE
+    });
+    let detail = format!(
+        "{what} TrackingId:{}_G0, SystemTracker:{}.servicebus.windows.net:, Timestamp:{}",
+        uuid::Uuid::new_v4(),
+        cx.account,
+        azemu_core::time::iso8601_7(req.ctx.time)
+    );
+    let body = format!("<Error><Code>{status}</Code><Detail>{}</Detail></Error>", azemu_core::storage::xml_escape(&detail));
+    let mut r = azemu_core::resp::Resp::new(status)
+        .header("Content-Type", "application/xml; charset=utf-8")
+        .header("Server", "Microsoft-HTTPAPI/2.0");
+    if let Some(s) = a.retry_after_secs() {
+        r = r.header("Retry-After", s);
+    }
+    r.body(body).build()
+}
+
 pub fn handle(shared: &Shared, req: Request) -> Response {
     let cx = Cx::new(&req);
     let segs = req.segments();
@@ -113,7 +141,14 @@ fn verb(cx: &Cx) -> ApiError {
 }
 
 fn route(shared: &Shared, cx: &Cx, segs: &[String]) -> ApiResult<Response> {
-    if cx.req.header("authorization").map(str::trim).filter(|s| !s.is_empty()).is_none() {
+    let header = cx.req.header("authorization").map(str::trim).filter(|s| !s.is_empty());
+    if shared.auth().is_strict() {
+        // strict authorisation (`auth.rs`): Azure's text for no credential differs from the one the mode off gives
+        match header {
+            None => return Err(ApiError::new(ErrKind::Unauthorized("claim is empty or token is invalid.".into()))),
+            Some(h) => auth::check(shared, cx, segs, h)?,
+        }
+    } else if header.is_none() {
         return Err(ApiError::new(ErrKind::Unauthorized("MissingToken: The authorization header was not found.".into())));
     }
     if let Some(v) = cx.req.query.get("api-version").map(str::trim).filter(|v| !v.is_empty()) {

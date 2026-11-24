@@ -119,6 +119,8 @@ struct PendingD {
     ttl_ms: u64,
     intervals_ms: Option<Vec<u64>>,
     dest: Option<DestD>,
+    #[serde(default)]
+    attrs: Vec<(String, String)>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -226,6 +228,7 @@ fn copy_sub(host: &str, topic: Option<&str>, key: &str, s: &Sub, now: &Now) -> S
                         entity: d.target.entity.clone(),
                         ttl_seconds: d.ttl_seconds,
                     }),
+                    attrs: p.job.attrs.clone(),
                 })
                 .collect(),
         },
@@ -359,6 +362,7 @@ impl Shared {
                             ttl: Duration::from_millis(pd.ttl_ms),
                             intervals_ms: pd.intervals_ms,
                             dest,
+                            attrs: pd.attrs,
                         };
                         let started = {
                             let age = (now.wall.unix_timestamp_nanos() / 1_000_000) as i64 - pd.started_ms;

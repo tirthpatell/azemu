@@ -54,6 +54,7 @@ impl Drop for ConnectionSlot {
 pub(crate) struct Conn {
     pub cfg: Arc<ServerConfig>,
     pub handler: Box<dyn ConnectionHandler>,
+    interrupt: Arc<Interrupt>,
     pub tx: UnboundedSender<Command>,
     pub out: BytesMut,
     scratch: Vec<u8>,
@@ -111,11 +112,13 @@ where
         return;
     };
     let (tx, rx) = unbounded_channel();
-    let handler = factory.new_connection(&info, ConnHandle { tx: tx.clone() });
+    let interrupt = Arc::new(Interrupt::default());
+    let handler = factory.new_connection(&info, ConnHandle { tx: tx.clone(), interrupt: interrupt.clone() });
     let now = Instant::now();
     let conn = Conn {
         cfg,
         handler,
+        interrupt,
         tx,
         out: BytesMut::with_capacity(8192),
         scratch: Vec::new(),
@@ -208,6 +211,9 @@ async fn handshake<IO: AsyncRead + AsyncWrite + Unpin>(io: &mut IO, inbuf: &mut 
     }
 }
 
+/// How much a client may send while the connection waits for a delay a service asked for.
+const MAX_INPUT_DURING_DELAY: usize = 1 << 20;
+
 impl Conn {
     async fn run<IO>(mut self, io: IO, mut inbuf: BytesMut, mut rx: UnboundedReceiver<Command>, info: &ConnectionInfo)
     where
@@ -219,6 +225,9 @@ impl Conn {
         }
         loop {
             self.pump();
+            if self.interrupted(&mut rd, &mut inbuf).await {
+                break;
+            }
             if self.done && self.out.is_empty() {
                 break;
             }
@@ -253,6 +262,52 @@ impl Conn {
         }
         let _ = wr.shutdown().await;
         self.finish(info);
+    }
+
+    /// Do what a handler asked with [`ConnHandle::delay`], [`hold`](ConnHandle::hold) or [`abort`](ConnHandle::abort) during the
+    /// call that just ran, before anything it produced is written. `true`: the connection ends now.
+    async fn interrupted<R: AsyncRead + Unpin>(&mut self, rd: &mut R, inbuf: &mut BytesMut) -> bool {
+        let i = self.interrupt.take();
+        if i.abort {
+            self.out.clear();
+            return true;
+        }
+        if let Some(hold) = i.hold {
+            self.out.clear();
+            let deadline = tokio::time::sleep(hold);
+            tokio::pin!(deadline);
+            let mut sink = [0u8; 4096];
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => break,
+                    r = tokio::io::AsyncReadExt::read(rd, &mut sink) => if matches!(r, Ok(0) | Err(_)) { break },
+                }
+            }
+            return true;
+        }
+        if !i.delay.is_zero() {
+            // The wait watches the peer, as `hold` does: a client that gives up (and retries) must not keep the connection, and a slot of the
+            // connection limit, for the whole wait. What it sends meanwhile is kept and handled after the wait.
+            let deadline = tokio::time::sleep(i.delay);
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => break,
+                    r = rd.read_buf(inbuf), if inbuf.len() < MAX_INPUT_DURING_DELAY => {
+                        if matches!(r, Ok(0) | Err(_)) {
+                            self.out.clear();
+                            return true;
+                        }
+                    }
+                }
+            }
+            // the peer's own idle clock must not see this wait as silence from us
+            self.last_recv = Instant::now();
+            if !inbuf.is_empty() {
+                self.process_input(inbuf);
+            }
+        }
+        false
     }
 
     /// Tell the service that every link and the connection are gone.

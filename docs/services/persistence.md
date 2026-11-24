@@ -2,7 +2,7 @@
 
 **What it does.** State is in memory unless the emulator is started with a data directory (`--data-dir <path>` or `AZEMU_DATA_DIR`). Then every
 service's state is read at start and written back while it runs and when it stops. Every service keeps everything a client can observe:
-blobs and Data Lake paths, queues and their messages, tables, vaults (secrets, keys, certificates), App Configuration stores, Cosmos accounts and
+blobs and Data Lake paths, queues and their messages, tables, Azure Files shares with their directories and files, vaults (secrets, keys, certificates), App Configuration stores, Cosmos accounts and
 documents, Service Bus and Event Hubs entities with their messages and events (and Kafka offsets), Event Grid topics and subscriptions, ARM resources,
 and the identity signing key.
 
@@ -100,6 +100,7 @@ file format and what a valid file looks like are unchanged. A service with its o
 |---|---|---|---|
 | `blob` (also holds all Data Lake state; `dfs` returns `None`) | `blob/` | `blob.state`, `pieces/<32 hex>` (data, written once) | `blob` 1 |
 | `queue` | `queue/` | `queue.state` | `queue` 1 |
+| `file` | `file/` | `file.state` (accounts, service properties, shares with leases, snapshots, the tree with the content of every file, deleted shares, permissions) | `file` 1 |
 | `table` | `table/` | `table.state` | `table` 1 |
 | `keyvault` (0600, private keys in the clear) | `keyvault/` | `keyvault.state` | `keyvault` 1 |
 | `appconfig` | `appconfig/` | `appconfig.state` | `appconfig` 1 |
@@ -165,7 +166,7 @@ has Service Bus state the config file (`AZEMU_SERVICEBUS_CONFIG`) is not applied
 **Event Hubs and Kafka.** One state, one set of files; the `kafka` service object keeps nothing. Stored: namespaces, hubs (partitions, retention,
 consumer groups, the round-robin counter, hub ids), events with sequence numbers, offsets, enqueue times, partition keys and the message as sent, the
 counters that make the next sequence number and offset, Kafka committed offsets per group, Kafka idempotent producer state per partition (epoch, next
-sequence, the last five batches) and the next producer id. Retention is by absolute time and is applied by the first read after the restart. Not stored:
+sequence, the last five batches) and the next producer id; in a file of its own, `schemas.state`, the Schema Registry's groups, schemas, versions and ids (it exists while some namespace has a schema group). Retention is by absolute time and is applied by the first read after the restart. Not stored:
 receivers, epochs, Kafka group members and generations: after a restart a Kafka group is empty and its consumers join again (a rebalance); a commit with the
 old member id gets `UNKNOWN_MEMBER_ID`. A Kafka producer that reconnects keeps its producer id: a retry of its last batch is answered with the original offset
 (tested), the next batch goes on, a gap is out-of-order. `InitProducerId` never gives an id twice.

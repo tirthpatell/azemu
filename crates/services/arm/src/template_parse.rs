@@ -4,6 +4,9 @@ use serde_json::{json, Value};
 
 use crate::limits::{MAX_PARSE_DEPTH, TOO_DEEP};
 
+/// Start of the parser's message for a number with a fraction; what follows is the position of the number.
+pub const FLOAT_LITERAL: &str = "float point numbers are not supported at ";
+
 // ---- parser ----------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -133,14 +136,24 @@ impl<'a> Parser<'a> {
                 let t = String::from_utf8_lossy(&self.s[start..self.i]).to_string();
                 if let Ok(n) = t.parse::<i64>() {
                     Ok(Ast::Lit(json!(n)))
-                } else if let Ok(f) = t.parse::<f64>() {
-                    Ok(Ast::Lit(json!(f)))
+                } else if t.contains('.') && t.parse::<f64>().is_ok() {
+                    // Azure refuses a number with a fraction in an expression when it validates the template
+                    Err(format!("{FLOAT_LITERAL}{start}"))
                 } else {
                     Err(format!("'{t}' is not a number"))
                 }
             }
             Some(_) => {
-                let name = self.ident()?;
+                let mut name = self.ident()?;
+                // `namespace.function(...)`: a user-defined function
+                if self.peek() == Some(b'.') {
+                    let save = self.i;
+                    self.i += 1;
+                    match self.ident() {
+                        Ok(f) if self.peek() == Some(b'(') => name = format!("{name}.{f}"),
+                        _ => self.i = save,
+                    }
+                }
                 if self.peek() != Some(b'(') {
                     return match name.as_str() {
                         "true" => Ok(Ast::Lit(json!(true))),

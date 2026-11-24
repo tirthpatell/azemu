@@ -228,6 +228,25 @@ def check_servicebus(emu: Emulator, out: dict):
             msgs = receiver.receive_messages(max_message_count=5, max_wait_time=3)
             # a new subscription keeps its $Default (true) rule on Azure too, so the blue message arrives as well
             assert "red one" in [str(m) for m in msgs]
+    # the queue's own rule, which may send: with strict authorisation on (AZEMU_STRICT_AUTH=1) the key must be the one Resource Manager handed out and the
+    # rights are checked; with it off every credential is accepted, so only the send is checked
+    from azure.servicebus.exceptions import ServiceBusAuthorizationError
+
+    with ServiceBusClient.from_connection_string(out["send_connection_string"], **kw) as client:
+        with client.get_queue_sender("orders") as sender:
+            sender.send_messages(ServiceBusMessage("from the send rule"))
+        if os.environ.get("AZEMU_STRICT_AUTH") == "1":
+            try:
+                with client.get_queue_receiver("orders", max_wait_time=3) as receiver:
+                    receiver.receive_messages(max_message_count=1, max_wait_time=3)
+            except ServiceBusAuthorizationError as e:
+                assert "'Listen' claim(s) are required" in str(e), str(e)
+            else:
+                raise AssertionError("a rule that cannot listen received")
+    with ServiceBusClient.from_connection_string(out["connection_string"], **kw) as client:
+        with client.get_queue_receiver("orders", max_wait_time=5) as receiver:
+            for m in receiver.receive_messages(max_message_count=5, max_wait_time=3):
+                receiver.complete_message(m)
 
 
 def check_eventhubs(emu: Emulator, out: dict):
@@ -306,6 +325,33 @@ def check_eventgrid(emu: Emulator, out: dict):
         assert ev["eventType"] == "Microsoft.Storage.BlobCreated", ev
         assert ev["topic"] == out["account_id"], ev["topic"]
         assert ev["subject"].endswith("/containers/inbox/blobs/from-terraform.txt"), ev["subject"]
+    check_eventgrid_delivery_properties(emu, out)
+
+
+def check_eventgrid_delivery_properties(emu: Emulator, out: dict):
+    """The delivery properties of a subscription reach the Service Bus message, and a dead letter lands in the blob container."""
+    from azure.servicebus import ServiceBusClient
+
+    blobs, _, _ = storage_clients(out)
+    container = blobs.get_container_client("inbox")
+    container.upload_blob("props-1.txt", b"x")
+    kw = {"retry_total": 1, "retry_backoff_factor": 0.1, "retry_backoff_max": 0.5}
+    with ServiceBusClient.from_connection_string(out["sb_connection_string"], **kw) as client:
+        with client.get_queue_receiver("props", max_wait_time=5) as receiver:
+            msgs = wait_until(lambda: receiver.receive_messages(max_message_count=1, max_wait_time=2), 15, "a message in the Service Bus queue")
+            m = msgs[0]
+            ev = json.loads(b"".join(m.body))
+            props = {(k.decode() if isinstance(k, bytes) else k): (v.decode() if isinstance(v, bytes) else v) for k, v in m.application_properties.items()}
+            assert props["x-static"] == "abc" and props["x-secret"] == "hush", props
+            assert props["x-dyn"] == "application/octet-stream", props
+            assert m.message_id == ev["data"]["eTag"], (m.message_id, ev["data"]["eTag"])
+            receiver.complete_message(m)
+    container.upload_blob("dead-1.txt", b"x")
+    dead = blobs.get_container_client("deadletters")
+    names = wait_until(lambda: [b.name for b in dead.list_blobs()], 15, "a dead-letter blob")
+    body = json.loads(dead.get_blob_client(names[0]).download_blob().readall())
+    assert body[0]["deadLetterReason"] == "MaxDeliveryAttemptsExceeded", body
+    assert body[0]["subject"].endswith("/blobs/dead-1.txt"), body
 
 
 def check_template(emu: Emulator, out: dict):
@@ -326,7 +372,86 @@ def check_template(emu: Emulator, out: dict):
     assert blobs.get_blob_client("templated", "a.txt").download_blob().readall() == b"from the template"
 
 
+def check_authz(emu: Emulator, out: dict):
+    """The role assignments are in the registry that strict mode decides by, with what Terraform gave them."""
+    import urllib.parse
+
+    principal = out["principal"]
+    assigned = emu.get_json(f"/_azemu/auth/assignments?principal={principal}")["value"]
+    roles = sorted(a["properties"]["roleName"] for a in assigned)
+    assert roles == ["Reader", "Storage Blob Data Contributor", "Storage Blob Data Reader"], roles
+    read = "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read"
+    write = "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write"
+    acct = out["account"]
+
+    def may(action, scope):
+        q = urllib.parse.urlencode({"principal": principal, "action": action, "scope": scope})
+        return emu.get_json(f"/_azemu/auth/check?{q}")["allowed"]
+
+    assert may(read, f"storage/{acct}/containers/data")
+    assert may(write, f"storage/{acct}/containers/data")
+    assert may(read, f"storage/{acct}/containers/anything"), "the role at the account reaches every container"
+    q = urllib.parse.urlencode(
+        {"principal": principal, "cosmosAccount": out["cosmos_account"], "scope": "/dbs/app/colls/items", "action": "Microsoft.DocumentDB/databaseAccounts/sqlDatabases/containers/items/create"}
+    )
+    assert emu.get_json(f"/_azemu/auth/check?{q}")["allowed"], "the Cosmos DB role assignment"
+
+
+def check_insights(emu: Emulator, out: dict):
+    """The connection string of the component sends telemetry to the emulator, and the monitor service has it."""
+    import http.client
+    import urllib.parse
+
+    cs = dict(part.split("=", 1) for part in out["connection_string"].split(";"))
+    assert cs["InstrumentationKey"] == out["instrumentation_key"], out["connection_string"]
+    assert cs["ApplicationId"] == out["app_id"], out["connection_string"]
+    ingestion = urllib.parse.urlparse(cs["IngestionEndpoint"])
+    assert ingestion.hostname == "eastus2.in.localhost" and ingestion.port == emu.port, cs["IngestionEndpoint"]
+    now = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()) + ".0000000Z"
+    envelope = {
+        "ver": 1, "name": "Microsoft.ApplicationInsights.Event", "time": now, "iKey": out["instrumentation_key"],
+        "tags": {"ai.operation.id": "from-terraform"},
+        "data": {"baseType": "EventData", "baseData": {"ver": 2, "name": "terraform event"}},
+    }
+    # the host name is the one of the connection string; the connection goes to the loopback address, so no resolver is needed
+    conn = http.client.HTTPConnection("127.0.0.1", emu.port, timeout=10)
+    conn.request("POST", "/v2/track", json.dumps([envelope]), {"Host": f"{ingestion.hostname}:{ingestion.port}", "Content-Type": "application/json"})
+    r = conn.getresponse()
+    body = json.loads(r.read())
+    assert r.status == 200 and body["itemsAccepted"] == 1, body
+    got = emu.get_json(f"/_azemu/monitor/telemetry?ikey={out['instrumentation_key']}")
+    assert [i["name"] for i in got["items"]] == ["terraform event"], got
+    assert got["items"][0]["operationId"] == "from-terraform", got
+    assert len(out["workspace_key"]) == 88, out["workspace_key"]
+
+
+def check_shares(emu: Emulator, out: dict):
+    """Both shares are in the file service and listed by Resource Manager; the file Terraform wrote is there."""
+    from azure.storage.fileshare import ShareServiceClient
+
+    endpoint = out["file_endpoint"]
+    assert endpoint == f"http://{out['account']}.file.core.localhost:{emu.port}/", endpoint
+    service = ShareServiceClient(endpoint, credential=out["key"])
+    shares = {s.name: s for s in service.list_shares(include_metadata=True)}
+    assert sorted(shares) == ["viaarm", "viadata"], sorted(shares)
+    assert shares["viaarm"].quota == 5 and shares["viaarm"].access_tier == "Hot", (shares["viaarm"].quota, shares["viaarm"].access_tier)
+    assert shares["viaarm"].metadata == {"owner": "terraform"}, shares["viaarm"].metadata
+    assert shares["viadata"].quota == 7, shares["viadata"].quota
+    data = service.get_share_client("viadata").get_file_client("docs/hello.txt")
+    assert data.download_file().readall() == b"hello from terraform\n"
+    ctx = ssl.create_default_context(cafile=str(emu.ca_file))
+    req = urllib.request.Request(
+        f"https://management.localhost:{emu.port}{out['account_id']}/fileServices/default/shares?api-version=2024-01-01",
+        headers={"Authorization": "Bearer x"},
+    )
+    with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
+        listed = {s["name"]: s for s in json.load(r)["value"]}
+    assert sorted(listed) == ["viaarm", "viadata"], sorted(listed)
+    assert listed["viadata"]["properties"]["shareQuota"] == 7, listed["viadata"]
+
+
 CHECKS = {
+    "authz": check_authz,
     "base": check_base,
     "servicebus": check_servicebus,
     "eventhubs": check_eventhubs,
@@ -335,6 +460,8 @@ CHECKS = {
     "cosmos": check_cosmos,
     "eventgrid": check_eventgrid,
     "template": check_template,
+    "insights": check_insights,
+    "shares": check_shares,
 }
 
 
@@ -439,7 +566,8 @@ def run_case(name: str, binary: pathlib.Path, cache: pathlib.Path, keep: bool, o
 
 
 def check_gone(emu: Emulator):
-    """After destroy the emulator holds no resource group of ours."""
+    """After destroy the emulator holds no resource group of ours, and no role assignment."""
+    assert emu.get_json("/_azemu/auth/assignments")["value"] == [], "role assignments are left"
     ctx = ssl.create_default_context(cafile=str(emu.ca_file))
     req = urllib.request.Request(
         f"https://management.localhost:{emu.port}/subscriptions/{SUB}/resourcegroups?api-version=2024-01-01",

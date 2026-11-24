@@ -71,7 +71,15 @@ pub fn query(rq: &Rq, acct: &Account) -> Res<Response> {
 }
 
 pub fn create(rq: &Rq, acct: &mut Account) -> Res<Response> {
-    rq.grant.check(Op::CreateTable, None)?;
+    // the table a role is asked about is named in the body; a body that cannot be read is judged on the account (and 400 follows)
+    let named = std::str::from_utf8(&rq.req.body).ok().and_then(|t| json::parse(t).ok()).and_then(|d| match d.get("TableName") {
+        Some(J::Str(s)) => Some(s.clone()),
+        _ => None,
+    });
+    match &named {
+        Some(n) => rq.grant.in_table(n).check(Op::CreateTable, None)?,
+        None => rq.grant.check(Op::CreateTable, None)?,
+    }
     let text = std::str::from_utf8(&rq.req.body).map_err(|_| invalid_input())?;
     let doc = json::parse(text).map_err(|_| invalid_input())?;
     let name = match doc.get("TableName") {
@@ -101,7 +109,11 @@ pub fn create(rq: &Rq, acct: &mut Account) -> Res<Response> {
 }
 
 pub fn delete(rq: &Rq, acct: &mut Account, name: &str) -> Res<Response> {
-    rq.grant.check(Op::DeleteTable, None)?;
+    // Azure looks for the table first: a table that is not there is 404 for every principal
+    if matches!(rq.grant, crate::sas::Grant::Role(_)) && !acct.tables.contains_key(&name.to_ascii_lowercase()) {
+        return Err(resource_not_found());
+    }
+    rq.grant.in_table(name).check(Op::DeleteTable, None)?;
     check_name(name)?;
     match acct.tables.remove(&name.to_ascii_lowercase()) {
         Some(_) => Ok(base_headers(Resp::new(204u16)).build()),

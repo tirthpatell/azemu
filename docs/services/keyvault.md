@@ -276,6 +276,7 @@ The replay's value comparison (`tools/replay`) found some wording that changed i
   certificate by itself.
 - Not built: release, key attestation, secure wrap/unwrap, symmetric key operations, managed storage
   accounts, Administration (RBAC, backup/restore of a whole HSM) and Security Domain APIs.
+- **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled request is `429` with `Retry-After`; Microsoft's throttling guidance gives the status, not the body. The code `Throttled` and the text are a guess.
 
 ## Keeping data between runs (`--data-dir`)
 
@@ -291,3 +292,10 @@ as a path (`/keys/name/version`) and given the address of the request when it is
 Version 1 of the file is checked in under `crates/services/keyvault/tests/state-v1/keyvault/` (a throwaway EC key, a throwaway imported RSA key and a
 self-signed certificate made for the fixture) and loaded by `tests/state_v1.rs`; a change that breaks reading it fails that test and tells the author to
 raise the version and keep a reader.
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked, in the way the vault is set up: a role-based vault (`enableRbacAuthorization` of a vault made through Resource Manager, and any other vault)
+answers 403 `Forbidden` with `ForbiddenByRbac`, the action (`Microsoft.KeyVault/vaults/secrets/getSecret/action`) and the resource named; a vault with access policies (`accessPolicies` of the Resource Manager vault, or
+`PUT /_azemu/auth/keyvault/policies`) names the permission (`secrets get`) and says `ForbiddenByPolicy` or, for a principal with no entry, `AccessDenied`. A Secrets User may read and list deleted secrets, as on Azure. A role on one
+secret applies to it. A token that is wrong is 401 with the challenge (`AKV10022: Invalid audience...`). Storage accounts, certificate contacts and `rng` are not checked.

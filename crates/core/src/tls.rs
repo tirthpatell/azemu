@@ -93,6 +93,16 @@ impl TlsNames {
         v
     }
 
+    /// The single addresses that were listed (not ranges, which a certificate cannot name), apart from the loopback ones every
+    /// certificate has. A client that connects to an IP address sends no server name, so these go into the certificate served then.
+    fn listed_addresses(&self) -> Vec<IpAddr> {
+        self.ips
+            .iter()
+            .filter(|(ip, prefix)| *prefix == if ip.is_ipv4() { 32 } else { 128 } && !ip.is_loopback())
+            .map(|(ip, _)| *ip)
+            .collect()
+    }
+
     /// Whether the CA may sign for this name (a DNS name or an IP literal).
     pub fn permits(&self, name: &str) -> bool {
         let name = name.trim_end_matches('.').to_ascii_lowercase();
@@ -119,6 +129,24 @@ impl TlsNames {
         let mut v: Vec<String> = self.dns.iter().map(|d| format!("dns {d}")).collect();
         v.extend(self.ips.iter().map(|(ip, p)| format!("ip {ip}/{p}")));
         v
+    }
+}
+
+/// An address that is reachable from the whole internet: not loopback, private, link-local, shared (100.64.0.0/10), unique-local,
+/// unspecified or documentation space. A certificate for one is allowed (the user listed it), with a warning at start.
+pub(crate) fn is_public_address(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            !(a.is_loopback()
+                || a.is_private()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || a.is_documentation()
+                || (o[0] == 100 && (64..128).contains(&o[1])))
+        }
+        IpAddr::V6(a) => !(a.is_loopback() || a.is_unspecified() || a.is_unique_local() || a.is_unicast_link_local()),
     }
 }
 
@@ -324,8 +352,8 @@ impl Ca {
         })
     }
 
-    /// A leaf for `name` (a DNS name or an IP literal), valid for TLS server auth.
-    fn mint(&self, names: &[&str], with_loopback_ips: bool) -> Result<Arc<CertifiedKey>> {
+    /// A leaf for `names` (DNS names or IP literals), valid for TLS server auth, with `extra_ips` as IP alternative names.
+    fn mint(&self, names: &[&str], extra_ips: &[IpAddr]) -> Result<Arc<CertifiedKey>> {
         let mut sans = Vec::new();
         for n in names {
             match IpAddr::from_str(n) {
@@ -333,9 +361,8 @@ impl Ca {
                 Err(_) => sans.push(SanType::DnsName((*n).to_string().try_into().context("name is not a valid DNS name")?)),
             }
         }
-        if with_loopback_ips {
-            sans.push(SanType::IpAddress(IpAddr::from([127, 0, 0, 1])));
-            sans.push(SanType::IpAddress(IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1])));
+        for ip in extra_ips {
+            sans.push(SanType::IpAddress(*ip));
         }
         let mut p = CertificateParams::default();
         p.subject_alt_names = sans;
@@ -413,8 +440,17 @@ impl fmt::Debug for LeafResolver {
 
 impl LeafResolver {
     pub fn new(ca: Ca) -> Result<LeafResolver> {
-        // No SNI: a certificate for `localhost` and the loopback IPs.
-        let fallback = ca.mint(&["localhost"], true)?;
+        // No SNI (a client that connects to an IP address): a certificate for `localhost`, the loopback addresses and the single
+        // addresses that were given with `--tls-name`.
+        let mut ips = vec![IpAddr::from([127, 0, 0, 1]), IpAddr::from([0u16, 0, 0, 0, 0, 0, 0, 1])];
+        ips.extend(ca.names.listed_addresses());
+        for ip in ips.iter().filter(|ip| is_public_address(**ip)) {
+            tracing::warn!(
+                "--tls-name lists {ip}, an address from the public internet: the certificate authority can now sign for it, and a client that trusts \
+                 ca.pem would accept that address. The emulator has no sign-in, so do not publish its ports there, and do not install ca.pem system-wide."
+            );
+        }
+        let fallback = ca.mint(&["localhost"], &ips)?;
         Ok(LeafResolver { ca, cache: Mutex::new(HashMap::new()), fallback, refused: Mutex::new(HashSet::new()) })
     }
 
@@ -448,7 +484,7 @@ impl LeafResolver {
         if let Some(c) = cache.get(&key) {
             return Some(c.clone());
         }
-        match self.ca.mint(&[key.as_str()], false) {
+        match self.ca.mint(&[key.as_str()], &[]) {
             Ok(c) => {
                 if cache.len() >= MAX_CACHED_LEAVES {
                     cache.clear();
@@ -684,6 +720,100 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The client side of a TLS handshake with no server name in it (a client that connects to an IP address sends none), in memory.
+    /// Gives the leaf certificate the server answered with.
+    fn leaf_served_without_a_name(ca_pem: &str, resolver: Arc<LeafResolver>, address: IpAddr) -> Result<CertificateDer<'static>, String> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from_pem_slice(ca_pem.as_bytes()).unwrap()).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let client_cfg = rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        let mut client = rustls::ClientConnection::new(Arc::new(client_cfg), ServerName::IpAddress(address.into())).unwrap();
+        let mut server = rustls::ServerConnection::new(Arc::new(server_config(resolver).unwrap())).unwrap();
+        for _ in 0..20 {
+            let mut buf = Vec::new();
+            client.write_tls(&mut buf).unwrap();
+            if !buf.is_empty() {
+                server.read_tls(&mut buf.as_slice()).map_err(|e| e.to_string())?;
+                server.process_new_packets().map_err(|e| format!("server: {e}"))?;
+            }
+            let mut buf = Vec::new();
+            server.write_tls(&mut buf).unwrap();
+            if !buf.is_empty() {
+                client.read_tls(&mut buf.as_slice()).map_err(|e| e.to_string())?;
+                client.process_new_packets().map_err(|e| format!("client: {e}"))?;
+            }
+            if !client.is_handshaking() && !server.is_handshaking() {
+                return Ok(client.peer_certificates().and_then(|c| c.first().cloned()).unwrap().into_owned());
+            }
+        }
+        Err("the handshake did not finish".into())
+    }
+
+    #[test]
+    fn a_client_that_connects_to_a_listed_address_gets_a_certificate_for_it() {
+        let d = tmp("ip-no-sni");
+        let ca = Ca::load_or_create_with(&d, &names(&["10.9.0.5", "10.20.0.0/24", "fd00::7"])).unwrap();
+        let pem = ca.pem.clone();
+        let r = Arc::new(LeafResolver::new(ca).unwrap());
+        let ip = |s: &str| IpAddr::from_str(s).unwrap();
+        // the single addresses given are named by the certificate served when the client sent no name, and the chain verifies
+        for ok in ["10.9.0.5", "fd00::7", "127.0.0.1", "::1"] {
+            leaf_served_without_a_name(&pem, r.clone(), ip(ok)).unwrap_or_else(|e| panic!("{ok}: {e}"));
+        }
+        // a range is allowed for the CA but cannot be written in a certificate: an address in it that was not listed is not named
+        let e = leaf_served_without_a_name(&pem, r.clone(), ip("10.20.0.9")).unwrap_err();
+        assert!(e.contains("not valid for") || e.contains("NotValidForName"), "{e}");
+        let e = leaf_served_without_a_name(&pem, r.clone(), ip("10.9.0.6")).unwrap_err();
+        assert!(e.contains("not valid for") || e.contains("NotValidForName"), "{e}");
+        // without the address in the setting the certificate does not name it
+        let d2 = tmp("ip-no-sni-none");
+        let plain = Ca::load_or_create(&d2).unwrap();
+        let pem2 = plain.pem.clone();
+        let r2 = Arc::new(LeafResolver::new(plain).unwrap());
+        assert!(leaf_served_without_a_name(&pem2, r2.clone(), ip("10.9.0.5")).is_err());
+        leaf_served_without_a_name(&pem2, r2, ip("127.0.0.1")).unwrap();
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    #[test]
+    fn public_addresses_are_told_apart_and_warned_about() {
+        let ip = |s: &str| IpAddr::from_str(s).unwrap();
+        for private in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.9",
+            "192.168.1.1",
+            "169.254.1.1",
+            "100.64.0.1",
+            "100.127.255.1",
+            "::1",
+            "fd00::5",
+            "fe80::1",
+        ] {
+            assert!(!is_public_address(ip(private)), "{private}");
+        }
+        for public in ["8.8.8.8", "100.128.0.1", "172.32.0.1", "2606:4700::1111"] {
+            assert!(is_public_address(ip(public)), "{public}");
+        }
+        let d = tmp("ip-public-warn");
+        let ca = Ca::load_or_create_with(&d, &names(&["8.8.8.8", "10.9.0.5"])).unwrap();
+        let buf = LogBuf::default();
+        let sub = tracing_subscriber::fmt().with_writer(buf.clone()).with_ansi(false).finish();
+        tracing::subscriber::with_default(sub, || {
+            LeafResolver::new(ca).unwrap();
+        });
+        let out = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        let warns: Vec<&str> = out.lines().filter(|l| l.contains(" WARN ")).collect();
+        assert_eq!(warns.len(), 1, "only the public address: {out}");
+        assert!(warns[0].contains("8.8.8.8") && warns[0].contains("system-wide"), "{}", warns[0]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// What a client does: build the chain from the CA and check the leaf for a name. The CA is
     /// asked to sign for names it should not, directly (the server refuses to, so this is what a
     /// thief with `ca.key` could do).
@@ -696,7 +826,7 @@ mod tests {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         let verifier = WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider).build().unwrap();
         let check = |name: &str| -> bool {
-            let leaf = ca.mint(&[name], false).unwrap();
+            let leaf = ca.mint(&[name], &[]).unwrap();
             let sn = ServerName::try_from(name.to_string()).unwrap();
             verifier.verify_server_cert(&leaf.cert[0], &leaf.cert[1..], &sn, &[], UnixTime::now()).is_ok()
         };

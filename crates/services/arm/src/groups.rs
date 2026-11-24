@@ -160,6 +160,7 @@ pub(crate) async fn delete_members(cx: &Cx<'_>, items: &[(Stored, bool)]) -> Arm
         match done {
             Ok(()) => {
                 cx.inner.state.lock().resources.remove(&crate::state::key(&m.id));
+                crate::authz::on_delete(&cx.inner.auth, m);
             }
             Err(e) => {
                 first.get_or_insert(e);

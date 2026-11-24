@@ -112,7 +112,7 @@ async fn a_501_names_its_operation_without_names_in_it() {
     let r = a
         .put(
             &format!(
-                "/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/acct1/fileServices/default/shares/s1"
+                "/subscriptions/{SUB}/resourceGroups/rg/providers/Microsoft.Storage/storageAccounts/acct1/privateEndpointConnections/pe1"
             ),
             json!({}),
         )
@@ -128,8 +128,7 @@ async fn a_501_names_its_operation_without_names_in_it() {
         .map(|e| e["operation"].as_str().unwrap().to_string())
         .collect();
     assert!(ops.contains(&"POST Microsoft.Web/sites/restart".to_string()), "{ops:?}");
-    if r.status == 501 {
-        assert!(ops.contains(&"PUT Microsoft.Storage/storageAccounts/fileServices/shares".to_string()), "{ops:?}");
-    }
+    assert_eq!(r.status, 501, "{}", r.text());
+    assert!(ops.contains(&"PUT Microsoft.Storage/storageAccounts/privateEndpointConnections".to_string()), "{ops:?}");
     assert!(ops.iter().all(|o| !o.contains("acct1") && !o.contains(SUB) && !o.contains("rg")), "{ops:?}");
 }

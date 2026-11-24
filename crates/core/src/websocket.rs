@@ -543,6 +543,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> AsyncWrite for WsStream<S> {
 /// `amqp` or `AMQPWSB10` (or none), whatever the path, and after the `101` hands the byte stream
 /// to the raw protocol whose `sniff` matches the first bytes.
 pub(crate) struct RawOverWebSocket {
+    pub(crate) faults: crate::faults::Faults,
     pub raw: Vec<Arc<dyn RawProtocol>>,
 }
 
@@ -579,6 +580,7 @@ impl RawOverWebSocket {
                     local: request.local,
                     tls: request.tls,
                     server_name: request.server_name,
+                    faults: self.faults.clone(),
                 })
                 .await
             }

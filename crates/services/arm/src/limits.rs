@@ -131,14 +131,13 @@ pub fn weight(v: &Value) -> Result<u64, String> {
     Ok(total)
 }
 
-/// A copy of the value in which strings are lower case and objects are sorted, as text: two values that
-/// `eq_values` calls equal give the same text. Lets `union` and `distinct`-style work run in linear time.
+/// The value with objects sorted, as text: two values that `eq_values` calls equal give the same text. Lets `union` and `distinct`-style work run in linear time.
 pub fn canonical(v: &Value) -> String {
     fn go(v: &Value, out: &mut String) {
         match v {
             Value::String(t) => {
                 out.push('"');
-                out.push_str(&t.to_ascii_lowercase().replace('\\', "\\\\").replace('"', "\\\""));
+                out.push_str(&t.replace('\\', "\\\\").replace('"', "\\\""));
                 out.push('"');
             }
             Value::Array(a) => {

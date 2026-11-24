@@ -23,6 +23,7 @@ async fn account_container_queue_table_reach_the_data_plane() {
     assert_eq!(j["properties"]["primaryEndpoints"]["queue"], format!("http://acct1.queue.core.localhost:{port}/"));
     assert_eq!(j["properties"]["primaryEndpoints"]["table"], format!("http://acct1.table.core.localhost:{port}/"));
     assert_eq!(j["properties"]["primaryEndpoints"]["dfs"], format!("http://acct1.dfs.core.localhost:{port}/"));
+    assert_eq!(j["properties"]["primaryEndpoints"]["file"], format!("http://acct1.file.core.localhost:{port}/"));
 
     // container
     let c = format!("{}/blobServices/default/containers/photos", acct("rg", "acct1"));
@@ -156,9 +157,9 @@ async fn child_needs_parent_and_unbuilt_child_is_501() {
     assert_eq!(r.status, 404);
     assert_eq!(r.json()["error"]["code"], "ParentResourceNotFound");
     a.put(&acct("rge", "acct5"), json!({"location": "eastus"})).await;
-    let r = a.put(&format!("{}/fileServices/default/shares/s1", acct("rge", "acct5")), json!({})).await;
+    let r = a.put(&format!("{}/privateEndpointConnections/pe1", acct("rge", "acct5")), json!({})).await;
     assert_eq!(r.status, 501);
-    assert!(r.json()["error"]["message"].as_str().unwrap().contains("fileServices/shares"));
+    assert!(r.json()["error"]["message"].as_str().unwrap().contains("privateEndpointConnections"));
 }
 
 #[tokio::test]

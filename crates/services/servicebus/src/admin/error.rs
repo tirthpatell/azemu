@@ -22,6 +22,11 @@ pub enum ErrKind {
     Verb(String),
     /// 401 with the given detail.
     Unauthorized(String),
+    /// 401 with the given detail and the namespace and path of the request as the tracker (strict authorisation: `Authorization failed for
+    /// specified action: Manage,EntityRead,Send,Listen.`).
+    UnauthorizedAt(String),
+    /// 500 whose detail is only the tracking part (what a `SharedAccessSignature` header that cannot be read gets).
+    Bare500,
     /// 404 `SubCode=40400. Not Found. The Operation doesn't exist.` (update of a missing queue or topic)
     NotFoundOperation,
     /// 404 `Entity '...' was not found.` (subscriptions and rules)
@@ -98,7 +103,8 @@ impl ApiError {
     fn status(&self) -> u16 {
         match &self.kind {
             ErrKind::BadRequest | ErrKind::BadRequestMsg { .. } | ErrKind::BadRequestRaw(_) | ErrKind::Verb(_) => 400,
-            ErrKind::Unauthorized(_) => 401,
+            ErrKind::Unauthorized(_) | ErrKind::UnauthorizedAt(_) => 401,
+            ErrKind::Bare500 => 500,
             ErrKind::Quota(_) => 403,
             ErrKind::NotFoundOperation | ErrKind::NotFoundEntity(_) | ErrKind::NoService => 404,
             ErrKind::NotRecognized | ErrKind::NotFoundMessaging(_) => 404,
@@ -125,6 +131,8 @@ impl ApiError {
             ErrKind::BadRequestRaw(text) => format!("{text} {tracking}, {tracker}, {ts}"),
             ErrKind::Verb(m) => format!("The specified HTTP verb ({m}) is not valid. {MORE} . {tracking}, {tracker}, {ts}"),
             ErrKind::Unauthorized(d) => format!("{d} {tracking}, {no_tracker}, {ts}"),
+            ErrKind::UnauthorizedAt(d) => format!("{d} {tracking}, {tracker}, {ts}"),
+            ErrKind::Bare500 => tracking.clone(),
             ErrKind::NotFoundOperation => format!("SubCode=40400. Not Found. The Operation doesn't exist. {MORE} . {tracking}, {tracker}, {ts}"),
             ErrKind::NotFoundEntity(id) => format!("Entity '{id}' was not found. {MORE}  {tracking}, {no_tracker}, {ts}"),
             ErrKind::NoService => format!("No service is hosted at the specified address. {tracking}, {tracker}, {ts}"),

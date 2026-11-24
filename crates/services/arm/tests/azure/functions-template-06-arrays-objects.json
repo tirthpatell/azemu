@@ -1,0 +1,386 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "intToConvert": {
+      "type": "int",
+      "defaultValue": 1
+    },
+    "stringToConvert": {
+      "type": "string",
+      "defaultValue": "efgh"
+    },
+    "objectToConvert": {
+      "type": "object",
+      "defaultValue": {
+        "a": "b",
+        "c": "d"
+      }
+    },
+    "firstObject": {
+      "type": "object",
+      "defaultValue": {
+        "one": "a",
+        "two": "b",
+        "three": "c"
+      }
+    },
+    "secondObject": {
+      "type": "object",
+      "defaultValue": {
+        "one": "a",
+        "two": "z",
+        "three": "c"
+      }
+    },
+    "firstArray": {
+      "type": "array",
+      "defaultValue": [
+        "one",
+        "two",
+        "three"
+      ]
+    },
+    "secondArray": {
+      "type": "array",
+      "defaultValue": [
+        "two",
+        "three"
+      ]
+    }
+  },
+  "variables": {
+    "numbers": [
+      1,
+      2,
+      2,
+      3,
+      1
+    ],
+    "names": [
+      "apple",
+      "banana",
+      "apple",
+      "cherry"
+    ],
+    "resources": [
+      {
+        "name": "storage1",
+        "type": "Microsoft.Storage/storageAccounts"
+      },
+      {
+        "name": "vm1",
+        "type": "Microsoft.Compute/virtualMachines"
+      },
+      {
+        "name": "storage1",
+        "type": "Microsoft.Storage/storageAccounts"
+      }
+    ],
+    "items": [
+      "apple",
+      "banana",
+      "orange",
+      "grape"
+    ],
+    "namesList": [
+      "one",
+      "two",
+      "three"
+    ],
+    "numbersList": [
+      4,
+      5,
+      6
+    ],
+    "collection": [
+      [
+        "one",
+        "two",
+        "three"
+      ],
+      [
+        4,
+        5,
+        6
+      ]
+    ],
+    "duplicates": [
+      1,
+      2,
+      3,
+      1
+    ],
+    "entities": {
+      "item002": {
+        "enabled": false,
+        "displayName": "Example item 2",
+        "number": 200
+      },
+      "item001": {
+        "enabled": true,
+        "displayName": "Example item 1",
+        "number": 300
+      }
+    },
+    "firstArray": [
+      {
+        "one": "a"
+      },
+      {
+        "two": "b"
+      },
+      {
+        "two": "c"
+      }
+    ],
+    "secondArray": [
+      {
+        "one": "a",
+        "nested": {
+          "a": 1,
+          "nested": {
+            "c": 3
+          }
+        }
+      },
+      {
+        "two": "b",
+        "nested": {
+          "b": 2
+        }
+      }
+    ],
+    "users": {
+      "name": "John Doe",
+      "age": 30
+    },
+    "colors": [
+      "red",
+      "green"
+    ]
+  },
+  "resources": [],
+  "outputs": {
+    "arrayOfInt": {
+      "type": "array",
+      "value": "[array(parameters('intToConvert'))]"
+    },
+    "arrayOfString": {
+      "type": "array",
+      "value": "[array(parameters('stringToConvert'))]"
+    },
+    "arrayOfObject": {
+      "type": "array",
+      "value": "[array(parameters('objectToConvert'))]"
+    },
+    "uniqueNumbers": {
+      "type": "array",
+      "value": "[distinct(variables('numbers'))]"
+    },
+    "uniqueNames": {
+      "type": "array",
+      "value": "[distinct(variables('names'))]"
+    },
+    "uniqueResources": {
+      "type": "array",
+      "value": "[distinct(variables('resources'))]"
+    },
+    "uniqueCase": {
+      "type": "array",
+      "value": "[distinct(createArray('a', 'A', 'b'))]"
+    },
+    "secondToLast": {
+      "type": "string",
+      "value": "[indexFromEnd(variables('items'), 2)]"
+    },
+    "tryFromEnd": {
+      "type": "string",
+      "value": "[tryIndexFromEnd(variables('items'), 2)]"
+    },
+    "tryFromEndEmpty": {
+      "type": "bool",
+      "value": "[empty(tryIndexFromEnd(variables('items'), 9))]"
+    },
+    "index1": {
+      "type": "int",
+      "value": "[lastIndexOf(variables('namesList'), 'two')]"
+    },
+    "index2": {
+      "type": "int",
+      "value": "[indexOf(variables('namesList'), 'one')]"
+    },
+    "notFoundIndex1": {
+      "type": "int",
+      "value": "[lastIndexOf(variables('namesList'), 'Three')]"
+    },
+    "index3": {
+      "type": "int",
+      "value": "[lastIndexOf(variables('numbersList'), 4)]"
+    },
+    "index4": {
+      "type": "int",
+      "value": "[indexOf(variables('numbersList'), 6)]"
+    },
+    "notFoundIndex2": {
+      "type": "int",
+      "value": "[lastIndexOf(variables('numbersList'), '5')]"
+    },
+    "index5": {
+      "type": "int",
+      "value": "[indexOf(variables('collection'), variables('numbersList'))]"
+    },
+    "index6": {
+      "type": "int",
+      "value": "[indexOf(variables('duplicates'), 1)]"
+    },
+    "index7": {
+      "type": "int",
+      "value": "[lastIndexOf(variables('duplicates'), 1)]"
+    },
+    "indexOfCaseArray": {
+      "type": "int",
+      "value": "[indexOf(variables('namesList'), 'ONE')]"
+    },
+    "intersectObjects": {
+      "type": "object",
+      "value": "[intersection(parameters('firstObject'), parameters('secondObject'))]"
+    },
+    "intersectArrays": {
+      "type": "array",
+      "value": "[intersection(parameters('firstArray'), parameters('secondArray'))]"
+    },
+    "intersectCase": {
+      "type": "array",
+      "value": "[intersection(createArray('One', 'two'), createArray('one', 'TWO'))]"
+    },
+    "unionCase": {
+      "type": "array",
+      "value": "[union(createArray('a', 'B'), createArray('A', 'b', 'c'))]"
+    },
+    "itemsResult": {
+      "type": "array",
+      "value": "[items(variables('entities'))]"
+    },
+    "objectKeysResult": {
+      "type": "array",
+      "value": "[objectKeys(variables('entities'))]"
+    },
+    "firstOutput": {
+      "type": "object",
+      "value": "[shallowMerge(variables('firstArray'))]"
+    },
+    "secondOutput": {
+      "type": "object",
+      "value": "[shallowMerge(variables('secondArray'))]"
+    },
+    "emptyOutput": {
+      "type": "bool",
+      "value": "[empty(null())]"
+    },
+    "tryGetName": {
+      "type": "string",
+      "value": "[tryGet(variables('users'), 'name')]"
+    },
+    "tryGetNameCase": {
+      "type": "string",
+      "value": "[tryGet(variables('users'), 'NAME')]"
+    },
+    "tryGetMissingIsNull": {
+      "type": "bool",
+      "value": "[equals(tryGet(variables('users'), 'region'), null())]"
+    },
+    "tryGetFirstColor": {
+      "type": "string",
+      "value": "[tryGet(variables('colors'), 0)]"
+    },
+    "tryGetOutOfRange": {
+      "type": "bool",
+      "value": "[equals(tryGet(variables('colors'), 5), null())]"
+    },
+    "containsArrayCase": {
+      "type": "bool",
+      "value": "[contains(variables('namesList'), 'ONE')]"
+    },
+    "containsObjectKeyCase": {
+      "type": "bool",
+      "value": "[contains(variables('users'), 'NAME')]"
+    },
+    "containsStringCase": {
+      "type": "bool",
+      "value": "[contains('abcdef', 'CD')]"
+    },
+    "equalsStringCase": {
+      "type": "bool",
+      "value": "[equals('A', 'a')]"
+    },
+    "equalsArrayCase": {
+      "type": "bool",
+      "value": "[equals(createArray('A'), createArray('a'))]"
+    },
+    "equalsObjectKeyCase": {
+      "type": "bool",
+      "value": "[equals(createObject('K', 1), createObject('k', 1))]"
+    },
+    "startsWithCase": {
+      "type": "bool",
+      "value": "[startsWith('Hello', 'hE')]"
+    },
+    "endsWithCase": {
+      "type": "bool",
+      "value": "[endsWith('Hello', 'LLO')]"
+    },
+    "lessStringCase": {
+      "type": "bool",
+      "value": "[less('a', 'B')]"
+    },
+    "greaterStringCase": {
+      "type": "bool",
+      "value": "[greater('a', 'B')]"
+    },
+    "firstOfArray": {
+      "type": "string",
+      "value": "[first(variables('items'))]"
+    },
+    "lastOfArray": {
+      "type": "string",
+      "value": "[last(variables('items'))]"
+    },
+    "takeArray": {
+      "type": "array",
+      "value": "[take(variables('items'), 2)]"
+    },
+    "skipArray": {
+      "type": "array",
+      "value": "[skip(variables('items'), 3)]"
+    },
+    "minArray": {
+      "type": "int",
+      "value": "[min(createArray(4, 2, 9))]"
+    },
+    "maxArgs": {
+      "type": "int",
+      "value": "[max(4, 2, 9)]"
+    },
+    "concatArrays": {
+      "type": "array",
+      "value": "[concat(createArray(1), createArray(2, 3))]"
+    },
+    "emptyArrayIsEmpty": {
+      "type": "bool",
+      "value": "[empty(createArray())]"
+    },
+    "lengthObject": {
+      "type": "int",
+      "value": "[length(variables('users'))]"
+    },
+    "unionObjects": {
+      "type": "object",
+      "value": "[union(createObject('a', 1, 'b', 2), createObject('b', 3, 'c', 4))]"
+    },
+    "rangeResult": {
+      "type": "array",
+      "value": "[range(3, 4)]"
+    }
+  }
+}

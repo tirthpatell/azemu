@@ -51,8 +51,37 @@ impl Service for DataLakeService {
         "devstoreaccount1"
     }
 
+    /// The JSON form of `ServerBusy` the `dfs` endpoint sends (same codes as Blob; see `errors::into_response`).
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(503);
+        let default_code = match status {
+            500 => "InternalError",
+            503 => "ServerBusy",
+            s => azemu_core::FaultAnswer::default_code(s),
+        };
+        let message = a.message_or(if a.throttle {
+            "The server is currently unable to receive requests. Please retry your request."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let mut e = crate::errors::ApiError::new(&a.code_or(default_code)).status(status).msg(message);
+        if let Some(s) = a.retry_after_secs() {
+            e = e.header("Retry-After", s.to_string());
+        }
+        azemu_core::storage::finish(errors::into_response(e, &req.ctx), req, router::SERVER)
+    }
+
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let op = router::op_of(&req);
+        // strict mode: the bearer token and the role come first (`strict.rs`)
+        let auth = self.shared.auth.read().clone();
+        if let crate::strict::Gate::Refused(r) = crate::strict::dfs_gate(&auth, &req, op) {
+            return azemu_core::storage::finish(*r, &req, router::SERVER);
+        }
         // `x-ms-structured-body` on an append: take the message apart first (see `structured.rs`).
         let mut wrapped = false;
         let req = if matches!(op, ops::Op::Append) {

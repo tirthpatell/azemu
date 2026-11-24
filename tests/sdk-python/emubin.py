@@ -18,7 +18,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 _SERVICES = (
     "blob", "queue", "table", "keyvault", "appconfig", "identity", "cosmos", "eventgrid",
-    "servicebus", "eventhubs", "arm", "cosmos-script-worker",
+    "servicebus", "eventhubs", "arm", "monitor", "file", "cosmos-script-worker",
 )
 
 

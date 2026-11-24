@@ -35,6 +35,22 @@ pub fn sub_view(sub: &Sub, now: &Now) -> Value {
     let mut v = serde_json::to_value(&sub.cfg).unwrap_or_else(|_| json!({}));
     let (available, locked, delayed) = sub.queue.counts(now);
     if let Some(o) = v.as_object_mut() {
+        // a secret static value is not shown (Learn: "Is secret?")
+        if let Some(Value::Array(list)) = o.get_mut("deliveryAttributeMappings") {
+            for (m, src) in list.iter_mut().zip(&sub.cfg.delivery_attribute_mappings) {
+                if src.is_secret {
+                    if let Some(m) = m.as_object_mut() {
+                        m.remove("value");
+                    }
+                }
+            }
+        }
+        if let (Some(identity), Some(d)) = (&sub.cfg.delivery_identity, o.get("destination").cloned()) {
+            o.insert("deliveryWithResourceIdentity".into(), json!({ "identity": identity, "destination": d }));
+        }
+        if let (Some(identity), Some(d)) = (&sub.cfg.dead_letter_identity, o.get("deadLetterDestination").cloned()) {
+            o.insert("deadLetterWithResourceIdentity".into(), json!({ "identity": identity, "deadLetterDestination": d }));
+        }
         o.insert("name".into(), json!(sub.name));
         o.insert("deliveryMode".into(), json!(sub.cfg.mode()));
         o.insert("createdAt".into(), json!(azemu_core::time::iso8601_7(sub.created)));
@@ -219,8 +235,14 @@ pub(crate) async fn create(
             return Err((404, format!("The topic '{topic}' was not found.")));
         }
         cfg.validate_with(scope.kind, &shared.opts.webhooks).map_err(|m| (400, m))?;
+        if cfg.dead_letter_destination.is_some() && shared.dead_letter_writer.read().is_none() {
+            return Err((
+                501,
+                "eventgrid: dead-letter blob destinations need the unified azemu binary (no writer is registered here).".to_string(),
+            ));
+        }
         if let Some(crate::destination::Resolved::Handler { kind, .. }) = cfg.handler_destination() {
-            if !shared.destinations.read().contains_key(&kind) {
+            if kind != crate::destination::DestinationKind::AzureFunction && !shared.destinations.read().contains_key(&kind) {
                 return Err((
                     501,
                     format!(

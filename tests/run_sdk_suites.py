@@ -33,7 +33,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SUITES = ROOT / "tests" / "sdk-python"
 SPLIT_PER_FILE = {"servicebus", "eventhubs"}
 # Suites that need several services in one process: always run on the unified binary.
-NEEDS_UNIFIED = {"storage_events", "arm", "kafka", "persistence", "seed"}
+NEEDS_UNIFIED = {"storage_events", "arm", "kafka", "persistence", "seed", "faults", "auth"}
+# Suites whose emulator runs with strict authorisation on (`docs/strict-auth.md`); every other suite runs with the mode off.
+STRICT_AUTH = {"auth"}
 # The variables that switch auto-creation on for a suite's emulator in the second pass (marker `autocreate`).
 AUTOCREATE_VARS = {
     "servicebus": ["AZEMU_SERVICEBUS_AUTOCREATE"],
@@ -58,7 +60,9 @@ def run(job, binary, autocreate=False):
     """One pytest process. `autocreate`: the second pass (only the tests carrying the suite's second-pass marker, the
     suite's variables on)."""
     name, target = job
-    env = {k: v for k, v in os.environ.items() if k not in ALL_AUTOCREATE_VARS}
+    env = {k: v for k, v in os.environ.items() if k not in ALL_AUTOCREATE_VARS and k != "AZEMU_STRICT_AUTH"}
+    if name in STRICT_AUTH:
+        env["AZEMU_STRICT_AUTH"] = "1"
     if autocreate:
         for var in SECOND_PASS[name][0]:
             env[var] = "1"

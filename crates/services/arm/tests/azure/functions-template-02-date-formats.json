@@ -1,0 +1,151 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [],
+  "outputs": {
+    "standard_d_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'd')]"
+    },
+    "standard_D_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'D')]"
+    },
+    "standard_f_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'f')]"
+    },
+    "standard_F_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'F')]"
+    },
+    "standard_g_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'g')]"
+    },
+    "standard_G_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'G')]"
+    },
+    "standard_m_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'm')]"
+    },
+    "standard_M_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'M')]"
+    },
+    "standard_o_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'o')]"
+    },
+    "standard_O_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'O')]"
+    },
+    "standard_r_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'r')]"
+    },
+    "standard_R_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'R')]"
+    },
+    "standard_s_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 's')]"
+    },
+    "standard_t_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 't')]"
+    },
+    "standard_T_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'T')]"
+    },
+    "standard_u_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'u')]"
+    },
+    "standard_y_lower": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'y')]"
+    },
+    "standard_Y_upper": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'Y')]"
+    },
+    "custom_isoZ": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'yyyy-MM-ddTHH:mm:ssZ')]"
+    },
+    "custom_basicZ": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'yyyyMMddTHHmmssZ')]"
+    },
+    "custom_monthDay": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'M d')]"
+    },
+    "custom_longDate": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'dddd d MMMM yyyy')]"
+    },
+    "custom_twelveHour": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'hh:mm:ss tt')]"
+    },
+    "custom_shortTwelve": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'h:m:s t')]"
+    },
+    "custom_shortYear": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'yy/M/d')]"
+    },
+    "custom_abbrev": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'ddd MMM')]"
+    },
+    "custom_fraction2": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'ss.ff')]"
+    },
+    "custom_kind": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'HH:mm K')]"
+    },
+    "custom_offset": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'HH:mm zzz')]"
+    },
+    "custom_percentD": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', '%d')]"
+    },
+    "custom_quoted": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'yyyy-MM-dd''T''HH:mm')]"
+    },
+    "custom_monthName": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'MMMM')]"
+    },
+    "custom_hour24": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'HH')]"
+    },
+    "custom_era": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'gg')]"
+    },
+    "custom_literalSlash": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'dd/MM/yyyy')]"
+    },
+    "custom_escaped": {
+      "type": "string",
+      "value": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'yyyy\\-MM')]"
+    }
+  }
+}

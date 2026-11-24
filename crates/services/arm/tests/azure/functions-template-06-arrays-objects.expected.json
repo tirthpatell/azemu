@@ -1,0 +1,146 @@
+{
+ "arrayOfInt": [
+  1
+ ],
+ "arrayOfObject": [
+  {
+   "a": "b",
+   "c": "d"
+  }
+ ],
+ "arrayOfString": [
+  "efgh"
+ ],
+ "concatArrays": [
+  1,
+  2,
+  3
+ ],
+ "containsArrayCase": false,
+ "containsObjectKeyCase": true,
+ "containsStringCase": false,
+ "emptyArrayIsEmpty": true,
+ "emptyOutput": true,
+ "endsWithCase": true,
+ "equalsArrayCase": false,
+ "equalsObjectKeyCase": false,
+ "equalsStringCase": false,
+ "firstOfArray": "apple",
+ "firstOutput": {
+  "one": "a",
+  "two": "c"
+ },
+ "greaterStringCase": false,
+ "index1": 1,
+ "index2": 0,
+ "index3": 0,
+ "index4": 2,
+ "index5": 1,
+ "index6": 0,
+ "index7": 3,
+ "indexOfCaseArray": -1,
+ "intersectArrays": [
+  "two",
+  "three"
+ ],
+ "intersectCase": [],
+ "intersectObjects": {
+  "one": "a",
+  "three": "c"
+ },
+ "itemsResult": [
+  {
+   "key": "item001",
+   "value": {
+    "displayName": "Example item 1",
+    "enabled": true,
+    "number": 300
+   }
+  },
+  {
+   "key": "item002",
+   "value": {
+    "displayName": "Example item 2",
+    "enabled": false,
+    "number": 200
+   }
+  }
+ ],
+ "lastOfArray": "grape",
+ "lengthObject": 2,
+ "lessStringCase": true,
+ "maxArgs": 9,
+ "minArray": 2,
+ "notFoundIndex1": -1,
+ "notFoundIndex2": -1,
+ "objectKeysResult": [
+  "item001",
+  "item002"
+ ],
+ "rangeResult": [
+  3,
+  4,
+  5,
+  6
+ ],
+ "secondOutput": {
+  "nested": {
+   "b": 2
+  },
+  "one": "a",
+  "two": "b"
+ },
+ "secondToLast": "orange",
+ "skipArray": [
+  "grape"
+ ],
+ "startsWithCase": true,
+ "takeArray": [
+  "apple",
+  "banana"
+ ],
+ "tryFromEnd": "orange",
+ "tryFromEndEmpty": true,
+ "tryGetFirstColor": "red",
+ "tryGetMissingIsNull": true,
+ "tryGetName": "John Doe",
+ "tryGetNameCase": "John Doe",
+ "tryGetOutOfRange": true,
+ "unionCase": [
+  "a",
+  "B",
+  "A",
+  "b",
+  "c"
+ ],
+ "unionObjects": {
+  "a": 1,
+  "b": 3,
+  "c": 4
+ },
+ "uniqueCase": [
+  "a",
+  "A",
+  "b"
+ ],
+ "uniqueNames": [
+  "apple",
+  "banana",
+  "cherry"
+ ],
+ "uniqueNumbers": [
+  1,
+  2,
+  3
+ ],
+ "uniqueResources": [
+  {
+   "name": "storage1",
+   "type": "Microsoft.Storage/storageAccounts"
+  },
+  {
+   "name": "vm1",
+   "type": "Microsoft.Compute/virtualMachines"
+  }
+ ]
+}

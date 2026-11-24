@@ -25,11 +25,13 @@ Another way, not tried here: a line in the hosts file (`127.0.0.1 myacct.blob.co
 | 10001 | Queue | first path segment |
 | 10002 | Table | first path segment |
 | 10003 | Data Lake | first path segment |
+| 10004 | Azure Files (the REST API of file shares; no SMB) | first path segment: `http://azemu:10004/{account}/{share}/{path}` |
 | 10010 | Key Vault | https; the host name is the vault: `https://azemu:10010` is the vault `azemu` (`localhost` or an address: the vault `default`) |
 | 10011 | App Configuration | https; the host name is the store, the same way |
 | 10012 | Event Grid | https; the host name is the topic (`/api/events`), the same way |
 | 10013 | Resource Manager | https; no account |
 | 10014 | Identity | http; no account |
+| 10015 | Monitor (Application Insights ingestion, Live Metrics, Logs Ingestion) | http and https; no account. `IngestionEndpoint=http://azemu:10015/`; the Logs Ingestion client needs https and the CA |
 | 8081 | Cosmos DB | https; the host name is the account (`localhost` or an address: `localhost`, the address of Microsoft's emulator) |
 | 5672 and 5671 | Service Bus and Event Hubs (AMQP, plain and TLS) | the first label of the host is the namespace (`sb://azemu:5672`); a host with the label `eventhub` is Event Hubs, so give the emulator a network alias `eventhub`. The Service Bus administration client uses https on the same port. Give Service Bus and Event Hubs namespaces different names: a namespace that has an event hub is Event Hubs (`sb://localhost:5672` is the namespace `default`). A client that signs in with an identity gives the host without a port, and the SDK then dials 5671 |
 | 9093 | Kafka endpoint | raw protocol |
@@ -79,6 +81,10 @@ clients need https. Every port answers both http and https. The first start make
   only sees a TLS error. `--tls-name <name>` (or `AZEMU_TLS_NAME`, comma separated, repeatable) adds a DNS suffix, an IP
   address or an address range such as `10.0.0.0/24`; it is also served as a host name. A whole top-level domain (`com`, `co.uk`), a wildcard and a range
   wider than a /8 (IPv4) or a /32 (IPv6) are refused at start.
+- A client that connects to an **IP address** sends no host name. The emulator then serves one certificate that names `localhost`, `127.0.0.1`, `::1` and every single address listed with `--tls-name`, so
+  `--tls-name 10.1.2.3` lets a client reach `https://10.1.2.3:4577` once it trusts `ca.pem`. A range is not written into that certificate: an address of a listed range that is not listed alone is not named.
+  The host check serves every IP address as a host, listed or not, so it agrees with this (the TLS handshake is what stops an address that is not listed). An address from the public internet is accepted
+  and logs a warning at start (see [`SECURITY.md`](../SECURITY.md)).
 - It lasts 2 years. A new one is made when it is within 30 days of its end, or when the set of `--tls-name` changes; then clients must trust the new
   `ca.pem`. An older azemu left a CA with no limits and a 10-year life: it is replaced at the first start.
 

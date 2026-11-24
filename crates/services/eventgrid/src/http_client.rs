@@ -122,7 +122,7 @@ async fn send_inner(method: &str, url: &str, headers: &[(String, String)], body:
     let tcp = connected.ok_or_else(|| format!("connect failed: {last}"))?;
     let _ = tcp.set_nodelay(true);
     let mut req = hyper::Request::builder().method(method).uri(&t.path).header("host", &t.authority);
-    for (k, v) in headers {
+    for (k, v) in headers.iter().filter(|(k, _)| !crate::delivery_props::is_transport_header(k)) {
         req = req.header(k.as_str(), v.as_str());
     }
     let req = req

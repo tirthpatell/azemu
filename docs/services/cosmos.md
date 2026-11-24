@@ -264,6 +264,7 @@ code does that, so an application often never does. Three ways here:
   without shared throughput get a default 400 RU/s offer (like a provisioned account).
 * Query behaviour is that of `azemu-cosmos-sql` (see its "Behaviour that could not be confirmed against Azure" section).
 * Request charge, query metrics, index metrics are made up. `x-ms-resource-quota` / usage are constants.
+* **Faults.** Only on request ([`faults.md`](../faults.md)), or with a `ruBudget` rule that counts the request charges the emulator reports (which are made up). A throttled request is `429` with `x-ms-retry-after-ms` and `x-ms-substatus: 3200`. The code `"429"` in the body, the sub status and the default wait of 100 ms were not checked against a recorded answer.
 
 ## Differences from Microsoft's vnext emulator
 
@@ -288,3 +289,10 @@ document counter, and the "all versions and deletes" history once it was started
 readable: `tests/state-v1/cosmos/` and `tests/state_v1.rs` fail when a change breaks the reading (raise `VERSION` and keep a reader then). Session tokens,
 change feed continuations and ids from before a restart keep working; a query continuation token finds no kept result and the query runs again. Running
 scripts are not stored. Details, costs and tests: `docs/services/persistence.md`, section "Cosmos, Event Grid, Service Bus, Event Hubs with Kafka, ARM".
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request that carries an Entra token (`type=aad`) is checked against Cosmos DB's **own** roles (`sqlRoleAssignments`, built in `...0001` Reader and `...0002` Contributor;
+made through Resource Manager, Terraform's `azurerm_cosmosdb_sql_role_assignment` or `PUT /_azemu/auth/cosmos/assignments`; scopes at the account, a database or a container). Three kinds of 403, as on Azure: `5300` for a call a token cannot make
+at all (databases, containers, users, offers and scripts made, replaced, deleted or listed: the same for every principal), `5301` without `readMetadata` (a client cannot even be built), `5302` for an item, query, change feed or stored
+procedure call without the action. A token that is wrong is 401 `5003`, `5004` or `5008`. Keys are checked as before; **the two keys are not told apart, so writing with the read-only key is not refused** (Azure answers 401). The path in a 5302 text is the container.

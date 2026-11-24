@@ -17,6 +17,7 @@ mod common;
 pub mod crypto;
 mod errors;
 mod events;
+mod inspect;
 mod jwk;
 mod keys;
 mod keys_crypto;
@@ -27,6 +28,7 @@ mod rotation;
 mod router;
 mod secrets;
 mod state;
+mod strict;
 
 use azemu_core::{async_trait, Mount, Request, Response, Service};
 use parking_lot::Mutex;
@@ -40,11 +42,19 @@ pub struct KeyVaultService {
     sink: parking_lot::RwLock<Option<std::sync::Arc<dyn VaultEventSink>>>,
     /// Raised on every change to the state that a save would write (see `persist_generation`).
     generation: std::sync::atomic::AtomicU64,
+    /// Strict authorisation (`strict.rs`); does nothing until the program hands over a real handle.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 impl KeyVaultService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check roles (or access policies) for bearer tokens in strict mode (`docs/strict-auth.md`).
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("keyvault");
+        *self.auth.write() = auth;
     }
 }
 
@@ -63,22 +73,52 @@ impl Service for KeyVaultService {
         "default"
     }
 
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
     /// Azure documents 25 KB for a secret value; a key, a certificate import and a backup blob are bigger than that and have no documented request limit. 1 MiB is generous.
     fn max_body_bytes(&self, _method: &azemu_core::http::Method, _path: &str) -> Option<usize> {
         Some(1024 * 1024)
     }
 
+    /// `429` with `Retry-After` (seconds) and the JSON error body of the service. Key Vault's throttling guidance says a vault
+    /// "returns HTTP status code 429 (Too many requests)" and clients must back off
+    /// (learn.microsoft.com/azure/key-vault/general/overview-throttling); the Azure SDKs honour `Retry-After` on a 429. The code
+    /// `Throttled` and the text are not from a recorded answer (see docs/faults.md).
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(429);
+        let code = a.code_or(if a.throttle { "Throttled" } else { azemu_core::FaultAnswer::default_code(status) });
+        let message = a.message_or(if a.throttle {
+            "Request was throttled. Retry the request after the time in the Retry-After header."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let mut resp = azemu_core::json_error::response(status, &code, &message);
+        if let Some(s) = a.retry_after_secs() {
+            if let Ok(v) = azemu_core::http::HeaderValue::from_str(&s.to_string()) {
+                resp.headers_mut().insert(azemu_core::http::header::RETRY_AFTER, v);
+            }
+        }
+        auth::finish(resp, req)
+    }
+
     async fn handle(&self, req: Request) -> Response {
+        let strict_auth = self.auth.read().clone();
         let resp = match auth::precheck(&req) {
             Some(r) => r,
-            None => {
-                let r = router::route(self, &req).await;
-                // after the change is made: a save that sees the new number also sees the change
-                if changes_state(&req) {
-                    self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // strict mode: the bearer token and the role (or the access policy) come before the operation (`strict.rs`)
+            None => match strict::gate(&strict_auth, &req) {
+                Some(refused) => refused,
+                None => {
+                    let r = router::route(self, &req).await;
+                    // after the change is made: a save that sees the new number also sees the change
+                    if changes_state(&req) {
+                        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    r
                 }
-                r
-            }
+            },
         };
         let resp = auth::finish(resp, &req);
         let sink = self.sink.read().clone();
@@ -86,6 +126,10 @@ impl Service for KeyVaultService {
             events::after(sink.as_ref(), &req, &resp);
         }
         resp
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        self.inspect_node(req)
     }
 
     fn reset(&self) {

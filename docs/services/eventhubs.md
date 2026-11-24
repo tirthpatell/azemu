@@ -9,7 +9,11 @@ endpoint (`docs/services/kafka.md`): a Kafka topic is an event hub, offsets are 
 TLS), `sb://eventhub:5672` from a container that has the network alias `eventhub`. Kafka: port 9093 or the gateway port. An event hub must be created
 first (admin API `PUT /_azemu/eventhubs/{ns}/hubs/{hub}`, a config file, ARM, or `--lenient`); a namespace needs no creation.
 
-**Not built.** Schema Registry, Capture, geo-disaster recovery, clusters, the ATOM/XML HTTP management API (501), AMQP transactions (the attach is refused,
+**Schema Registry.** The REST API of the namespace's schema registry (`/$schemaGroups` on the namespace host: register, read by id and version, `get-id`, versions, `DELETE`, Avro compatibility
+checks in Forward and Backward mode, Avro, Json, custom and Protobuf schemas) is built: [`schema-registry.md`](schema-registry.md). Groups are made as on Azure, outside that API: the admin API
+(`PUT /_azemu/eventhubs/{ns}/schemagroups/{group}`), the config file (`SchemaGroups`), Resource Manager (`Microsoft.EventHub/namespaces/schemagroups`) or `--lenient`.
+
+**Not built.** Capture, geo-disaster recovery, clusters, the ATOM/XML HTTP management API (501), AMQP transactions (the attach is refused,
 as Azure does), idempotent and partitioned producer bookkeeping (accepted, ignored), authentication, rights and throughput limits. Retention is limited
 to 512 MiB per hub.
 
@@ -91,7 +95,7 @@ Event hubs with N partitions (`"0"`..`"N-1"`), consumer groups (`$Default` alway
   https://aka.ms/sbResourceMgrExceptions. TrackingId:..."); management reads answer status 404; a Kafka client gets
   `UNKNOWN_TOPIC_OR_PARTITION` (`docs/services/kafka.md`; but see the Kafka endpoint below: it makes the hub for a producer and an admin client, as Azure does). **A consumer group nobody created is not an error:** a receiver on it gets the events and
   the group is not added to the hub's list (a real Standard namespace did so; checked in November 2026, not on other tiers). Create the hub first, as a team does against Azure: the admin API
-  below (`curl -X PUT http://localhost:4577/_azemu/eventhubs/myns/hubs/orders -d '{"partitionCount":4,"consumerGroups":["workers"]}'`),
+  below (`curl -X PUT http://localhost:4577/_azemu/eventhubs/myns/hubs/orders -H 'Content-Type: application/json' -d '{"partitionCount":4,"consumerGroups":["workers"]}'`),
   the config file below, or ARM (Terraform `azurerm_eventhub`). **Namespaces are different:** the emulator has no way to create a
   namespace outside ARM, so any namespace name works; the first hub or the config file is what makes the name an Event Hubs
   namespace for the shared AMQP port (see the section above).
@@ -103,10 +107,10 @@ Event hubs with N partitions (`"0"`..`"N-1"`), consumer groups (`$Default` alway
 - **Config file** (`AZEMU_EVENTHUBS_CONFIG=/path/Config.json`), loaded at start and after every reset, in Microsoft's
   Event Hubs emulator format: `UserConfig.NamespaceConfig[]` (`Name`, optional `Type: "EventHub"`) with `Entities[]`
   (`Name`, `PartitionCount` as number or string, `ConsumerGroups[].Name`). Ours on top: `MessageRetentionInDays`,
-  `MessageRetentionInSeconds`. When the file names exactly one namespace, `default` is an alias of it (`sb://localhost` reaches it, as
+  `MessageRetentionInSeconds`, and `SchemaGroups[]` in a namespace (`Name`, `SchemaType`, `SchemaCompatibility`: [`schema-registry.md`](schema-registry.md)). When the file names exactly one namespace, `default` is an alias of it (`sb://localhost` reaches it, as
   with Microsoft's emulator, which ignores the host). If a Service Bus config also names one namespace, the alias is
   claimed by both and `localhost` goes to Event Hubs.
-- **Admin API** `/_azemu/eventhubs` (JSON):
+- **Admin API** `/_azemu/eventhubs` (JSON; from a browser a body with any `Content-Type` but `application/json` is a `415`):
 
 | Request | Result |
 |---|---|
@@ -116,6 +120,7 @@ Event hubs with N partitions (`"0"`..`"N-1"`), consumer groups (`$Default` alway
 | `GET`, `DELETE .../hubs/{hub}` | read (200) / delete (204; receivers are detached with `amqp:not-found`) |
 | `GET .../hubs/{hub}/partitions[/{n}]` | `beginSequenceNumber`, `lastEnqueuedSequenceNumber`, `lastEnqueuedOffset`, `lastEnqueuedTimeUtc`, `isEmpty`, `eventCount`, `sizeBytes`, `totalEventsReceived` |
 | `GET .../hubs/{hub}/consumergroups`, `PUT/GET/DELETE .../consumergroups/{cg}` | consumer groups (`$Default` cannot be deleted) |
+| `GET .../schemagroups`, `PUT/GET/DELETE .../schemagroups/{group}` | Schema Registry groups (body `{"schemaType":"Avro","schemaCompatibility":"Forward","groupProperties":{}}`; [`schema-registry.md`](schema-registry.md)) |
 
   Anything else under the prefix is 501 naming the request. The real ATOM/XML management API
   (`https://ns.eventhub.localhost:{port}/{hub}?api-version=...`) is **not built**: 501 `NotImplemented`.
@@ -162,8 +167,10 @@ is a matter of tier, it says so.
 
 - **Credentials are not checked.** Azure answers a bad key, an unknown key name, an expired SAS and a SAS for another event hub with 401 `com.microsoft:auth-failed`
   at `$cbs` ("InvalidSignature: The token has an invalid signature.", "ExpiredToken: The token is expired. ...", "InvalidAudience: The authorization header contains a
-  token with a wrong audience."; a SAS for the whole namespace is accepted). The emulator knows no keys and accepts every credential, on purpose. Microsoft Entra tokens
-  were not tried against Azure.
+  token with a wrong audience."; a SAS for the whole namespace is accepted). The emulator knows no keys and accepts every credential, on purpose, unless `--strict-auth` is on: then the keys, the rights, the expiry and the roles of
+  Entra tokens are checked as Azure answered in November 2026 ([`../strict-auth.md`](../strict-auth.md)): a bad credential at `$cbs`, a missing `Send` or `Listen` claim at the link
+  attach (the partition of a consumer group in lower case), a principal with no role with a 401 inside the answer to the `$management` read. Rules come from Resource Manager (keys
+  from `listKeys`), the config file (`AuthorizationRules`), or `/_azemu/eventhubs/{ns}/authorization-rules`; any other namespace has `RootManageSharedAccessKey` with the key `SAS_KEY_VALUE`.
 - **Partition keys** go to the partition the Event Hubs service chooses, which is **not** the one Microsoft's SDKs use for their buffered producers. Worked out from
   where about 600 keys went on event hubs with 2 to 32 partitions (the rule fits every sample): the key is cut to ASCII (a character that is not ASCII, per UTF-16 unit,
   becomes `?`) and put in upper case (`a` and `A` go together), hashed with Bob Jenkins' lookup3 (`hashlittle2`, both seeds 0), the two result words XOR-ed make a 32-bit number, and its remainder modulo 32767
@@ -185,7 +192,7 @@ is a matter of tier, it says so.
 - **Transports.** Azure serves AMQP in TLS on port 5671 and AMQP over WebSocket on 443. On port 5672 it answers a header without SASL with `AMQP\x02\x01\x00\x00` (TLS required) and offers the mechanisms `MSSBCBS`, `PLAIN`, `ANONYMOUS`,
   `EXTERNAL` after a SASL header (the emulator offers the same four). It does not answer on `ws://` port 80; the emulator serves plain `ws://` (`docs/services/websocket.md`).
 - AMQP sessions whose `incoming-window` is 2^31 or more (the Rust SDK uses 2^32-1) work; windows, credits and ids are unsigned and wrap (`crates/amqp`).
-- No rights, no per-namespace throughput limits (throttling), no Capture, Schema Registry (Kafka: `docs/services/kafka.md`). Idempotent and partitioned AMQP producer bookkeeping is accepted and ignored.
+- No rights, no per-namespace throughput limits (throttling), no Capture (Kafka: `docs/services/kafka.md`; Schema Registry: `docs/services/schema-registry.md`, which lists its own differences). Idempotent and partitioned AMQP producer bookkeeping is accepted and ignored.
 - A hub made by auto-creation (opt-in) has 4 partitions (Azure requires the hub to exist). Microsoft's emulator has one fixed namespace and
   needs a config file; here namespaces appear when the first hub is made.
 - Partition count cannot change after creation; no partition scaling, no compaction.
@@ -206,10 +213,11 @@ Behaviour that was a guess in earlier versions and was compared with a real Stan
 `begin_sequence_number` -1, `last_enqueued_sequence_number` -1, offset `"-1"` and 0001-01-01; `georeplication_factor` is 1; the epoch fields of a partition are -1; a lower owner level is refused, an equal one takes over, a
 receiver without a level is refused next to one with a level; five receivers without a level, the sixth is refused; the 1 MiB link limit and its text; `$Default` and the case of group names;
 max 32 partitions and 1 partition allowed on Standard. Not tried: Premium and Dedicated, other regions, expiry of events (retention is at least a day), throttling, Entra tokens, the HTTP APIs.
+- **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled send, connection or receiving link is refused with `com.microsoft:server-busy`. The Kafka endpoint takes `latency`, `drop` and `timeout` rules only.
 
 ## Reset
 
-`POST /_azemu/reset` empties everything (hubs, events, Kafka groups and offsets) and loads the config file again.
+`POST /_azemu/reset` empties everything (hubs, events, Kafka groups and offsets, schema groups and schemas) and loads the config file again.
 `POST /_azemu/reset?service=eventhubs&account=<namespace>` empties that namespace only: its hubs and events go, receivers waiting there are
 woken so each learns that its hub is gone, its Kafka groups and committed offsets end, the config file's hubs for it come back, and other
 namespaces are untouched. `Shared::reset_namespace(name)` is the same in Rust. The `kafka` service answers the same request (it has no

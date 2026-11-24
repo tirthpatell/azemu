@@ -13,6 +13,8 @@ pub struct SigningKey {
     pub kid: String,
     n: Vec<u8>,
     e: Vec<u8>,
+    /// How many tokens this key has signed since the program started (shown by the inspector).
+    pub signed: std::sync::atomic::AtomicU64,
 }
 
 impl SigningKey {
@@ -24,7 +26,7 @@ impl SigningKey {
         let n = key.n_bytes().to_vec();
         let e = key.e_bytes().to_vec();
         let kid = b64(&Sha256::digest(&n)[..21]);
-        Ok(SigningKey { key, kid, n, e })
+        Ok(SigningKey { key, kid, n, e, signed: Default::default() })
     }
 
     /// The private key as numbers, for `persist.rs`.
@@ -56,7 +58,7 @@ impl SigningKey {
         let n = key.n_bytes().to_vec();
         let e = key.e_bytes().to_vec();
         let kid = b64(&Sha256::digest(&n)[..21]);
-        let k = SigningKey { key, kid, n, e };
+        let k = SigningKey { key, kid, n, e, signed: Default::default() };
         // a key that cannot sign is no key
         k.sign_rs256(b"azemu").map_err(|e| format!("the RSA key cannot sign: {e}"))?;
         Ok(k)
@@ -66,6 +68,11 @@ impl SigningKey {
     pub fn sign_rs256(&self, message: &[u8]) -> Result<Vec<u8>, String> {
         let digest = Sha256::digest(message);
         self.key.pkcs1v15_sign_prehash::<sha2::Sha256>(&digest).map_err(|e| format!("signing failed: {e}"))
+    }
+
+    /// Does `sig` verify over the SHA-256 digest of a message? (RSASSA-PKCS1-v1_5 with SHA-256.)
+    pub fn verify_rs256(&self, digest: &[u8], sig: &[u8]) -> bool {
+        self.key.to_public_key().pkcs1v15_verify_prehash::<sha2::Sha256>(digest, sig).is_ok()
     }
 
     /// The public key as a JWK, the way Entra lists it in its key set.

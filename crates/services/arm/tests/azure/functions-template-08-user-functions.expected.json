@@ -1,0 +1,17 @@
+{
+ "described": "Evie is 5",
+ "flagged": false,
+ "greeting": "hello",
+ "insideLambda": [
+  "0001",
+  "0022"
+ ],
+ "insideVariable": "09",
+ "otherNamespace": "abab",
+ "padded": "007",
+ "summed": 10,
+ "upperNamespaceCall": "01",
+ "wrapped": {
+  "wrapped": "x"
+ }
+}

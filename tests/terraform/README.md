@@ -1,7 +1,7 @@
 # Terraform tests for azemu
 
-Runs the `azurerm` Terraform provider against the emulator's Resource Manager, one case at a time (`cases/`): `base` (resource group, storage), `servicebus`,
-`eventhubs`, `keyvault`, `appconfig`, `cosmos`, `eventgrid` and `template` (a template deployment). For each case `run.py` starts the emulator on a free port,
+Runs the `azurerm` Terraform provider against the emulator's Resource Manager, one case at a time (`cases/`): `base` (resource group, storage), `servicebus` (with a queue authorization rule whose connection string the check uses; with `AZEMU_STRICT_AUTH=1` the key must be the one Resource Manager handed out and the rule may not receive),
+`eventhubs`, `keyvault`, `appconfig`, `cosmos`, `eventgrid`, `authz` (role assignments, `azurerm_role_assignment` and the Cosmos DB one; also run with `AZEMU_STRICT_AUTH=1`), `insights` (a Log Analytics workspace and an Application Insights component whose connection string the check sends an event with), `shares` (Azure Files shares in both forms, a directory and a file) and `template` (a template deployment). For each case `run.py` starts the emulator on a free port,
 runs `terraform init`, `apply`, a second `plan -detailed-exitcode` (it must report no changes), checks with the data-plane SDKs that the resources exist and work, runs
 `terraform destroy`, and checks that nothing is left. `provider.tf` shows the provider block to copy into your own configuration (see also the README).
 

@@ -1,5 +1,6 @@
 //! Produce: record batches into partitions.
 
+use azemu_core::auth::sas::Claim;
 use azemu_kafka::api::err;
 use azemu_kafka::records::{self, RecordsError};
 use azemu_kafka::{Struct, Value};
@@ -28,9 +29,19 @@ impl Broker {
         for t in b.structs("TopicData") {
             let topic = t.str("Name").unwrap_or("");
             let mut parts = Vec::new();
+            // strict authorisation: sending needs `Send`; a connection with no right at all in the namespace is closed after the answer
+            let denied = !self.may(c, topic, Claim::Send);
+            if denied {
+                self.log_refused(c, "produce", topic, Claim::Send);
+                if !self.may(c, topic, Claim::Listen) && !self.has_any_right(c) {
+                    c.close_after.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
             for p in t.structs("PartitionData") {
                 let idx = p.i32("Index");
-                let (code, base) = if !(-1..=1).contains(&acks) {
+                let (code, base) = if denied {
+                    (err::TOPIC_AUTHORIZATION_FAILED, -1)
+                } else if !(-1..=1).contains(&acks) {
                     (err::INVALID_REQUIRED_ACKS, -1)
                 } else if transactional {
                     (err::INVALID_TXN_STATE, -1)

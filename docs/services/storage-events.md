@@ -9,9 +9,8 @@ same way (smaller; see the end).
 ARM (`Microsoft.EventGrid/systemTopics/eventSubscriptions`, Terraform `azurerm_eventgrid_event_subscription`). It works in the `azemu` binary only: the
 standalone `azemu-blob` and `azemu-eventgrid` are not connected to each other.
 
-**Not built.** See "Not built" below: events for snapshots, versions, Set Blob Metadata, Put Page and Append Block, one event per child of a recursively deleted
-directory, SFTP, lifecycle and inventory events; Key Vault certificate and expiry events; delivery with a managed identity, dead-lettering to a blob container,
-batching, Azure Functions and Relay destinations.
+**Not built.** See "Not built" below: one event per child of a recursively deleted directory, SFTP, lifecycle and inventory events; Key Vault certificate and expiry events;
+batching and Relay destinations. Which Blob operations raise events was **checked against a real storage account in November 2026** (below): everything that raised nothing there raises nothing here.
 
 ## How to use it
 
@@ -23,10 +22,10 @@ batching, Azure Functions and Relay destinations.
 ```bash
 # to a webhook
 curl -X PUT localhost:4577/_azemu/eventgrid/sources/storage/myaccount/subscriptions/hook \
-  -d '{"webhookUrl":"http://localhost:7071/api/hook"}'
+  -H 'Content-Type: application/json' -d '{"webhookUrl":"http://localhost:7071/api/hook"}'
 
 # to a Storage queue (same account here), only new blobs under "inbox/", as CloudEvents
-curl -X PUT localhost:4577/_azemu/eventgrid/sources/storage/myaccount/subscriptions/toq -d '{
+curl -X PUT localhost:4577/_azemu/eventgrid/sources/storage/myaccount/subscriptions/toq -H 'Content-Type: application/json' -d '{
   "destination": {"endpointType":"StorageQueue","storageAccount":"myaccount","queueName":"blob-events"},
   "deliverySchema": "CloudEventSchemaV1_0",
   "filter": {"includedEventTypes":["Microsoft.Storage.BlobCreated"],
@@ -81,16 +80,19 @@ Envelope (Event Grid schema): `id` (UUID), `topic`, `subject`, `eventType`, `eve
 
 | Event | Raised by (`data.api`) | `dataVersion` | `data` fields |
 |---|---|---|---|
-| `Microsoft.Storage.BlobCreated` | Put Blob (`PutBlob`), Put Blob From URL (`PutBlobFromUrl`, name assumed), Put Block List (`PutBlockList`), Copy Blob that finished (`CopyBlob`) | `""` | `api`, `clientRequestId`, `requestId`, `eTag`, `contentType`, `contentLength`, `blobType`, `accessTier`, `url`, `sequencer`, `storageDiagnostics` |
-| `Microsoft.Storage.BlobDeleted` | Delete Blob of the base blob (`DeleteBlob`) | `""` | `api`, `clientRequestId`, `requestId`, `contentType`, `blobType`, `url`, `sequencer`, `storageDiagnostics` |
-| `Microsoft.Storage.BlobTierChanged` | Set Blob Tier (`SetBlobTier`) | `""` | `api`, `clientRequestId`, `requestId`, `contentType`, `contentLength`, `blobType`, `accessTier`, `previousTier` (only when the blob had an explicit tier), `url`, `sequencer`, `storageDiagnostics` |
-| `Microsoft.Storage.AsyncOperationInitiated` | Set Blob Tier out of Archive (answer 202, rehydration pending) | `""` | as BlobTierChanged without `accessTier` and `previousTier` |
+| `Microsoft.Storage.BlobCreated` | Put Blob of any blob type (`PutBlob`; an append blob or page blob too, with `blobType` and its `contentLength`: 0, or the declared size), Put Blob From URL (`PutBlobFromUrl`, name assumed), Put Block List (`PutBlockList`), Copy Blob that finished (`CopyBlob`) | `""` | `api`, `clientRequestId`, `requestId`, `eTag`, `contentType`, `contentLength`, `blobType`, `accessTier`, `url`, `sequencer`, `storageDiagnostics` |
+| `Microsoft.Storage.BlobDeleted` | Delete Blob of the base blob (`DeleteBlob`), with or without `x-ms-delete-snapshots: include` | `""` | `api`, `clientRequestId`, `requestId`, `eTag`, `contentType`, `contentLength`, `blobType`, `url`, `sequencer`, `storageDiagnostics` |
+| `Microsoft.Storage.BlobTierChanged` | Set Blob Tier (`SetBlobTier`); not in the default set | `""` | `api`, `clientRequestId`, `requestId`, `eTag`, `contentType`, `contentLength`, `blobType`, `accessTier`, `previousTier` (only when the blob had an explicit tier), `url`, `sequencer`, `storageDiagnostics` |
+| `Microsoft.Storage.AsyncOperationInitiated` | Set Blob Tier out of Archive (answer 202, rehydration pending); not in the default set | `""` | as BlobTierChanged without `accessTier` and `previousTier` |
 | `Microsoft.Storage.BlobCreated` (Data Lake) | Create path, file (`CreateFile`); Flush with `close=true` (`FlushWithClose`) | `"2"` | as BlobCreated plus `contentOffset` (0 for `CreateFile`, the `position` for `FlushWithClose`); `url` on the `dfs` host |
-| `Microsoft.Storage.BlobDeleted` (Data Lake) | Delete path, file (`DeleteFile`) | `"2"` | `api`, `clientRequestId`, `requestId`, `contentType`, `blobType`, `url` (dfs), `sequencer`, `storageDiagnostics` |
+| `Microsoft.Storage.BlobDeleted` (Data Lake) | Delete path, file (`DeleteFile`) | `"2"` | `api`, `clientRequestId`, `requestId`, `contentType`, `blobType`, `url` (dfs), `sequencer`, `storageDiagnostics` (not tried on Azure: no `eTag` or `contentLength`, unlike the blob endpoint) |
 | `Microsoft.Storage.BlobRenamed` | Rename path, file (`RenameFile`); subject is the new name | `"1"` | `api`, `clientRequestId`, `requestId`, `destinationBlobUrl`, `sourceBlobUrl`, `destinationUrl`, `sourceUrl`, `sequencer`, `storageDiagnostics` |
 | `Microsoft.Storage.DirectoryCreated` | Create path, directory (`CreateDirectory`) | `"1"` | `api`, `clientRequestId`, `requestId`, `eTag`, `blobUrl`, `url` (dfs), `sequencer`, `storageDiagnostics` |
 | `Microsoft.Storage.DirectoryRenamed` | Rename path, directory (`RenameDirectory`) | `"1"` | as BlobRenamed |
 | `Microsoft.Storage.DirectoryDeleted` | Delete path, directory (`DeleteDirectory`) | `"1"` | `api`, `clientRequestId`, `requestId`, `blobUrl`, `url` (dfs), `recursive` (the string `"true"` / `"false"`), `sequencer`, `storageDiagnostics` |
+
+Of these events only `BlobCreated` and `BlobDeleted` are in the default set ("The default set of event types" above); a subscription has to name the others (`BlobTierChanged`,
+`AsyncOperationInitiated`, `DirectoryCreated`, `DirectoryDeleted`, `BlobRenamed`, `DirectoryRenamed`). The Data Lake rows were not tried on Azure (that account has no subscription).
 
 `dataVersion` values are those of the Learn examples (`""` on the blob endpoint, `"2"` for Data Lake file create and
 delete, `"1"` for the other Data Lake events). A request that renames a path onto itself raises nothing.
@@ -100,8 +102,8 @@ Where the sources disagree, and what was followed:
 * `accessTier` on `BlobCreated`: required in `Storage.tsp` and in the spec example, in the Learn CloudEvents example, absent
   from the Learn Event Grid example and from the property table ("Appears only for the event BlobTierChanged"). Sent, with
   the blob's explicit tier or `"Default"`. Not sent on `BlobDeleted` (not in the model).
-* `eTag` and `contentLength` on `BlobDeleted`, `eTag` on `BlobTierChanged`: in the spec's example JSON, not in `Storage.tsp`
-  and not in Learn. Not sent.
+* `eTag` and `contentLength` on `BlobDeleted`: in the spec's example JSON, not in `Storage.tsp` and not in Learn. **Azure sent both** for Delete Blob (November 2026), so the blob endpoint sends
+  both (the Data Lake delete does not: not tried). `eTag` is in `BlobTierChanged` and `AsyncOperationInitiated` too: not in the sources either, Azure sent it.
 * `DirectoryCreated`: `Storage.tsp` has `eTag`, the spec example also has `directoryProperties` (an ACL list) and `blobUrl`,
   Learn has neither. `eTag` and `blobUrl` are sent; `directoryProperties` is not (its `acl.access` is written in an
   abbreviated form no document explains).
@@ -111,6 +113,38 @@ Where the sources disagree, and what was followed:
 * Not given by any source, so chosen here: `id` is a random UUID (Azure's looks like the request id); `sequencer` format;
   the batch id.
 
+## The default set of event types
+
+A subscription on a storage account that names no `includedEventTypes` gets only the default set of the account's topic type: `Microsoft.Storage.BlobCreated` and `Microsoft.Storage.BlobDeleted`. The other types
+(`BlobTierChanged`, `AsyncOperationInitiated`, `DirectoryCreated`, `DirectoryDeleted`, `BlobRenamed`, `DirectoryRenamed`, `BlobInventoryPolicyCompleted`, `LifecyclePolicyCompleted`) are delivered only when the subscription lists them,
+as on Azure (Microsoft's event type list for `Microsoft.Storage.StorageAccounts` marks just those two as default). The emulator does the same for subscriptions on a storage account, by the admin API,
+the config file and ARM. **Key Vault and App Configuration sources, and custom topics, get every event** when no types are named: no default set for them was found in Microsoft's documentation.
+Add the types you want to `includedEventTypes`, for example `["Microsoft.Storage.BlobCreated", "Microsoft.Storage.BlobTierChanged"]`.
+
+## Which operations raise an event (checked against Azure in November 2026)
+
+A system topic on a storage account sent every one of its event types to a Storage queue; each operation below was done once (or more) on a blob in a new container, and the queue was read for several minutes. The account had
+soft delete off. (The first try named no event types, so the queue got only the default set and the tier events were missed; the second try named all ten and got them.)
+
+| Operation | What came |
+|---|---|
+| Put Blob (block blob; overwrite of an existing blob too) | `BlobCreated`, `api` `PutBlob` |
+| Put Blob, append blob; Put Blob, page blob | `BlobCreated`, `api` `PutBlob`, `blobType` `AppendBlob` with `contentLength` 0, `PageBlob` with the declared size |
+| Put Block List | `BlobCreated`, `api` `PutBlockList` |
+| Copy Blob (to a new blob, from a SAS URL) | `BlobCreated`, `api` `CopyBlob`, the content type of the source |
+| Delete Blob (also with `x-ms-delete-snapshots: include` for a blob with snapshots) | `BlobDeleted`, `api` `DeleteBlob`, with `eTag` and `contentLength` |
+| Create Container, Set Container Metadata, Delete Container | nothing (no event type exists for them) |
+| Snapshot Blob, Delete Blob of a snapshot, Delete Blob with `x-ms-delete-snapshots: only` | nothing |
+| Set Blob Metadata, Set Blob Properties, Set Blob Tags | nothing |
+| Set Blob Tier (to Cool, to Hot, to Archive) | `BlobTierChanged`, `api` `SetBlobTier`; `eTag`, `contentType`, `contentLength`, `blobType`, `accessTier`, `previousTier` (when the blob had an explicit tier; absent for the first change), `url` |
+| Set Blob Tier out of Archive (answer 202) | `AsyncOperationInitiated`, `api` `SetBlobTier`; `eTag`, `contentType`, `contentLength`, `blobType`, `url` (no `accessTier`, no `previousTier`) |
+| Put Block, Append Block, Put Page, Clear Pages | nothing |
+| Lease (acquire, release) | nothing |
+| Undelete Blob | not tried: soft delete is off on the account, the answer was 404 |
+
+The fields of these events are in the first table (`crates/services/blob/tests/events.rs` checks them). Differences that remain: Azure's `id` looks like a request id, the `url` has `core.windows.net`, the
+`sequencer` is another string, `requestId` and `batchId` are Azure's. An event of a blob written by Event Grid itself as a dead letter is not raised here (Azure raises one; `docs/services/eventgrid.md`, "Dead letters as blobs").
+
 ## Destinations
 
 How a message looks in each destination (details and sources in `docs/services/eventgrid.md`, "Destinations"):
@@ -119,13 +153,14 @@ How a message looks in each destination (details and sources in `docs/services/e
 |---|---|
 | Webhook | `POST` of a JSON array with the event (Event Grid schema) or the event itself (CloudEvents), `aeg-*` headers |
 | Storage queue | the event JSON (one event), base64 encoded, as the message text; time to live 7 days by default, `queueMessageTimeToLiveInSeconds` (`-1`: never) |
-| Service Bus queue / topic | body = event JSON, `content-type` `application/json`, `MessageId` = event id, `aeg-*` application properties |
-| Event hub | body = event JSON, content type, `aeg-*` application properties; partition chosen round robin |
+| Service Bus queue / topic | body = event JSON, `content-type` `application/json; charset=utf-8`, `MessageId` = event id (or the mapped one), `aeg-*` application properties, delivery properties (`SessionId`, `PartitionKey`, …) |
+| Event hub | body = event JSON, content type, `aeg-*` application properties; partition chosen round robin, or from the mapped `PartitionKey` |
+| Azure Function | the call a webhook gets, to the Functions host the emulator was told about (`docs/services/eventgrid.md`, "Azure Function destinations") |
 
 The queue, topic or hub has to exist. Delivery uses the retry and dead-letter rules of the subscription
 (`retryPolicy`); a missing entity is retried and then dead-lettered (`GET …/deadletters`, `GET …/deliveries`).
 
-The wiring is in `crates/azemu/src/main.rs`: `BlobService::set_event_sink`, `KeyVaultService::set_event_sink`,
+The wiring is in `crates/azemu/src/lib.rs`: `BlobService::set_event_sink`, `KeyVaultService::set_event_sink`,
 `AppConfigService::set_event_sink` send events to `EventGridService::raise_source_event`; the destinations are registered with
 `EventGridService::register_destination` and call `QueueService::enqueue_base64`, `servicebus::Shared::enqueue_message` and
 `eventhubs::Shared::enqueue_event` (new `enqueue.rs` files in those crates; no existing code changed).
@@ -147,17 +182,15 @@ Subscribe with `/sources/keyvault/{vault}/subscriptions/{sub}` or `/sources/appc
 ## Not built
 
 * Storage: `AsyncOperationInitiated` / `BlobCreated` for Copy Blob on a hierarchical namespace that does not finish at once
-  (copies here finish at once); events for blob snapshots, versions, Undelete, Append Block, Put Page, Set Blob Metadata /
-  Properties / Tags, container operations, immutability and legal hold changes; one event per child of a recursively deleted
+  (copies here finish at once); events for versions, Undelete (not tried on Azure: soft delete was off), immutability and legal hold changes (not tried); one event per child of a recursively deleted
   or renamed directory (one `DirectoryDeleted` / `DirectoryRenamed` only); `directoryProperties`; SFTP events; lifecycle,
-  inventory and storage task events; `BlobCreated` for `AppendBlock` and `FlushWithClose` without `close`.
-  Delete of a snapshot or a version, and Delete Blob with `x-ms-delete-snapshots: only`, raise nothing (the docs list
-  only `DeleteBlob` of the blob).
+  inventory and storage task events; `BlobCreated` for `FlushWithClose` without `close`.
+  Snapshots, Set Blob Metadata / Properties / Tags, Append Block, Put Page, leases and container operations raise nothing, as on Azure
+  (table above); Delete of a snapshot or a version, and Delete Blob with `x-ms-delete-snapshots: only`, raise nothing.
 * Events of the `$logs` and `$blobchangefeed` containers are not raised (Learn).
 * Key Vault: certificate events, near-expiry and expiry events, `VaultAccessPolicyChanged`. App Configuration: snapshot events,
   lock / unlock.
-* Event Grid: delivery properties (`MessageId` from event data, `SessionId`, `PartitionKey`, static headers), delivery with
-  managed identity, dead-letter to a blob container, batching, Azure Functions and Relay destinations.
+* Event Grid: batching and Relay destinations.
 * Standalone binaries: `azemu-blob` has the event hook but nothing listens; `azemu-eventgrid` refuses Storage queue, Service
   Bus and Event Hubs destinations with 501.
 * Storage queue message encoding: no Microsoft page states that the message is base64 encoded or a single event rather than an

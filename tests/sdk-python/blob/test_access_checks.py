@@ -94,6 +94,39 @@ def test_a_page_on_another_site_cannot_reset_or_read_the_admin_paths(emu, raw, s
         assert status == 200, headers
 
 
+def test_an_older_browser_cannot_add_a_fault_rule_from_a_page_on_a_public_address(emu, raw):
+    """No `Sec-Fetch-Site` (Safari before 16.4, Firefox before 90): only `Origin` says where the page is from. A page on a public IP address
+    is another site, and a form or `text/plain` body is what a page may send without asking first."""
+    rule = json.dumps({"service": "blob", "path": "/never-matched/*", "fault": {"kind": "drop"}}).encode()
+    port = emu.port
+    for origin in ("http://203.0.113.9", "https://198.51.100.7:8443", "http://[2001:db8::1]"):
+        for content_type in ("text/plain", "application/x-www-form-urlencoded", "application/json"):
+            status, _, body = raw("POST", "/_azemu/faults", f"localhost:{port}", {"Origin": origin, "Content-Type": content_type}, rule)
+            assert status == 403, (origin, content_type, body)
+            assert json.loads(body)["error"]["code"] == "CrossSiteRequestRefused"
+    # a browser that sends a body without saying it is JSON is refused even when nothing says where its page is from (a page cannot send
+    # JSON, or change its User-Agent, without asking first)
+    browser = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:68.0) Gecko/20100101 Firefox/68.0"
+    for content_type in ("text/plain", "application/x-www-form-urlencoded", None):
+        headers = {"User-Agent": browser}
+        if content_type:
+            headers["Content-Type"] = content_type
+        status, _, body = raw("POST", "/_azemu/faults", f"localhost:{port}", headers, rule)
+        assert status == 415, (content_type, body)
+        assert json.loads(body)["error"]["code"] == "UnsupportedMediaType"
+        assert "application/json" in json.loads(body)["error"]["message"]
+    assert json.loads(raw("GET", "/_azemu/faults", f"localhost:{port}")[2])["rules"] == []
+    # a program that is not a browser is not held to that: `curl -d` sends a form type
+    status, _, body = raw("POST", "/_azemu/faults", f"localhost:{port}", {"User-Agent": "curl/8.5.0", "Content-Type": "application/x-www-form-urlencoded"}, rule)
+    assert status == 201, body
+    rule_id = json.loads(body)["id"]
+    assert raw("DELETE", f"/_azemu/faults/{rule_id}", f"localhost:{port}")[0] == 200
+    # a page of the developer's own network, and a program, may
+    status, _, body = raw("POST", "/_azemu/faults", f"localhost:{port}", {"Origin": "http://192.168.1.20:3000", "Content-Type": "application/json"}, rule)
+    assert status == 201, body
+    raw("DELETE", "/_azemu/faults", f"localhost:{port}")
+
+
 def test_a_cross_site_service_request_needs_a_cors_rule_for_its_origin(emu, raw, service, container, sas):
     container.upload_blob("page.txt", b"hello")
     path = f"/{container.container_name}/page.txt?{sas}"

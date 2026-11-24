@@ -4,6 +4,151 @@ All notable changes to azemu are written here, newest first. The version is the 
 `azemu --version` prints it with the commit the binary was built from. The project follows [Semantic Versioning](https://semver.org/),
 with the usual allowance for versions below 1.0: a minor version may change a flag, a setting or the answer of an endpoint.
 
+## 0.3.0
+
+Six things an emulator of Azure usually cannot do, all off or out of the way until asked for: **faults on request** (throttling, errors, latency, dropped connections), a **strict authorisation mode**
+(role assignments, Key Vault access policies, Service Bus and Event Hubs key rights and expiry, with Azure's own refusals), an **inspector** (a read-only API and a web page over the state of every service),
+and three services that were missing: **Azure Files** (the REST API), a **sink for Application Insights and Azure Monitor telemetry**, and the **Event Hubs Schema Registry**. Event Grid and Resource Manager
+templates gained what was listed as not built. As in 0.2.0, what could be compared with a real Azure subscription was compared (November 2026), and each page says what was and what was not.
+
+**Three answers changed to the ones Azure gave, and a test that relied on the old ones can fail:**
+
+- An Event Grid subscription on a storage account that names no event types receives only `BlobCreated` and `BlobDeleted` (it received every event before). Name the others in `includedEventTypes`.
+- In Resource Manager templates `equals`, `contains`, `distinct`, `union` and `intersection` compare strings with case, as Azure does (they ignored case before), and a number with a fraction in an expression is refused.
+- An event that Event Grid delivers to a Service Bus queue, a topic or an event hub has the content type `application/json; charset=utf-8` (was `application/json`).
+
+Three new names are in the ready line and in `GET /_azemu/health`: `monitor` and `file` (standard ports 10015 and 10004) and `auth` (the role registry behind strict authorisation; it has no port of its own). A program that reads the list of services, or that uses those ports for something else next to `--standard-ports`, will notice.
+
+### Added
+
+- **Faults**: rules that make the emulator misbehave on purpose, so that retry and back-off code runs. Off until a rule is added: `POST /_azemu/faults` adds one, `PUT` replaces the
+  list, `DELETE` removes (`/_azemu/faults/{id}` one), `GET` lists them with how often each fired, and a full `POST /_azemu/reset` removes the ones added through the API. `--faults
+  <file>` (`AZEMU_FAULTS`) holds rules that exist from the start and come back after a reset. A rule matches on service, account, method, path pattern, query, and (Service Bus,
+  Event Hubs, Kafka) operation, with `probability`, `skip` and `times`, and does one of: `throttle` (each service's own answer: Blob, Queue, Table and Data Lake `503 ServerBusy`; Cosmos DB
+  `429` with `x-ms-retry-after-ms` and sub status 3200; Key Vault, App Configuration, Event Grid, Resource Manager `429`; AMQP `com.microsoft:server-busy`), `error` (a status, code and
+  message of your own), `latency`, `drop` (close the connection), `timeout` (never answer), and for Cosmos DB `ruBudget` (a 429 once the request charges of the second are used up). A rule
+  with a mistake in it is a 400 that says which; a rule is small (a path, query or account of at most 1024 bytes, a message of 2048, 8 headers) and a pattern is matched in one pass. A wait on an AMQP or Kafka connection ends when the client leaves. The request log says `fault=throttle rule=3` and an answer made by a rule carries `x-azemu-fault`. Tried with the Python, Go and Rust SDKs
+  for Blob, Cosmos DB and others, and the Python SDKs for Queue, Table, Key Vault, App Configuration and Service Bus: they retried, and most waited for the retry header; what each one
+  did is in [`docs/faults.md`](docs/faults.md). The emulator still never throttles by itself. `Service::fault_response` lets a service word its own answer (a default is provided);
+  `azemu-amqp` has a handler wrapper (`faults::wrap`) that Service Bus and Event Hubs use.
+
+- **Strict authorisation** (`--strict-auth`, `AZEMU_STRICT_AUTH=1`; off by default, and with it off nothing changes): a bearer token must be one the identity service issued
+  (signature, `exp`, `nbf`, audience), and the caller's role assignments decide what it may do, with the answers Azure gave in November 2026: Blob, Data Lake, Queue and Table (`AuthorizationPermissionMismatch`, and
+  `AuthorizationFailure` for create container and create queue; XML, OData JSON and Data Lake JSON; the 401 and 403 forms of a bad token by `x-ms-version`; a blob batch judged part by part), Key Vault (role-based `ForbiddenByRbac`
+  with the action and resource named, and access-policy vaults `ForbiddenByPolicy` / `AccessDenied`), App Configuration (empty 403 and 401), Cosmos DB (its own roles; the three 403 sub-statuses 5300, 5301 and 5302) and Event Grid (401).
+  A copy (Copy Blob, Put Blob From URL, the block, append and page forms) needs `read` on its source and a Data Lake rename needs `move` and `read` on the file system it comes from; the audience of a token must be a whole host the service is known by; the calls between the emulator's own services are marked in the process, not by a token text. Account keys, SAS and the other keys are checked as before; Resource Manager is not checked; Monitor and File do not check roles, and the start-up log says which services do not.
+  Resource Manager stores and serves `Microsoft.Authorization/roleAssignments` and `roleDefinitions` (custom roles too) at every scope, and Cosmos DB's `sqlRoleDefinitions` and `sqlRoleAssignments`, whether the mode is on
+  or not, so that Terraform's `azurerm_role_assignment` and `azurerm_cosmosdb_sql_role_assignment` work. `/_azemu/auth` gives roles to accounts Resource Manager did not make (short scopes such as
+  `storage/myaccount/containers/data`), lists and removes them, and answers `GET /_azemu/auth/check` (what the registry decides and which assignments it looked at); `--auth-config <file>`
+  (`AZEMU_AUTH_CONFIG`) holds assignments that exist from the start and after every reset; a refusal is logged in one line with the principal, the action and the scope.
+  `GET /_azemu/identity/principal?client_id=` gives the object id a client id has (and the default managed identity's). The built-in roles with their real ids and actions are in; `azemu_core::auth`
+  has the registry and the token check for a service that is not HTTP. [`docs/strict-auth.md`](docs/strict-auth.md).
+  **Service Bus, Event Hubs, Kafka and the Schema Registry** check their credentials in this mode, with Azure's answers (checked in November 2026 with four principals and keys of three rights): a SAS
+  token needs a key name the namespace or the entity has, a signature made with either key, an audience that names the namespace and covers the entity and an expiry not more than five minutes past; a bad one is refused at
+  `$cbs` `put-token` (`401`, `com.microsoft:auth-failed`, `InvalidSignature` / `InvalidAudience` / `ExpiredToken`), and a good one without the right claim at the link attach
+  (`amqp:unauthorized-access`, "'Send' claim(s) are required ..."). Entra tokens need `Azure Service Bus` / `Event Hubs Data Sender`, `Receiver` or `Owner`; Event Hubs answers a principal with no role at
+  `$management` with a 401 inside the answer; the Service Bus administration API answers 401 (a rule needs `Manage`; a token needs the `actions` of a role); Kafka checks the SASL login (PLAIN with a
+  connection string, OAUTHBEARER) and answers `TOPIC_AUTHORIZATION_FAILED`; the Schema Registry answers 401 `ErrorInRequest` naming the actions, and takes no SAS. Authorization rules come from Resource Manager
+  (the keys `listKeys` gives, regenerated keys at once), from `AuthorizationRules` in the config files, or from `/_azemu/servicebus|eventhubs/{ns}/authorization-rules`; a namespace Resource Manager did not make
+  has `RootManageSharedAccessKey` with the key `SAS_KEY_VALUE` (the one Microsoft's emulators show). A link whose credential runs out is detached unless it was renewed.
+
+- **The inspector**: a read-only API over the state of every service, and a page that shows it. `GET /_azemu/inspect` is one tree for all services (`/{service}/{account}/...`, every node
+  `{path, kind, title, properties, children, items, next}`, paging with `?limit=` and `?marker=`): Blob (containers, blobs with `?prefix=` and a delimiter view, blocks, snapshots,
+  versions, the first 64 KiB of the content), Queue (every message, the hidden ones too), Table, Azure Files, Key Vault (secret values only with `?reveal=1`, never private key material),
+  App Configuration (key-values, revisions, snapshots), Cosmos DB (containers, documents, scripts, change feed length), Service Bus (messages by state, sessions, rules, authorization rules),
+  Event Hubs and Kafka (partitions, events from a sequence number, committed offsets, schema groups), Event Grid (subscriptions, delivery log, dead letters, pending deliveries),
+  Resource Manager (resources with the stored-only flag, deployments and their operations), the role assignments of strict mode, the identity signer, the telemetry sink, and the
+  emulator itself (`_emulator`: health, configuration, the operations asked for, the fault rules). Looking changes nothing: no message is locked or counted, no clock or sequence number
+  moves, no account is made. A row carries at most 128 KiB (a value that does not fit is shown cut, with its length) and an answer 4 MiB (a longer page ends early and `next` goes on from there). `GET /_azemu/ui` is the page (one HTML, one script and one style sheet in the binary, no network; light and dark; deep links; filter, paging, auto refresh);
+  it is served with a strict Content-Security-Policy and builds its DOM without `innerHTML`. Both refuse requests from other web sites like every admin path. `Service::inspect` is the
+  new method a service implements. Checked in Chrome with `tests/inspector-ui/check.mjs`. `docs/inspector.md`.
+
+- **Monitor**: a sink for Application Insights and Azure Monitor telemetry (`azemu-monitor`, standard port 10015). An application with `APPLICATIONINSIGHTS_CONNECTION_STRING`
+  set runs against the emulator without logging errors, and a test reads back what it reported (`GET /_azemu/monitor/telemetry`, with filters by key, base type, name, operation id
+  and `since`; `GET /_azemu/monitor/logs`; `DELETE` on each; `POST /_azemu/reset`). It takes the ingestion endpoint of the SDKs and the OpenTelemetry exporters (`/v2/track` and
+  `/v2.1/track`, plain, gzip or newline-delimited, with Azure's `206` and error messages, recorded from a real resource), the application id lookup, Live Metrics (answered "nobody
+  is watching"), and the Logs Ingestion API (`/dataCollectionRules/{rule}/streams/{stream}`). Telemetry is kept in memory only, bounded by `AZEMU_MONITOR_MAX_ITEMS`,
+  `AZEMU_MONITOR_MAX_LOG_ROWS` and `AZEMU_MONITOR_MAX_MB` (items are kept as the text they came as, and the limit counts that text; a request may carry 65,536 items, the documented maximum, and a larger one is a 400); the oldest is dropped and the answers say how many. Queries, metrics queries and alerts answer 501. Tried with the Python
+  and JavaScript OpenTelemetry exporters and the Python `azure-monitor-ingestion` client. [`docs/services/monitor.md`](docs/services/monitor.md).
+
+- **Azure Files** (`file`, standard port 10004, `{account}.file.core.localhost`): the REST API of file shares, not SMB or NFS (a share cannot be mounted). Shares (properties,
+  quota, access tier, metadata, stored access policies, statistics, snapshots, leases, soft delete and restore, permissions), directories (properties, metadata, listing with
+  `include`, rename, delete), files (create, ranges, downloads by range, range lists and the difference to a snapshot, SMB properties, leases, copy, rename), service properties
+  (metrics, CORS, SMB multichannel), Shared Key and SAS (service SAS `sr=s` and `sr=f`, account SAS, stored access policies), persistence and `reset`. Symbolic and hard links
+  (NFS) and a copy from a blob answer `501`. A file may be declared up to 4 TiB without holding that much: a read of 1 MiB or more is sent in parts as the client takes it, and a clear of a range looks only at the stored pages. `AZEMU_FILE_SOFT_DELETE_DAYS` (default 7) sets how long a deleted share can be restored. Checked against a real account in November
+  2026; Microsoft's 679 recordings of the Python SDK are in the replay (`tools/replay`, score in `fidelity/SCORES.md`). Docs: `docs/services/file.md`.
+
+- **Event Hubs Schema Registry**: the REST API under `/$schemaGroups` on the namespace host (`https://{ns}.eventhub.localhost:{port}/$schemaGroups/...`), the one that `azure-schemaregistry`,
+  the Avro encoders and the Kafka serializers of Microsoft call. Register (the same content gives the same id and version, changed content a new version), read by id and by version (`0` is the
+  latest), `get-id` by content, list versions, group and schema names, and `DELETE`, with Azure's headers, error codes and texts (Avro that does not parse, a kind the group does not take,
+  a wrong content type or `api-version`, a schema over 1 MB, a missing token) and `api-version` 2021-10, 2022-10, 2023-07-01 and 2024-05. A group in Forward or Backward mode refuses an Avro schema that breaks the mode
+  (against the latest version, as Azure does; the check follows Avro's rule with the differences found on a real namespace, [`docs/services/schema-registry.md`](docs/services/schema-registry.md)
+  says which). Groups are made as on Azure, outside the API: the admin API (`PUT /_azemu/eventhubs/{ns}/schemagroups/{group}`), the Event Hubs config file (`SchemaGroups`), Resource
+  Manager (`Microsoft.EventHub/namespaces/schemagroups`), or a named group comes into being with `--lenient`. The registry is part of the namespace: kept by `--data-dir` (`schemas.state`, a
+  file of its own), dropped by a reset and by deleting the namespace. Roles and the limits per namespace (25 versions on Standard) are not enforced; the emulator's own limits are 1,000 versions of one schema, and a compatibility check that goes more than 64 levels deep or needs more than 200,000 steps is a 400 that says so. Compared with a Standard namespace in
+  November 2026; tried with the Python clients (sync, async, Avro encoder through Event Hubs). Go and Rust have no Azure registry client.
+
+- **Event Grid: delivery properties, blob dead letters, Azure Function destinations, managed identity.** `deliveryAttributeMappings` (static, secret, dynamic from the event) become HTTP headers on a webhook or
+  function and message properties on Service Bus (`MessageId`, `SessionId`, `PartitionKey`, `CorrelationId`, `Label`, `ReplyTo`, `ReplyToSessionId`, `To`, others as application properties) and Event Hubs (`PartitionKey`); a
+  session-enabled queue now receives its events when `SessionId` is mapped. A mapping named like a header of the connection (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Expect`, `Keep-Alive`, `Proxy-*`) or with the prefix `aeg-` is a 400. `deadLetterDestination` (`StorageBlob`) writes dead letters as blobs `{topic}/{SUBSCRIPTION}/{yyyy}/{MM}/{dd}/{HH}/{guid}.json` (a
+  JSON array of the event with `deadLetterReason`, `deliveryAttempts`, `lastDeliveryOutcome`, `publishTime`, `lastDeliveryAttemptTime`); the write raises no blob event. `AzureFunction` destinations deliver to
+  `{host}/runtime/webhooks/EventGrid?functionName={name}` of a Functions host named by `AZEMU_EVENTGRID_FUNCTION_HOSTS` or `PUT /_azemu/eventgrid/functions/{app}`. `deliveryWithResourceIdentity` and
+  `deadLetterWithResourceIdentity` are accepted, shown and delivered like the plain forms. All of it arrives from ARM `PUT` of an event subscription and is read back in ARM's shape (a secret value is
+  hidden). What Azure did with dynamic values (missing, empty, number, object, over 4096 bytes) and with dead letters was checked against a real topic in November 2026 (`docs/services/eventgrid.md`).
+
+- **Resource Manager templates: more functions.** `list*` functions (`listKeys`, `listConnectionStrings`, `listAccountSas`, `listServiceSas`, `listSharedAccessKeys`, ...) run the
+  provider action of the same name, so an output or a property can hold a key or a connection string, and they wait for a resource of the same template; `listAccountSas` and
+  `listServiceSas` are new direct actions of storage accounts too. `utcNow` and `newGuid` (only in a parameter default, as in Azure), `dateTimeAdd`, `dateTimeToEpoch` and
+  `dateTimeFromEpoch` with .NET date formats, `environment()` (the storage and Key Vault suffixes and the Resource Manager address point at the emulator), the lambda functions
+  (`map`, `filter`, `reduce`, `sort`, `toObject`, `mapValues`, `groupBy`), the array, object and string functions that were missing (`items`, `intersection`, `flatten`,
+  `objectKeys`, `shallowMerge`, `tryGet`, `indexFromEnd`, `lastIndexOf`, `join`, `like`, `uri`, `dataUri`, `base64ToJson`, `float`, `extensionResourceId`, `pickZones`, ...),
+  user-defined functions, and templates with `"languageVersion": "2.0"` (symbolic names, `existing`, `definitions` and `$ref`, `nullable`, outputs with `copy`). All of it counts
+  against the limits of a request. Tried with templates that the Bicep compiler wrote (`crates/services/arm/tests/bicep`); nine resource-free templates (`crates/services/arm/tests/azure`) were also deployed to a real resource group in
+  November 2026 and the emulator answers the same for all of about 230 outputs; that made `equals`, `contains`, `distinct`, `union` and `intersection` compare strings with case,
+  `objectKeys` sort, `K` and `o` write `+00:00`, `string(true())` write `True`, and refuse `P1W`, the format `U`, `string` of a float and fractions in expressions, as Azure does.
+  A failed `utcNow`, `newGuid` or `list*` call now fails the deployment with Azure's error instead of refusing the template. [`docs/services/arm.md`](docs/services/arm.md).
+
+- **Application Insights and Log Analytics through Resource Manager.** `Microsoft.Insights/components` is built (PUT, GET, PATCH, DELETE, lists, `currentbillingfeatures`): a stable
+  `InstrumentationKey` and `AppId`, and a `ConnectionString` whose endpoints are the emulator's monitor service, so telemetry sent with `azurerm_application_insights.x.connection_string` is
+  read back with `GET /_azemu/monitor/telemetry?ikey=...`; the application id lookup of the monitor service answers the component's `AppId`. `Microsoft.OperationalInsights/workspaces`
+  is stored with a stable `customerId` and `sharedKeys`. The other types of the two namespaces stay stored only. Terraform case `insights` (apply, clean plan, destroy).
+
+- **File shares through Resource Manager.** `Microsoft.Storage/storageAccounts/fileServices/shares` (PUT, GET, PATCH, DELETE, list) is joined to the Azure Files service: a share made through
+  ARM exists in the file service with its quota, access tier, metadata and access policies; a share made through the file API is listed and read by ARM; the delete of a share, an account or a group
+  removes it. `fileServices/default` keeps `shareDeleteRetentionPolicy` (it does not reach the file service, which has one global setting). A storage account shows `primaryEndpoints.file`.
+  Terraform case `shares` (`azurerm_storage_share` in both forms, `azurerm_storage_share_directory`, `azurerm_storage_share_file`).
+
+- **A certificate for a client that connects by IP address.** An address given with `--tls-name` (`AZEMU_TLS_NAME`) is now an IP alternative name of the certificate served when the client sends
+  no server name; before, only `localhost`, `127.0.0.1` and `::1` were. Single addresses only (a range cannot be named). A public address is still accepted and logs a warning at start.
+
+- **The image's health check turns healthy sooner.** `--start-period=10s --start-interval=250ms` (Docker Engine 25.0 or newer; older builders refuse the flag): the first checks come 250 ms
+  apart instead of 5 s. A container was healthy 0.84 s after `docker run` (about 3.2 s with the 0.2.0 image), which is what a Testcontainers wait on the health check waits for.
+
+### Changed to match Azure
+
+- **A subscription on a storage account that names no event types gets only `Microsoft.Storage.BlobCreated` and `Microsoft.Storage.BlobDeleted`**, as on Azure (the default set of that topic type). It used to get every event the
+  emulator raises. If your subscription relied on getting the others (`BlobTierChanged`, `AsyncOperationInitiated`, `DirectoryCreated`, `DirectoryDeleted`, `BlobRenamed`, `DirectoryRenamed`), add them to
+  `includedEventTypes` (ARM: `filter.includedEventTypes`; Terraform: `included_event_types`; admin API: `filter.includedEventTypes`). Key Vault and App Configuration subscriptions and custom topics still get every event
+  (their default sets are not in Microsoft's documentation).
+- **Storage events follow what Azure raised** (checked against a real storage account in November 2026, `docs/services/storage-events.md`): the `BlobDeleted` event of a blob has `eTag` and `contentLength`, and
+  `BlobTierChanged` / `AsyncOperationInitiated` have `eTag`. An event delivered to a Service Bus queue or an event hub has the content type `application/json; charset=utf-8` (was `application/json`), as the real one had.
+
+### Security
+
+- **A page on a public IP address is another site.** An `Origin` or `Referer` with an IP address used to count as the emulator's own whatever the address was, so with a browser too old to send
+  `Sec-Fetch-Site` a page served from a public address could reach the admin API. It now passes only for an address on a private network (loopback, `10/8`, `172.16/12`, `192.168/16`, link-local,
+  unique-local, `100.64/10`) or the very address and port the request was sent to; anything else is `403 CrossSiteRequestRefused`. A page on a public address that must use the emulator needs `--allow-origin`.
+- **A browser must send an admin request's body as JSON.** `POST`, `PUT` and `PATCH` on `/_azemu/...` with a body and a browser's `User-Agent` need `Content-Type: application/json` (`415` otherwise): a second
+  line behind the origin check, for the request types a page can send without asking first. Programs that are not browsers are not affected (`curl -d` works as before). [`SECURITY.md`](SECURITY.md) has both.
+
+### Documentation
+
+- [`docs/testcontainers.md`](docs/testcontainers.md): starting the published image from Testcontainers in Rust, Go and Python: the three things a test needs (the image with a pinned version, the mapped ports, a wait on `/_azemu/health`), plain http with
+  the Azurite connection string, https with a token credential (the container's own certificate authority trusted by one client, `IDENTITY_ENDPOINT` and `IDENTITY_HEADER` at the mapped port, the Key Vault challenge switch, `AZEMU_TLS_NAME` when the Docker
+  host is not `localhost`), Service Bus on the mapped port, reset, a seed file, and one container per test or per run (start-up measured at 0.25 to 0.35 s). Three tested projects in [`examples/testcontainers`](examples/testcontainers). It also records
+  what the libraries do that surprises: they publish on every network address (the examples publish on `127.0.0.1`), the image's health check as the wait took about 3 seconds with the 0.2.0 image, the Rust `azservicebus` crate always dials port 5672, and the Rust
+  Testcontainers crate has no reaper, so a container kept in a `static` outlives the tests. [`docs/azurite.md`](docs/azurite.md) points to it.
+
 ## 0.2.0
 
 The emulator was compared with a real Azure subscription for the first time (November 2026), and the rough edges a project meets when it moves from Azurite were worked on (seeding, the Rust SDK's credentials, macOS, a migration page).

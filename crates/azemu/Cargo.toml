@@ -42,6 +42,11 @@ azemu-eventgrid = { path = "../services/eventgrid" }
 azemu-servicebus = { path = "../services/servicebus" }
 azemu-eventhubs = { path = "../services/eventhubs" }
 azemu-arm = { path = "../services/arm" }
+azemu-monitor = { path = "../services/monitor" }
+azemu-file = { path = "../services/file" }
 
 [dev-dependencies]
 azemu-core = { workspace = true, features = ["testing"] }
+azemu-amqp = { path = "../amqp" }
+azemu-kafka = { path = "../kafka" }
+bytes.workspace = true

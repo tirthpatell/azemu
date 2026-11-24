@@ -13,6 +13,7 @@ The suites are also working examples of pointing each SDK at the emulator; [`doc
 | [`sdk-rust/`](sdk-rust/README.md) | the Rust SDK crates, in three projects: the current ones, `beta/`, and `older/` (the versions that projects are often pinned to) | Rust, OpenSSL headers |
 | [`functions/`](functions/README.md) | the Azure Functions host (Core Tools) against the emulator | .NET 10 SDK, Core Tools 4, Node |
 | [`terraform/`](terraform/README.md) | the `azurerm` Terraform provider through Resource Manager | Terraform |
+| [`inspector-ui/`](inspector-ui/check.mjs) | the inspector page (`/_azemu/ui`) in a headless Chrome against an emulator with a little data: one path per service, a click on a row, the reveal button; fails on any console error | Node 22+, Chrome or Chromium, a built `azemu` |
 | [`container/`](container/README.md) | the container image, reached by name from a second container | Docker |
 
 `run_all.sh [binary]` runs the Python, replay, Rust, JavaScript, Go, Java and .NET suites one after the other against one binary and prints a summary (about an hour; run it

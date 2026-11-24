@@ -143,6 +143,7 @@ pub fn sign(key: &SigningKey, claims: &Value) -> Result<String, String> {
     let c = serde_json::to_vec(claims).map_err(|e| e.to_string())?;
     let signing_input = format!("{}.{}", b64(&h), b64(&c));
     let sig = key.sign_rs256(signing_input.as_bytes())?;
+    key.signed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     Ok(format!("{signing_input}.{}", b64(&sig)))
 }
 

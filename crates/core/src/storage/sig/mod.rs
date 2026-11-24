@@ -56,6 +56,7 @@ pub use udk::{user_delegation_key, user_delegation_key_b64};
 pub enum StorageService {
     Blob,
     Queue,
+    File,
 }
 
 impl StorageService {
@@ -64,6 +65,7 @@ impl StorageService {
         match self {
             StorageService::Blob => "blob",
             StorageService::Queue => "queue",
+            StorageService::File => "file",
         }
     }
 }
@@ -215,6 +217,17 @@ pub fn verify_shared_key_table(req: &Request, accounts: &StorageAccounts) -> Che
 fn resource_paths(f: &SasFields, target: &SasTarget<'_>) -> Vec<String> {
     match target {
         SasTarget::Queue { queue } => vec![queue.unwrap_or("").to_string()],
+        SasTarget::File { share, path } => {
+            let with_path = match path {
+                Some(p) if !p.is_empty() => format!("{share}/{p}"),
+                _ => share.to_string(),
+            };
+            match f.sr.as_str() {
+                "s" => vec![share.to_string()],
+                "f" => vec![with_path],
+                _ => vec![with_path, share.to_string()],
+            }
+        }
         SasTarget::Blob { container, blob } => {
             let with_blob = match blob {
                 Some(b) => format!("{container}/{b}"),
@@ -239,7 +252,7 @@ fn resource_paths(f: &SasFields, target: &SasTarget<'_>) -> Vec<String> {
 /// The detail Azure gives for an `sv` it does not take.
 fn sv_detail(service: StorageService) -> &'static str {
     match service {
-        StorageService::Blob => "SAS field 'sv' is not well formed.",
+        StorageService::Blob | StorageService::File => "SAS field 'sv' is not well formed.",
         StorageService::Queue => "sv is either not in the correct format or is not equal or later than version 2012-02-12",
     }
 }
@@ -271,6 +284,8 @@ pub fn verify_sas(req: &Request, service: StorageService, accounts: &StorageAcco
     // The canonicalization of signed request headers / query parameters is described
     // differently by the documentation and the SDKs; accept when in doubt.
     uncertain |= !f.srh.is_empty() || !f.srq.is_empty();
+    // A user delegation SAS for Azure Files is accepted when its signature does not match: its layout is not known here.
+    uncertain |= service == StorageService::File && f.is_user_delegation();
 
     let (strings, keys): (Vec<String>, Vec<Vec<u8>>) = if f.is_account() {
         let mut s = vec![account_sas_string_to_sign(account, &f)];

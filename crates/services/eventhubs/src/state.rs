@@ -43,6 +43,8 @@ pub struct RecvReg {
 #[derive(Default)]
 pub struct Namespace {
     pub hubs: BTreeMap<String, Hub>,
+    /// The Schema Registry's groups (`schema_registry.rs`), by lower-case name.
+    pub schema_groups: BTreeMap<String, crate::schema_registry::SchemaGroup>,
 }
 
 /// Where a sender link sends.
@@ -287,6 +289,10 @@ pub struct Shared {
     pub kafka: crate::kafka::groups::Coordinator,
     /// The next producer id Kafka `InitProducerId` hands out (saved, so an id is never given twice).
     pub next_producer_id: std::sync::atomic::AtomicI64,
+    /// Strict authorisation (`docs/strict-auth.md`): the handle, and the authorization rules (shared access policies) the checks use. With
+    /// the mode off nothing here is looked at.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
+    pub sas: azemu_core::auth::sas::SasRules,
 }
 
 impl Shared {
@@ -298,7 +304,21 @@ impl Shared {
             next_conn: AtomicU64::new(1),
             kafka: Default::default(),
             next_producer_id: std::sync::atomic::AtomicI64::new(1),
+            auth: parking_lot::RwLock::new(azemu_core::auth::Auth::disabled()),
+            sas: Default::default(),
         })
+    }
+
+    /// The strict authorisation handle (the mode is off until the program hands over one that is on).
+    pub fn auth(&self) -> azemu_core::auth::Auth {
+        self.auth.read().clone()
+    }
+
+    /// Hand over the handle. The Kafka endpoint and the Schema Registry check with it too.
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("eventhubs");
+        auth.declare_enforced("kafka");
+        *self.auth.write() = auth;
     }
 
     /// From the environment, through `azemu_core::settings` (read here, when the service is built):
@@ -365,8 +385,14 @@ impl Shared {
     pub fn reset_namespace(&self, ns: &str) -> bool {
         let known = self.state.lock().knows_namespace(ns);
         self.delete_namespace(ns);
+        self.sas.clear_namespace(ns);
         if let Some(path) = &self.config_path {
             if let Ok(cfg) = crate::config::load(path) {
+                for (n, entity, rule) in crate::config::declared_rules(&cfg).unwrap_or_default() {
+                    if n.eq_ignore_ascii_case(ns) {
+                        self.sas.declare(&n, entity.as_deref(), rule);
+                    }
+                }
                 let mut fresh = State::default();
                 if crate::config::apply(&mut fresh, &cfg, now_ms()).is_ok() {
                     let mut st = self.state.lock();
@@ -392,6 +418,7 @@ impl Shared {
         old.wake_everyone();
         self.kafka.reset();
         self.next_producer_id.store(1, Ordering::Relaxed);
+        self.sas.clear();
         next_revision();
         self.load_config();
     }
@@ -401,8 +428,13 @@ impl Shared {
             match crate::config::load(path) {
                 Ok(cfg) => {
                     let mut st = self.state.lock();
-                    if let Err(e) = crate::config::apply(&mut st, &cfg, now_ms()) {
-                        tracing::warn!("eventhubs config {}: {e}", path.display());
+                    match crate::config::apply(&mut st, &cfg, now_ms()) {
+                        Err(e) => tracing::warn!("eventhubs config {}: {e}", path.display()),
+                        Ok(()) => {
+                            for (ns, entity, rule) in crate::config::declared_rules(&cfg).unwrap_or_default() {
+                                self.sas.declare(&ns, entity.as_deref(), rule);
+                            }
+                        }
                     }
                 }
                 Err(e) => tracing::warn!("eventhubs config {}: {e}", path.display()),

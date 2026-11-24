@@ -14,6 +14,7 @@ pub mod core;
 pub mod duration;
 pub mod enqueue;
 pub mod errors;
+mod inspect;
 pub mod mgmt;
 pub mod model;
 pub mod msgutil;
@@ -21,6 +22,7 @@ pub mod persist;
 pub mod rules;
 pub mod state;
 pub mod store;
+pub mod strict;
 pub mod txn;
 
 pub use state::Shared;
@@ -65,8 +67,27 @@ impl RawProtocol for ServiceBusAmqp {
 
     async fn serve(&self, conn: RawConn) {
         let info = ConnectionInfo { peer: conn.peer, local: conn.local, tls: conn.tls, server_name: conn.server_name.clone() };
-        let factory: azemu_amqp::api::SharedFactory = Arc::new(amqp_conn::SbFactory { shared: self.factory.shared.clone() });
+        // wrapped for fault rules (`docs/faults.md`); with no rule a call costs one atomic read
+        let factory: azemu_amqp::api::SharedFactory = Arc::new(azemu_amqp::faults::FaultFactory {
+            inner: Arc::new(amqp_conn::SbFactory { shared: self.factory.shared.clone() }),
+            faults: conn.faults.clone(),
+            service: "servicebus",
+            namespace_of: amqp_conn::namespace_from_hostname,
+        });
         azemu_amqp::serve_connection(conn.io, info, factory, self.cfg.clone()).await;
+    }
+}
+
+impl ServiceBusService {
+    /// Strict authorisation (`docs/strict-auth.md`): hand over the handle. With the mode off nothing changes. The AMQP side and the
+    /// administration API both check credentials and rights; the authorization rules are `shared.sas`.
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        self.shared.set_auth(auth);
+    }
+
+    /// Where Resource Manager's authorization rules are read from (`azemu_core::auth::sas::SasSource`).
+    pub fn set_sas_source(&self, source: Arc<dyn azemu_core::auth::sas::SasSource>) {
+        self.shared.sas.set_source(source);
     }
 }
 
@@ -77,7 +98,12 @@ impl Service for ServiceBusService {
     }
 
     fn mounts(&self) -> Vec<Mount> {
-        vec![Mount::AccountHost("servicebus")]
+        vec![Mount::AccountHost("servicebus"), Mount::PathPrefix("/_azemu/servicebus")]
+    }
+
+    /// Credentials, rights and the administration API in strict mode (the AMQP side checks with the same handle).
+    fn enforces_strict_auth(&self) -> bool {
+        true
     }
 
     /// This service's HTTP API is the management (Atom XML) API: entity descriptions and rules, no documented limit. Messages travel over AMQP (up to 100 MB, not here). 1 MiB is generous.
@@ -85,8 +111,27 @@ impl Service for ServiceBusService {
         Some(1024 * 1024)
     }
 
+    fn fault_response(&self, req: &Request, answer: &azemu_core::FaultAnswer) -> Response {
+        admin::fault_response(req, answer)
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.shared, req)
+    }
+
     async fn handle(&self, req: Request) -> Response {
         self.shared.ensure_ticker();
+        if req.account.is_empty() {
+            let segs = req.segments();
+            let rest: Vec<&str> = segs.iter().skip(2).map(String::as_str).collect();
+            return azemu_core::auth::sas_admin::handle(&self.shared.sas, &req, &rest).unwrap_or_else(|| {
+                azemu_core::json_error::response(
+                    404,
+                    "NotFound",
+                    "servicebus: the only admin path is /_azemu/servicebus/{namespace}/authorization-rules[/{name}]",
+                )
+            });
+        }
         admin::handle(&self.shared, req)
     }
 

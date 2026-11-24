@@ -312,10 +312,28 @@ fn render(res: &Stored, state: &str) -> Value {
     let p = util::props_mut(&mut v);
     p.insert("provisioningState".into(), json!(state));
     // Azure does not show the full webhook URL (it can carry a secret); `getFullUrl` does.
-    if let Some(dp) = p.get_mut("destination").and_then(|d| d.get_mut("properties")).and_then(Value::as_object_mut) {
-        dp.remove("endpointUrl");
+    if let Some(d) = p.get_mut("destination") {
+        scrub(d);
+    }
+    if let Some(d) = p.get_mut("deliveryWithResourceIdentity").and_then(|d| d.get_mut("destination")) {
+        scrub(d);
     }
     v
+}
+
+/// What a read does not show of a destination: the full webhook URL, and the value of a secret static delivery property
+/// (`getDeliveryAttributes` gives it).
+fn scrub(dest: &mut Value) {
+    if let Some(dp) = dest.get_mut("properties").and_then(Value::as_object_mut) {
+        dp.remove("endpointUrl");
+        if let Some(Value::Array(maps)) = dp.get_mut("deliveryAttributeMappings") {
+            for m in maps.iter_mut().filter(|m| m["properties"]["isSecret"] == true) {
+                if let Some(mp) = m.get_mut("properties").and_then(Value::as_object_mut) {
+                    mp.remove("value");
+                }
+            }
+        }
+    }
 }
 
 /// `provisioningState` as the Event Grid service sees the subscription now (a webhook waiting for a manual validation
@@ -374,7 +392,9 @@ fn full_url(cx: &Cx<'_>, ctx: &Ctx, name: &str) -> ArmResult<Response> {
 fn delivery_attributes(cx: &Cx<'_>, ctx: &Ctx, name: &str) -> ArmResult<Response> {
     let res = cx.inner.state.lock().resources.get(&key(&sub_id(ctx, name))).cloned();
     let res = res.ok_or_else(|| not_found_sub(ctx, name))?;
-    let maps = res.body["properties"]["destination"]["properties"]["deliveryAttributeMappings"].clone();
+    let p = &res.body["properties"];
+    let dest = if p["destination"].is_object() { &p["destination"] } else { &p["deliveryWithResourceIdentity"]["destination"] };
+    let maps = dest["properties"]["deliveryAttributeMappings"].clone();
     let value = if maps.is_array() { maps } else { json!([]) };
     Ok(util::json_ok(200, &json!({ "value": value })))
 }
@@ -451,7 +471,13 @@ fn drop_nulls(v: &mut Value) {
 fn complete_properties(mut props: Map<String, Value>, source_id: &str) -> ArmResult<Map<String, Value>> {
     props.remove("provisioningState");
     props.remove("topic");
-    let Some(Value::Object(dest)) = props.get_mut("destination") else {
+    // the destination is `destination`, or `deliveryWithResourceIdentity.destination` when delivery uses an identity
+    let slot = if props.contains_key("destination") {
+        props.get_mut("destination")
+    } else {
+        props.get_mut("deliveryWithResourceIdentity").and_then(|d| d.get_mut("destination"))
+    };
+    let Some(Value::Object(dest)) = slot else {
         return Err(ArmError::bad_request("InvalidRequest", "The event subscription needs a destination (properties.destination)."));
     };
     let kind = dest.get("endpointType").and_then(Value::as_str).unwrap_or("").to_string();
@@ -469,18 +495,20 @@ fn complete_properties(mut props: Map<String, Value>, source_id: &str) -> ArmRes
             util::set_default(dp, "preferredBatchSizeInKilobytes", json!(64));
             dp.insert("endpointBaseUrl".into(), json!(url.split('?').next().unwrap_or(&url)));
         }
+        "azurefunction" => {
+            let dp = dest.entry("properties").or_insert_with(|| json!({}));
+            if let Some(dp) = dp.as_object_mut() {
+                util::set_default(dp, "maxEventsPerBatch", json!(1));
+                util::set_default(dp, "preferredBatchSizeInKilobytes", json!(64));
+            }
+        }
         "storagequeue" | "servicebusqueue" | "servicebustopic" | "eventhub" => {}
         "" => return Err(ArmError::bad_request("InvalidRequest", "The destination needs an endpointType.")),
         _ => {
             return Err(ArmError::not_implemented(format!(
-                "event subscription destination {kind} (built: WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic, EventHub)"
+                "event subscription destination {kind} (built: WebHook, StorageQueue, ServiceBusQueue, ServiceBusTopic, EventHub, AzureFunction)"
             )))
         }
-    }
-    if props.contains_key("deliveryWithResourceIdentity") || props.contains_key("deadLetterWithResourceIdentity") {
-        return Err(ArmError::not_implemented(
-            "event subscriptions with a managed identity (deliveryWithResourceIdentity, deadLetterWithResourceIdentity)",
-        ));
     }
     let filter = props.entry("filter").or_insert_with(|| json!({}));
     if let Some(f) = filter.as_object_mut() {
@@ -511,6 +539,9 @@ fn config_for_backend(props: &Map<String, Value>) -> ArmResult<SubscriptionConfi
     }
     let mut cfg = json!({
         "destination": props.get("destination").cloned().unwrap_or(Value::Null),
+        "deliveryWithResourceIdentity": props.get("deliveryWithResourceIdentity").cloned().unwrap_or(Value::Null),
+        "deadLetterDestination": props.get("deadLetterDestination").cloned().unwrap_or(Value::Null),
+        "deadLetterWithResourceIdentity": props.get("deadLetterWithResourceIdentity").cloned().unwrap_or(Value::Null),
         "deliverySchema": props.get("eventDeliverySchema").cloned().unwrap_or(json!("EventGridSchema")),
         "filter": filter,
         "retryPolicy": props.get("retryPolicy").cloned().unwrap_or_else(|| json!({})),
@@ -565,10 +596,13 @@ async fn put_sub(cx: &Cx<'_>, ctx: &Ctx, name: &str, patch: bool) -> ArmResult<R
     };
     let props = complete_properties(props_in, &source_id)?;
     let cfg = config_for_backend(&props)?;
-    let webhook_url = props["destination"]["properties"]["endpointUrl"]
-        .as_str()
-        .filter(|_| eq(props["destination"]["endpointType"].as_str().unwrap_or(""), "WebHook"))
-        .map(String::from);
+    let null = Value::Null;
+    let dest = match props.get("destination") {
+        Some(d) if d.is_object() => d,
+        _ => props.get("deliveryWithResourceIdentity").and_then(|d| d.get("destination")).unwrap_or(&null),
+    };
+    let webhook_url =
+        dest["properties"]["endpointUrl"].as_str().filter(|_| eq(dest["endpointType"].as_str().unwrap_or(""), "WebHook")).map(String::from);
 
     // Create or replace the subscription in the Event Grid service.
     if let Some(eg) = cx.inner.backends.eventgrid.clone() {

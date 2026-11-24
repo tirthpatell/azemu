@@ -14,13 +14,20 @@ pub mod amqp_conn;
 pub mod config;
 pub mod enqueue;
 pub mod errors;
+mod inspect;
 pub mod kafka;
 mod mgmt;
 pub mod model;
 pub mod mux;
 pub mod persist;
+pub mod schema_admin;
+pub mod schema_avro;
+pub mod schema_http;
+mod schema_persist;
+pub mod schema_registry;
 pub mod selector;
 pub mod state;
+mod strict;
 
 pub use mux::AmqpMux;
 pub use state::Shared;
@@ -87,8 +94,27 @@ impl RawProtocol for EventHubsAmqp {
 
     async fn serve(&self, conn: RawConn) {
         let info = ConnectionInfo { peer: conn.peer, local: conn.local, tls: conn.tls, server_name: conn.server_name.clone() };
-        let factory: SharedFactory = self.factory();
+        // wrapped for fault rules (`docs/faults.md`); with no rule a call costs one atomic read
+        let factory: SharedFactory = Arc::new(azemu_amqp::faults::FaultFactory {
+            inner: self.factory(),
+            faults: conn.faults.clone(),
+            service: "eventhubs",
+            namespace_of: amqp_conn::namespace_from_hostname,
+        });
         azemu_amqp::serve_connection(conn.io, info, factory, self.cfg.clone()).await;
+    }
+}
+
+impl EventHubsService {
+    /// Strict authorisation (`docs/strict-auth.md`): hand over the handle. With the mode off nothing changes. The AMQP side, the Kafka
+    /// endpoint and the Schema Registry all check with it; the authorization rules are `shared.sas`.
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        self.shared.set_auth(auth);
+    }
+
+    /// Where Resource Manager's authorization rules are read from (`azemu_core::auth::sas::SasSource`).
+    pub fn set_sas_source(&self, source: Arc<dyn azemu_core::auth::sas::SasSource>) {
+        self.shared.sas.set_source(source);
     }
 }
 
@@ -96,6 +122,15 @@ impl RawProtocol for EventHubsAmqp {
 impl Service for EventHubsService {
     fn name(&self) -> &'static str {
         "eventhubs"
+    }
+
+    /// Credentials, rights and the Schema Registry in strict mode (the AMQP side and the Kafka endpoint check with the same handle).
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.shared, req)
     }
 
     fn mounts(&self) -> Vec<Mount> {
@@ -110,6 +145,8 @@ impl Service for EventHubsService {
     async fn handle(&self, req: Request) -> Response {
         if req.account.is_empty() {
             admin::handle(&self.shared, req)
+        } else if schema_http::is_registry_path(&req) {
+            schema_http::handle(&self.shared, req)
         } else {
             azemu_core::json_error::response(
                 501,

@@ -30,6 +30,8 @@ pub enum Form {
     Table,
     /// OData JSON with the plain Content-Type `application/json`: what the front end sends for a credential it refuses.
     Credential,
+    /// A role is missing in strict mode (`docs/strict-auth.md`): OData JSON without an `x-ms-error-code` header, as Azure sends it.
+    Role,
     /// The XML document `<error xmlns="...">` with indented elements, Content-Type `application/xml`: an `x-ms-version`
     /// it does not know.
     Version,
@@ -121,6 +123,17 @@ pub fn permission_mismatch() -> ApiError {
         .credential()
 }
 
+/// 403 for a principal that lacks the role (strict mode).
+pub fn role_missing() -> ApiError {
+    let mut e = ApiError::new(
+        403,
+        "AuthorizationPermissionMismatch",
+        "This request is not authorized to perform this operation using this permission.",
+    );
+    e.form = Form::Role;
+    e
+}
+
 pub fn resource_type_mismatch() -> ApiError {
     ApiError::new(
         403,
@@ -191,11 +204,14 @@ fn version_body(e: &ApiError, ctx: &RequestCtx) -> String {
 /// Render an error as a full HTTP response.
 pub fn render(e: &ApiError, ctx: &RequestCtx, xml: bool) -> Response {
     let mut r = Resp::new(e.status);
-    if e.form != Form::Version {
+    if !matches!(e.form, Form::Version | Form::Role) {
         r = r.header("x-ms-error-code", &e.code);
     }
     r = match (e.form, xml) {
         (Form::Version, _) => r.xml(version_body(e, ctx)),
+        (Form::Role, _) => {
+            r.header("Content-Type", "application/json;odata=nometadata;streaming=true;charset=utf-8").body(json_body(e, ctx))
+        }
         (_, true) => r.xml(xml_body(e, ctx)),
         (Form::Credential, false) => r.header("Content-Type", "application/json").body(json_body(e, ctx)),
         (Form::Table, false) => {

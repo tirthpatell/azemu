@@ -978,7 +978,7 @@ class TestRunAll:
         assert run_all.mounted_services({}) == []
 
     def test_every_mounted_service_has_a_package_and_unmounted_ones_are_skipped(self, tmp_path):
-        assert {p.service for p in run_all.PACKAGES} == {"blob", "dfs", "queue", "table", "keyvault", "appconfig", "eventgrid", "servicebus", "arm"}
+        assert {p.service for p in run_all.PACKAGES} == {"blob", "dfs", "file", "queue", "table", "keyvault", "appconfig", "eventgrid", "servicebus", "arm"}
         if not HAVE_CORPUS:
             pytest.skip("corpus missing")
         files = corpus_files("storage/azure-storage-queue", 5)

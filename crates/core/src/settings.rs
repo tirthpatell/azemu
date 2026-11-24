@@ -344,6 +344,7 @@ pub fn unknown_variables() -> Vec<String> {
 /// `main`; every `main.rs` of the workspace does. An embedder that does not call it still gets the variables.
 ///
 /// * `--lenient` sets `AZEMU_LENIENT=1`;
+/// * `--strict-auth` sets `AZEMU_STRICT_AUTH=1`, and `--auth-config <file>` sets `AZEMU_AUTH_CONFIG`;
 /// * `--allow-webhook-host <name>` / `--allow-webhook-host=<name>` (repeatable) adds to `AZEMU_ALLOW_WEBHOOK_HOST`
 ///   (the names of the variable are kept, so both can be used together).
 ///
@@ -357,6 +358,8 @@ pub fn apply_early_options() {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EarlyOptions {
     pub lenient: bool,
+    pub strict_auth: bool,
+    pub auth_config: Option<String>,
     pub allow_webhook_hosts: Vec<String>,
 }
 
@@ -370,6 +373,15 @@ pub fn parse_early_options<I: IntoIterator<Item = String>>(args: I) -> EarlyOpti
         }
         let value = if a == "--lenient" {
             out.lenient = true;
+            None
+        } else if a == "--strict-auth" {
+            out.strict_auth = true;
+            None
+        } else if a == "--auth-config" {
+            out.auth_config = args.next();
+            None
+        } else if let Some(f) = a.strip_prefix("--auth-config=") {
+            out.auth_config = Some(f.to_string());
             None
         } else if a == "--allow-webhook-host" {
             args.next()
@@ -388,6 +400,12 @@ pub fn apply_early_options_from<I: IntoIterator<Item = String>>(args: I) {
     let found = parse_early_options(args);
     if found.lenient {
         set_override("AZEMU_LENIENT", "1");
+    }
+    if found.strict_auth {
+        set_override("AZEMU_STRICT_AUTH", "1");
+    }
+    if let Some(f) = found.auth_config {
+        set_override("AZEMU_AUTH_CONFIG", &f);
     }
     if !found.allow_webhook_hosts.is_empty() {
         // the names from the environment stay; the options add to them
@@ -411,13 +429,16 @@ pub fn describe_core() {
     describe("AZEMU_TLS_NAME", "none", "Extra names the local CA may sign for, besides localhost and loopback addresses (comma separated). A different set makes a new CA. Option: `--tls-name`.");
     describe("AZEMU_DATA_DIR", "none (state is kept in memory only)", "Keep state between runs in this directory. Option: `--data-dir`.");
     describe("AZEMU_SEED", "none", "A JSON file of things to create at start and again after every reset: blob containers, queues, tables, Cosmos databases and containers, Key Vault secrets, App Configuration key-values (`docs/seed.md`). Option: `--seed`.");
+    describe("AZEMU_FAULTS", "none", "A JSON file of fault rules that exist from the start and again after every full reset: throttling answers, errors, delays, dropped connections (`docs/faults.md`). Without it, and without rules added through `/_azemu/faults`, nothing fails on purpose. Option: `--faults`.");
     describe("AZEMU_SAVE_INTERVAL", "15 (seconds)", "Seconds between saves of changed state when a data directory is set; 0 saves only on `POST /_azemu/save` and at shutdown. Option: `--save-interval`.");
     describe(
         "AZEMU_LOOSE_AUTH",
         "off",
         "Check no signature of a storage request (Blob, Queue, Table, Data Lake): a Shared Key or SAS signature that is malformed (`replay`, `Sanitized`) or wrong passes, so does an old `x-ms-date`. Without it azemu refuses a malformed signature for every account and a wrong one for `devstoreaccount1`, as Azure does. It is for replaying recorded traffic. A warning at start says it is on.",
     );
-    describe("AZEMU_STANDARD_PORTS", "off", "Open one fixed port per service next to the gateway port: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 8081 Cosmos, 5672 and 5671 AMQP (plain and TLS on both), 9093 Kafka, and 443 when the process may bind it (a warning when it may not). Option: `--standard-ports`.");
+    describe("AZEMU_STANDARD_PORTS", "off", "Open one fixed port per service next to the gateway port: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10004 Files, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 10015 Monitor, 8081 Cosmos, 5672 and 5671 AMQP (plain and TLS on both), 9093 Kafka, and 443 when the process may bind it (a warning when it may not). Option: `--standard-ports`.");
+    describe("AZEMU_STRICT_AUTH", "off", "Check bearer tokens and decide by role assignments what the caller may do (`docs/strict-auth.md`): a missing role is refused with Azure's own answer. Keys and SAS are checked as without it, except those of Service Bus and Event Hubs (they have rights and an expiry). Option: `--strict-auth`.");
+    describe("AZEMU_AUTH_CONFIG", "none", "A JSON file of role assignments, custom roles, Cosmos DB role assignments and Key Vault access policies that exist from the start and again after every reset (`docs/strict-auth.md`). Option: `--auth-config`.");
     describe(
         "AZEMU_ALLOW_WEBHOOK_HOST",
         "none",
@@ -490,6 +511,10 @@ mod tests {
         // after `--` nothing counts; a missing value is not an error
         assert_eq!(parse_early_options(args(&["--", "--lenient"])), EarlyOptions::default());
         assert_eq!(parse_early_options(args(&["--allow-webhook-host"])), EarlyOptions::default());
+        let found = parse_early_options(args(&["--strict-auth", "--auth-config", "roles.json", "--port", "1"]));
+        assert!(found.strict_auth);
+        assert_eq!(found.auth_config.as_deref(), Some("roles.json"));
+        assert_eq!(parse_early_options(args(&["--auth-config=a.json"])).auth_config.as_deref(), Some("a.json"));
     }
 
     #[test]

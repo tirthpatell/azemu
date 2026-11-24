@@ -115,7 +115,8 @@ def test_failed_operations_raise_nothing(emu, hook, container):
 def test_tier_change_events(emu, hook, container):
     blob = container.get_blob_client("tiered.bin")
     blob.upload_blob(b"0123456789")
-    sub_all(emu, hook)
+    # BlobTierChanged is not in the default set of a storage account: the subscription has to ask for it (checked against Azure, November 2026)
+    sub_all(emu, hook, filter={"includedEventTypes": ["Microsoft.Storage.BlobTierChanged"]})
     blob.set_standard_blob_tier(StandardBlobTier.COOL)
     blob.set_standard_blob_tier(StandardBlobTier.HOT)
     events = hook.wait_events(2)
@@ -130,6 +131,20 @@ def test_tier_change_events(emu, hook, container):
     assert second["data"]["accessTier"] == "Hot"
     assert second["data"]["previousTier"] == "Cool"
     assert set(second["data"]) == su.BLOB_TIER_CHANGED_DATA
+
+
+def test_a_subscription_with_no_event_types_gets_the_default_set_only(emu, hook, container):
+    # Event Grid: a storage account's default set is BlobCreated and BlobDeleted. BlobTierChanged and the others must be asked for.
+    sub_all(emu, hook)
+    blob = container.get_blob_client("dflt.bin")
+    blob.upload_blob(b"0123456789")
+    blob.set_standard_blob_tier(StandardBlobTier.COOL)
+    blob.delete_blob()
+    events = hook.wait_events(2)
+    import time
+
+    time.sleep(0.5)
+    assert sorted(e["eventType"] for e in hook.events) == ["Microsoft.Storage.BlobCreated", "Microsoft.Storage.BlobDeleted"]
 
 
 def test_sequencer_grows_per_blob(emu, hook, container):

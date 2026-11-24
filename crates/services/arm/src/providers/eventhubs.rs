@@ -1,4 +1,4 @@
-//! Microsoft.EventHub: namespaces, event hubs, consumer groups and authorization rules.
+//! Microsoft.EventHub: namespaces, event hubs, consumer groups, authorization rules and schema groups.
 //! Event hubs are created in the Event Hubs emulator's own state, so they work over AMQP
 //! at once (use host `{namespace}.eventhub.localhost`).
 
@@ -25,6 +25,7 @@ const TYPES: &[&str] = &[
     "namespaces/eventhubs/consumergroups",
     "namespaces/authorizationRules",
     "namespaces/eventhubs/authorizationRules",
+    "namespaces/schemagroups",
 ];
 
 const PASSTHROUGH: &[&str] = &["namespaces/networkRuleSets"];
@@ -157,6 +158,42 @@ impl EventHubs {
         Ok(())
     }
 
+    /// A schema group of the Schema Registry (`schemaType`, `schemaCompatibility`, `groupProperties`); the registry is in the Event Hubs state.
+    fn put_schema_group(&self, cx: &Cx<'_>, res: &mut Stored) -> ArmResult<()> {
+        use azemu_eventhubs::schema_registry::{Compatibility, SchemaType};
+        let now_iso = cx.now_iso();
+        let ns = res.name_at(0).to_string();
+        let name = res.name().to_string();
+        let props = res.body.get("properties").cloned().unwrap_or(json!({}));
+        let kind = match props.get("schemaType").and_then(Value::as_str) {
+            Some(t) => SchemaType::parse(t)
+                .ok_or_else(|| bad(format!("schemaType '{t}' is not valid (Avro, Json, Custom, Protobuf, Unknown).")))?,
+            None => SchemaType::Avro,
+        };
+        let mode = match props.get("schemaCompatibility").and_then(Value::as_str) {
+            Some(c) => {
+                Compatibility::parse(c).ok_or_else(|| bad(format!("schemaCompatibility '{c}' is not valid (None, Backward, Forward).")))?
+            }
+            None => Compatibility::None,
+        };
+        let group_props = props.get("groupProperties").and_then(Value::as_object).map(|o| {
+            o.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        });
+        if let Some(eh) = &self.b.eventhubs {
+            eh.state.lock().put_schema_group(&ns, &name, kind, mode, group_props).map_err(|e| bad(e.message))?;
+        }
+        let p = util::props_mut(&mut res.body);
+        p.insert("schemaType".into(), json!(kind.name()));
+        p.insert("schemaCompatibility".into(), json!(mode.name()));
+        util::set_default(p, "groupProperties", json!({}));
+        util::set_default(p, "createdAtUtc", json!(now_iso));
+        p.insert("updatedAtUtc".into(), json!(now_iso));
+        util::set_default(p, "eTag", json!(uuid::Uuid::new_v4().to_string()));
+        Ok(())
+    }
+
     fn put_consumer_group(&self, cx: &Cx<'_>, res: &mut Stored) -> ArmResult<()> {
         let now_iso = cx.now_iso();
         let ns = res.name_at(0).to_string();
@@ -213,6 +250,7 @@ impl Provider for EventHubs {
             "namespaces/eventhubs" => valid_entity_name(name, 256),
             "namespaces/eventhubs/consumergroups" => valid_entity_name(name, 50) || name == "$Default",
             "namespaces/authorizationRules" | "namespaces/eventhubs/authorizationRules" => valid_entity_name(name, 50),
+            "namespaces/schemagroups" => azemu_eventhubs::schema_registry::valid_group_name(name),
             _ => true,
         };
         if !ok {
@@ -231,6 +269,7 @@ impl Provider for EventHubs {
             }
             "namespaces/eventhubs" => self.put_hub(cx, res, existed, children),
             "namespaces/eventhubs/consumergroups" => self.put_consumer_group(cx, res),
+            "namespaces/schemagroups" => self.put_schema_group(cx, res),
             "namespaces/authorizationRules" | "namespaces/eventhubs/authorizationRules" => sas::prepare(res),
             _ => Ok(()),
         }
@@ -245,6 +284,9 @@ impl Provider for EventHubs {
             "namespaces" => eh.delete_namespace(&ns),
             "namespaces/eventhubs" => {
                 eh.delete_hub(&ns, &name);
+            }
+            "namespaces/schemagroups" => {
+                eh.state.lock().delete_schema_group(&ns, &name);
             }
             "namespaces/eventhubs/consumergroups" => {
                 let hub = res.name_at(1).to_string();

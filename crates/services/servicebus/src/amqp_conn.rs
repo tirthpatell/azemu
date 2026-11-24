@@ -52,6 +52,7 @@ impl HandlerFactory for SbFactory {
             responders: HashMap::new(),
             pairing: HashMap::new(),
             txns: crate::txn::TxnTable::new(self.shared.txn_budget.clone()),
+            claims: None,
         })
     }
 }
@@ -137,7 +138,7 @@ enum WaitState {
 pub struct SbConn {
     pub(crate) shared: Arc<Shared>,
     pub(crate) conn_id: u64,
-    _conn: ConnHandle,
+    pub(crate) _conn: ConnHandle,
     pub(crate) ns: String,
     pub(crate) links: HashMap<LinkId, SbLink>,
     pub(crate) responders: HashMap<String, Vec<LinkId>>,
@@ -145,6 +146,8 @@ pub struct SbConn {
     pairing: HashMap<String, azemu_amqp::reply::Pairing>,
     /// transactions declared on this connection
     pub(crate) txns: crate::txn::TxnTable,
+    /// What the credentials put with `$cbs` give this connection (strict authorisation only; made at the first `put-token`).
+    pub(crate) claims: Option<Arc<azemu_core::auth::claims::ConnClaims>>,
 }
 
 fn refuse(e: SbError) -> AttachDecision {
@@ -457,13 +460,8 @@ fn session_accept(source: &Source, sid: &str, until_ms: i64, max: u64) -> Attach
     }
 }
 
-impl ConnectionHandler for SbConn {
-    fn on_open(&mut self, open: &azemu_amqp::performatives::Open) -> Result<(), AmqpError> {
-        self.ns = namespace_from_hostname(open.hostname.as_deref());
-        Ok(())
-    }
-
-    fn on_attach(&mut self, req: AttachRequest) -> AttachDecision {
+impl SbConn {
+    fn attach_checked(&mut self, req: AttachRequest) -> AttachDecision {
         let role = req.local_role();
         // The coordinator target (transactions).
         if let Some(TargetKind::Coordinator(_)) = &req.attach.target {
@@ -550,6 +548,28 @@ impl ConnectionHandler for SbConn {
             }
             (_, Role::Sender) => self.attach_entity_receiver(&req, addr),
         }
+    }
+}
+
+impl ConnectionHandler for SbConn {
+    fn on_open(&mut self, open: &azemu_amqp::performatives::Open) -> Result<(), AmqpError> {
+        self.ns = namespace_from_hostname(open.hostname.as_deref());
+        Ok(())
+    }
+
+    fn on_attach(&mut self, req: AttachRequest) -> AttachDecision {
+        // strict authorisation: the connection must hold the claim (nothing happens with the mode off)
+        let tracked = match self.strict_attach(&req) {
+            Some(Err(e)) => return AttachDecision::Refuse(e),
+            Some(Ok(t)) => Some(t),
+            None => None,
+        };
+        let (link, handle) = (req.link, req.handle.clone());
+        let decision = self.attach_checked(req);
+        if let (Some(t), AttachDecision::Accept(_) | AttachDecision::Defer) = (tracked, &decision) {
+            self.strict_track(link, handle, t);
+        }
+        decision
     }
 
     fn on_transfer(&mut self, link: LinkId, d: IncomingDelivery) -> TransferAction {
@@ -686,6 +706,7 @@ impl ConnectionHandler for SbConn {
     }
 
     fn on_detach(&mut self, link: LinkId, _reason: DetachReason) {
+        self.strict_forget(link);
         let Some(l) = self.links.remove(&link) else { return };
         if matches!(l, SbLink::Coordinator) {
             // the controller is gone: its open transactions are rolled back

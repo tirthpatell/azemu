@@ -1005,3 +1005,33 @@ async fn a_tiny_peer_idle_timeout_does_not_make_the_server_send_a_frame_every_mi
 fn _value_helper() -> Value {
     Value::Null
 }
+
+// ---- a wait the service asked for does not keep a connection the client has left ----
+
+#[tokio::test]
+async fn a_delay_ends_when_the_client_goes_away() {
+    let (mut c, shared) = connected(ServerConfig::default()).await;
+    // an hour of latency for what comes next (what a fault rule asks for)
+    shared.conn.lock().as_ref().expect("connection handle").delay(Duration::from_secs(3600));
+    let _ = tokio::time::timeout(Duration::from_millis(300), c.attach_sender("slow")).await;
+    drop(c);
+    // the connection is gone and the service was told, in seconds and not in an hour
+    for _ in 0..300 {
+        if shared.events.lock().iter().any(|e| e == "close") {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the connection was held by its delay after the client had gone: {:?}", shared.events.lock());
+}
+
+#[tokio::test]
+async fn a_delay_still_waits_and_then_does_what_was_asked() {
+    let (mut c, shared) = connected(ServerConfig::default()).await;
+    shared.conn.lock().as_ref().expect("connection handle").delay(Duration::from_millis(400));
+    let start = std::time::Instant::now();
+    // the answer to the frame comes after the wait
+    c.attach_sender("late").await.unwrap();
+    assert!(start.elapsed() >= Duration::from_millis(350), "{:?}", start.elapsed());
+    assert!(shared.events.lock().iter().any(|e| e == "attach late"));
+}

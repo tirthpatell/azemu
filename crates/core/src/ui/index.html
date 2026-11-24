@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>azemu inspector</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/_azemu/ui/app.css">
+<script src="/_azemu/ui/app.js" defer></script>
+</head>
+<body>
+<header id="bar">
+  <a id="brand" href="#/">azemu inspector</a>
+  <span id="crumbs" aria-label="Location"></span>
+  <span class="spacer"></span>
+  <label class="check"><input type="checkbox" id="auto"> auto refresh (2 s)</label>
+  <button type="button" id="refresh">Refresh</button>
+  <span id="loading" hidden>loading</span>
+</header>
+<div id="readonly">Read-only: nothing here changes state. To empty the emulator: <code>POST /_azemu/reset</code>.</div>
+<div id="layout">
+  <nav id="tree" aria-label="Services"><ul role="tree" id="treeroot"></ul></nav>
+  <main id="main" tabindex="-1"></main>
+</div>
+<noscript><p>The inspector needs JavaScript. The same data is at <code>/_azemu/inspect</code> as JSON.</p></noscript>
+</body>
+</html>

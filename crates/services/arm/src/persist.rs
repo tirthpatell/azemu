@@ -238,6 +238,7 @@ impl ArmService {
             }
             saved.scopes.insert(file, st.resources.rev_of(&scope));
         }
+        crate::authz::on_load(&self.inner.auth, &st);
         *self.inner.state.lock() = st;
         *self.saved.0.lock() = saved;
         Ok(())

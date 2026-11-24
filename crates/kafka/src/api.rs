@@ -98,6 +98,7 @@ pub mod err {
     pub const INVALID_SESSION_TIMEOUT: i16 = 26;
     pub const REBALANCE_IN_PROGRESS: i16 = 27;
     pub const INVALID_COMMIT_OFFSET_SIZE: i16 = 28;
+    pub const TOPIC_AUTHORIZATION_FAILED: i16 = 29;
     pub const UNSUPPORTED_SASL_MECHANISM: i16 = 33;
     pub const ILLEGAL_SASL_STATE: i16 = 34;
     pub const UNSUPPORTED_VERSION: i16 = 35;

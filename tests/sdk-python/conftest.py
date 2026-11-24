@@ -48,7 +48,7 @@ AZURE = os.environ.get("AZEMU_AZURE") == "1"
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "emulator_only: checks something only the emulator has; skipped with AZEMU_AZURE=1")
+    config.addinivalue_line("markers", "emulator_only(reason=''): checks something only the emulator has; skipped with AZEMU_AZURE=1")
     config.addinivalue_line("markers", "azure_differs(reason): Azure was seen to answer differently; skipped with AZEMU_AZURE=1")
 
 
@@ -56,8 +56,9 @@ def pytest_collection_modifyitems(config, items):
     if not AZURE:
         return
     for item in items:
-        if item.get_closest_marker("emulator_only"):
-            item.add_marker(pytest.mark.skip(reason="emulator only"))
+        m = item.get_closest_marker("emulator_only")
+        if m:
+            item.add_marker(pytest.mark.skip(reason="emulator only" + (": " + m.args[0] if m.args else "")))
         m = item.get_closest_marker("azure_differs")
         if m:
             item.add_marker(pytest.mark.skip(reason="Azure differs: " + (m.args[0] if m.args else "")))
@@ -89,7 +90,7 @@ class Emu:
         contains ".core." (see `_from_blob_url`), and azemu ignores everything
         after the service label anyway.
         """
-        suffix = "core.localhost" if label in ("blob", "queue", "table", "dfs") else "localhost"
+        suffix = "core.localhost" if label in ("blob", "queue", "table", "dfs", "file") else "localhost"
         return f"{scheme}://{account}.{label}.{suffix}:{self.port}"
 
     def https_url(self, label: str, account: str) -> str:

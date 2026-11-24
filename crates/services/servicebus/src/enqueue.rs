@@ -29,6 +29,16 @@ pub struct EnqueueMessage {
     pub message_id: Option<String>,
     /// Application properties, all strings.
     pub application_properties: Vec<(String, String)>,
+    /// Service Bus `SessionId` (AMQP `group-id`): a session-enabled queue refuses a message without one.
+    pub session_id: Option<String>,
+    /// `PartitionKey` (annotation `x-opt-partition-key`).
+    pub partition_key: Option<String>,
+    /// `CorrelationId`, `Label` (AMQP `subject`), `ReplyTo`, `ReplyToSessionId`, `To`.
+    pub correlation_id: Option<String>,
+    pub label: Option<String>,
+    pub reply_to: Option<String>,
+    pub reply_to_session_id: Option<String>,
+    pub to: Option<String>,
 }
 
 impl Shared {
@@ -41,8 +51,15 @@ impl Shared {
             properties: Some(Properties {
                 message_id: msg.message_id.map(Value::String),
                 content_type: msg.content_type,
+                group_id: msg.session_id,
+                correlation_id: msg.correlation_id.map(Value::String),
+                subject: msg.label,
+                reply_to: msg.reply_to,
+                reply_to_group_id: msg.reply_to_session_id,
+                to: msg.to,
                 ..Properties::default()
             }),
+            message_annotations: msg.partition_key.map(|k| vec![(Value::sym(crate::core::ANN_PARTITION_KEY), Value::String(k))]),
             application_properties: if msg.application_properties.is_empty() {
                 None
             } else {
@@ -86,6 +103,7 @@ mod tests {
             content_type: Some("application/json".into()),
             message_id: Some("e1".into()),
             application_properties: vec![("aeg-delivery-count".into(), "0".into())],
+            ..EnqueueMessage::default()
         }
     }
 

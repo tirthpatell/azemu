@@ -23,6 +23,8 @@ pub struct Storage {
     pub b: Backends,
 }
 
+const SHARES: &str = "storageAccounts/fileServices/shares";
+
 const TYPES: &[&str] = &[
     "storageAccounts",
     "storageAccounts/blobServices",
@@ -31,9 +33,11 @@ const TYPES: &[&str] = &[
     "storageAccounts/queueServices/queues",
     "storageAccounts/tableServices",
     "storageAccounts/tableServices/tables",
+    "storageAccounts/fileServices",
+    "storageAccounts/fileServices/shares",
 ];
 
-const PASSTHROUGH: &[&str] = &["storageAccounts/fileServices", "storageAccounts/managementPolicies", "storageAccounts/encryptionScopes"];
+const PASSTHROUGH: &[&str] = &["storageAccounts/managementPolicies", "storageAccounts/encryptionScopes"];
 
 fn valid_account_name(n: &str) -> bool {
     (3..=24).contains(&n.len()) && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
@@ -260,6 +264,10 @@ impl Storage {
                     failures.push(dp_error(&r));
                 }
             }
+        }
+        // Azure Files has no events to raise and no lease that can hold the account: its shares, the deleted ones too, go with it
+        if let Some(file) = &self.b.file {
+            file.reset_account(account);
         }
         match failures.into_iter().next() {
             None => Ok(()),
@@ -623,11 +631,15 @@ impl Provider for Storage {
             "storageAccounts/queueServices/queues" | "storageAccounts/tableServices/tables" => {
                 Statuses { create: 200, update: 200, delete: 204, delete_missing: 204 }
             }
+            SHARES => Statuses { create: 201, update: 200, delete: 200, delete_missing: 204 },
             _ => Statuses { create: 200, update: 200, delete: 200, delete_missing: 204 },
         }
     }
 
     fn validate_name(&self, type_path: &str, name: &str) -> ArmResult<()> {
+        if type_path == SHARES && !super::storage_files::valid_share_name(name) {
+            return Err(super::storage_files::name_error());
+        }
         if type_path == "storageAccounts" && !valid_account_name(name) {
             return Err(ArmError::bad_request(
                 "AccountNameInvalid",
@@ -681,6 +693,8 @@ impl Provider for Storage {
             "storageAccounts/queueServices/queues" => self.put_queue(cx, res).await,
             "storageAccounts/tableServices/tables" => self.put_table(cx, res).await,
             "storageAccounts/blobServices" => self.put_blob_service(cx, res).await,
+            SHARES => self.put_share(cx, res).await,
+            "storageAccounts/fileServices" => self.put_file_service(cx, res),
             "storageAccounts/queueServices" | "storageAccounts/tableServices" => {
                 if res.name() != "default" {
                     return Err(ArmError::bad_request("InvalidResourceName", "The only service name allowed is 'default'."));
@@ -704,6 +718,7 @@ impl Provider for Storage {
                     self.delete_container(&blob, res.name_at(0), res.name(), &suffix, force).await?;
                 }
             }
+            SHARES => self.delete_share(cx, res, force).await?,
             "storageAccounts/queueServices/queues" => {
                 if let Some(q) = &self.b.queue {
                     let path = format!("/{}", res.name());
@@ -753,7 +768,22 @@ impl Provider for Storage {
         Ok(())
     }
 
+    /// `share-get-missing.txt`: the code and the message of the Storage resource provider.
+    fn missing(&self, type_path: &str) -> Option<ArmError> {
+        (type_path == SHARES).then(|| ArmError::not_found("ShareNotFound", "The specified share does not exist."))
+    }
+
+    async fn sync(&self, cx: &Cx<'_>, sub: &str, rg: &str, type_path: &str, names: &[String]) -> ArmResult<()> {
+        if type_path == SHARES {
+            self.sync_shares(cx, sub, rg, names).await?;
+        }
+        Ok(())
+    }
+
     fn render(&self, cx: &Cx<'_>, res: &Stored) -> Value {
+        if res.type_path() == SHARES {
+            return self.render_share(cx, res);
+        }
         let mut v = res.body.clone();
         if res.type_path() == "storageAccounts/blobServices" {
             if let Some(blob) = &self.b.blob {
@@ -770,6 +800,7 @@ impl Provider for Storage {
                     "queue": format!("{}/", cx.storage_url("http", n, "queue")),
                     "table": format!("{}/", cx.storage_url("http", n, "table")),
                     "dfs": format!("{}/", cx.storage_url("http", n, "dfs")),
+                    "file": format!("{}/", cx.storage_url("http", n, "file")),
                 }),
             );
         }
@@ -817,6 +848,13 @@ impl Provider for Storage {
                 Ok(Some(util::json_ok(200, &v)))
             }
             (ActionTarget::Resource(res), "storageAccounts", "listkeys") => Ok(Some(self.keys_response(res))),
+            // The same SAS code the data plane verifies with: a token made here is accepted by Blob and Queue.
+            (ActionTarget::Resource(res), "storageAccounts", "listaccountsas") => {
+                Ok(Some(util::json_ok(200, &super::storage_sas::account_sas(res.name(), &self.account_keys(res), body)?)))
+            }
+            (ActionTarget::Resource(res), "storageAccounts", "listservicesas") => {
+                Ok(Some(util::json_ok(200, &super::storage_sas::service_sas(res.name(), &self.account_keys(res), body)?)))
+            }
             (ActionTarget::Resource(res), "storageAccounts", "regeneratekey") => {
                 let which = body.get("keyName").and_then(Value::as_str).unwrap_or("");
                 let which = which.to_ascii_lowercase();

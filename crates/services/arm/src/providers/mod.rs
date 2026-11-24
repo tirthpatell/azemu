@@ -12,10 +12,13 @@ mod appconfig;
 mod cosmos;
 mod eventgrid;
 mod eventhubs;
+mod insights;
 mod keyvault;
-mod sas;
+pub(crate) mod sas;
 mod servicebus;
 mod storage;
+mod storage_files;
+mod storage_sas;
 
 pub fn all(b: &Backends) -> Vec<Box<dyn Provider>> {
     vec![
@@ -26,6 +29,8 @@ pub fn all(b: &Backends) -> Vec<Box<dyn Provider>> {
         Box::new(cosmos::Cosmos { b: b.clone() }),
         Box::new(appconfig::AppConfig { b: b.clone() }),
         Box::new(eventgrid::EventGrid { b: b.clone() }),
+        Box::new(insights::Insights),
+        Box::new(insights::OperationalInsights),
     ]
 }
 

@@ -123,10 +123,15 @@ impl SbConn {
         self.respond(&node, link, session, reply_to.as_deref(), msg);
     }
 
-    fn cbs_request(&self, req: &Message) -> Response {
-        let op = app_prop(req, "operation").and_then(|v| v.as_str()).unwrap_or("");
+    fn cbs_request(&mut self, req: &Message) -> Response {
+        let op = app_prop(req, "operation").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let op = op.as_str();
         if op.eq_ignore_ascii_case("put-token") {
-            // Every credential is accepted: SAS tokens and JWTs alike. What is checked is the entity the token is for (its address is the
+            // Strict authorisation: the credential is checked (`strict.rs`); a good one is accepted whatever its rights.
+            if let Some(Err(r)) = self.strict_put_token(req) {
+                return Response { status: r.status, description: r.text, condition: Some(r.condition), body: None };
+            }
+            // Without it every credential is accepted: SAS tokens and JWTs alike. What is checked is the entity the token is for (its address is the
             // `name` of the request): Azure refuses the token of an entity that does not exist, so a client never gets as far as attaching.
             if let Some(e) = self.missing_entity_for_token(app_prop(req, "name").and_then(|v| v.as_str()).unwrap_or("")) {
                 return Response::err(e);
@@ -191,6 +196,9 @@ impl SbConn {
 
     fn mgmt_request(&mut self, path: &str, req: &Message, txn: Option<&[u8]>) -> Response {
         let op = app_prop(req, "operation").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Err(e) = self.strict_management(path, &op) {
+            return Response::err(e);
+        }
         let empty: Vec<(Value, Value)> = Vec::new();
         let body: &[(Value, Value)] = crate::amqp_conn::map_body(req).unwrap_or(&empty);
         let now = now_ms();

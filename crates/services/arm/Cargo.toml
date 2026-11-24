@@ -36,6 +36,7 @@ azemu-keyvault = { path = "../keyvault" }
 azemu-appconfig = { path = "../appconfig" }
 azemu-blob = { path = "../blob" }
 azemu-eventgrid = { path = "../eventgrid" }
+azemu-monitor = { path = "../monitor" }
 
 [dev-dependencies]
 azemu-core = { workspace = true, features = ["testing"] }

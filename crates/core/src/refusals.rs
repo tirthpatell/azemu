@@ -45,6 +45,7 @@ fn display_name(service: &str) -> &str {
     match service {
         "blob" => "Blob",
         "dfs" => "Data Lake",
+        "file" => "Azure Files",
         "queue" => "Queue",
         "table" => "Table",
         "keyvault" => "Key Vault",
@@ -96,7 +97,7 @@ fn reason(r: &Refused<'_>) -> Option<(String, String)> {
             if r.service == "keyvault" {
                 return None;
             }
-            let storage = matches!(r.service, "blob" | "dfs" | "queue" | "table");
+            let storage = matches!(r.service, "blob" | "dfs" | "queue" | "table" | "file");
             let text = if storage {
                 format!("no Authorization header and no SAS in the query: the {name} SDK was probably built without a credential")
             } else {

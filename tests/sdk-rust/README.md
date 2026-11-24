@@ -10,6 +10,7 @@ What the Rust SDKs need set to reach the emulator is in [`docs/rust.md`](../../d
 cd tests/sdk-rust
 cargo test                      # all test binaries, runs against a copy of the emulator
 cargo test --test eventhubs     # one binary
+cargo test --test faults        # fault rules (docs/faults.md) with the Blob and Cosmos DB clients: retries, Retry-After, dropped connections, delays
 cargo test -- --ignored         # run only the tests that show a known emulator difference (they fail)
 (cd beta && cargo test)         # the second project, with the beta crates (own target directory)
 (cd older && cargo test)        # the third project, with the older versions that projects are often pinned to (own target directory)

@@ -86,8 +86,61 @@ impl KeyRange {
     }
 }
 
+/// What a bearer token is checked against in strict mode (`docs/strict-auth.md`).
+#[derive(Clone)]
+pub struct RoleGrant {
+    pub auth: azemu_core::auth::Auth,
+    pub who: azemu_core::auth::Principal,
+    pub account: String,
+    /// The table the request is about, when it names one.
+    pub table: Option<String>,
+    /// `GET /t(...)`, for the log line of a refusal.
+    pub what: String,
+}
+
+impl std::fmt::Debug for RoleGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RoleGrant({})", self.who.oid)
+    }
+}
+
+impl RoleGrant {
+    fn check(&self, op: Op) -> Res<()> {
+        use azemu_core::auth::{Need, Resource};
+        const SVC: &str = "Microsoft.Storage/storageAccounts/tableServices";
+        const TABLES: &str = "Microsoft.Storage/storageAccounts/tableServices/tables";
+        const ENTITIES: &str = "Microsoft.Storage/storageAccounts/tableServices/tables/entities";
+        let tables = |a: &str| Need::control(&format!("{TABLES}/{a}"));
+        let entities = |a: &str| Need::data(&format!("{ENTITIES}/{a}"));
+        let on_account = Resource::storage(&self.account);
+        let on_table = match &self.table {
+            Some(t) => Resource::table(&self.account, t),
+            None => on_account.clone(),
+        };
+        let (need, res) = match op {
+            Op::ServiceGet => (Need::control(&format!("{SVC}/read")), on_account),
+            Op::ServiceSet => (Need::control(&format!("{SVC}/write")), on_account),
+            Op::QueryTables => (tables("read"), on_account),
+            Op::CreateTable => (tables("write"), on_table),
+            Op::DeleteTable => (tables("delete"), on_table),
+            Op::AclGet => (tables("getAcl/action"), on_table),
+            Op::AclSet => (tables("setAcl/action"), on_table),
+            Op::EntityRead => (entities("read"), on_table),
+            Op::EntityAdd => (Need::any(vec![entities("write"), entities("add/action")]), on_table),
+            Op::EntityUpdate => (Need::any(vec![entities("write"), entities("update/action")]), on_table),
+            Op::EntityUpsert => {
+                (Need::any(vec![entities("write"), Need::all(vec![entities("add/action"), entities("update/action")])]), on_table)
+            }
+            Op::EntityDelete => (entities("delete"), on_table),
+        };
+        self.auth.authorize(&self.what, &self.who, &need, &res).map_err(|_| crate::errors::role_missing())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Grant {
+    /// A bearer token in strict mode: the roles of the principal decide.
+    Role(RoleGrant),
     /// Shared key or bearer token.
     Full,
     Account {
@@ -110,6 +163,7 @@ impl Grant {
     pub fn check(&self, op: Op, key: Option<(&str, &str)>) -> Res<()> {
         match self {
             Grant::Full => Ok(()),
+            Grant::Role(r) => r.check(op),
             Grant::Account { perms, srt } => {
                 let (types, wanted): (&str, &str) = match op {
                     Op::ServiceGet => ("s", "r"),
@@ -153,6 +207,14 @@ impl Grant {
                 }
                 Ok(())
             }
+        }
+    }
+
+    /// The same grant for another table (the parts of a batch name theirs).
+    pub fn in_table(&self, table: &str) -> Grant {
+        match self {
+            Grant::Role(r) => Grant::Role(RoleGrant { table: Some(table.to_string()), ..r.clone() }),
+            other => other.clone(),
         }
     }
 

@@ -22,7 +22,14 @@ impl Shared {
     /// Put `event` into the event hub `hub` of the namespace `namespace`. The hub must exist
     /// (nothing is created). `Err` carries the condition and description a sender would get.
     pub fn enqueue_event(&self, namespace: &str, hub: &str, event: EnqueueEvent) -> Result<(), EhError> {
+        self.enqueue_event_keyed(namespace, hub, event, None)
+    }
+
+    /// [`enqueue_event`](Self::enqueue_event) with a partition key (annotation `x-opt-partition-key`): the service picks the
+    /// partition from the key as it does for a sender that gave one.
+    pub fn enqueue_event_keyed(&self, namespace: &str, hub: &str, event: EnqueueEvent, partition_key: Option<&str>) -> Result<(), EhError> {
         let message = Message {
+            message_annotations: partition_key.map(|k| vec![(Value::sym("x-opt-partition-key"), Value::String(k.to_string()))]),
             properties: Some(Properties { content_type: event.content_type, ..Properties::default() }),
             application_properties: if event.application_properties.is_empty() {
                 None

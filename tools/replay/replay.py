@@ -54,6 +54,7 @@ LABEL_ALIASES = {
     "queue": "queue",
     "table": "table",  # also covers x.table.cosmos.azure.com
     "dfs": "dfs",
+    "file": "file",  # x.file.core.windows.net (Azure Files)
     "vault": "vault",
     "managedhsm": "vault",  # x.managedhsm.azure.net
     "azconfig": "azconfig",
@@ -68,7 +69,7 @@ ARM_HOST = "management.azure.com"
 ARM_LABEL = "management"
 #: What the sanitizer wrote in place of `management.azure.com` in newer recordings (the path is still a Resource Manager path).
 SANITIZED_ARM_HOST = "sanitized.azure.com"
-STORAGE_LABELS = ("blob", "queue", "table", "dfs")
+STORAGE_LABELS = ("blob", "queue", "table", "dfs", "file")
 
 #: Default Authorization header per label.  `{account}` is filled in.
 #: Key Vault: the recordings strip Authorization from the request that follows a
@@ -80,6 +81,7 @@ DEFAULT_AUTH = {
     "queue": "SharedKey {account}:replay",
     "table": "SharedKey {account}:replay",
     "dfs": "SharedKey {account}:replay",
+    "file": "SharedKey {account}:replay",
     "azconfig": "HMAC-SHA256 Credential=replay&SignedHeaders=x-ms-date;host;x-ms-content-sha256&Signature=replay",
     "vault": "Bearer replay",
     # a topic does not take the scheme `SharedAccessKey` (Azure answers 401); the recordings hold no key, so any signed-token form will do
@@ -1165,6 +1167,9 @@ def _normalize_path(label: str, path: str) -> str:
     segs = [s for s in path.split("/") if s != ""]
     if not segs:
         return "/"
+    if label == "file":
+        # {share}, then the directories and the file by depth
+        return "/" + "/".join(["{share}"] + (["{path}"] if len(segs) > 1 else []))
     if label in ("blob", "dfs"):
         first = "{container}" if label == "blob" else "{filesystem}"
         rest = "{blob}" if label == "blob" else "{path}"
@@ -1389,13 +1394,16 @@ class BlobWriteLog:
 
 
 def copy_source_placeholder(prep: PreparedEntry) -> bool:
-    return prep.label == "blob" and any(
-        k.lower() == "x-ms-copy-source" and is_sanitized_value(v) for k, v in prep.req_headers)
+    # Azure Files: the source of a copy or of a rename is named the same way, and has no blob to stand in for it
+    names = {"blob": ("x-ms-copy-source",), "file": ("x-ms-copy-source", "x-ms-file-rename-source")}.get(prep.label, ())
+    return any(k.lower() in names and is_sanitized_value(v) for k, v in prep.req_headers)
 
 
 def guess_copy_source(prep: PreparedEntry, writes: BlobWriteLog, settings: "Settings") -> Optional[str]:
     """Rule `copy source`: URL, on the emulator, of the most recently written blob of this
     recording other than the destination of this request.  None when there is none."""
+    if prep.label != "blob":
+        return None
     segs = [x for x in _path_of(prep.target).split("/") if x]
     dest = "/" + "/".join(segs)
     src = writes.pick(dest)

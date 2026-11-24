@@ -10,8 +10,8 @@
 # daemon. The binary links only glibc (and libgcc_s, libm), which `debian:stable-slim` has.
 #
 # What the image does by default: listens on every address of the container (`--host 0.0.0.0`), opens one fixed port per
-# service (`--standard-ports`: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10010 Key Vault, 10011 App
-# Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 8081 Cosmos, 5672 AMQP, 9093 Kafka; 4577 is the gateway)
+# service (`--standard-ports`: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10004 Files, 10010 Key Vault, 10011 App
+# Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 10015 Monitor, 8081 Cosmos, 5672 AMQP, 9093 Kafka; 4577 is the gateway)
 # and keeps nothing on disk. The emulator has no sign-in, so publish ports to your own machine only:
 # `docker run -p 127.0.0.1:4577:4577 ...`, never `-p 4577:4577`.
 #
@@ -28,7 +28,7 @@ COPY --chmod=0755 azemu /usr/local/bin/azemu
 
 USER azemu
 ENV HOME=/home/azemu
-HEALTHCHECK --interval=5s --timeout=3s --start-period=3s --retries=3 CMD ["/usr/local/bin/azemu", "__healthcheck"]
-EXPOSE 4577 10000 10001 10002 10003 10010 10011 10012 10013 10014 8081 5671 5672 9093 443
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --start-interval=250ms --retries=3 CMD ["/usr/local/bin/azemu", "__healthcheck"]
+EXPOSE 4577 10000 10001 10002 10003 10004 10010 10011 10012 10013 10014 10015 8081 5671 5672 9093 443
 ENTRYPOINT ["azemu"]
 CMD ["--host", "0.0.0.0", "--standard-ports"]

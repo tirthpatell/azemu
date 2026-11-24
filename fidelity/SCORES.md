@@ -1,8 +1,8 @@
 # Fidelity scores
 
-- Date: 2026-11-15
+- Date: 2026-11-24
 - Emulator binary: `azemu`
-- Services mounted (from `/_azemu/health`): blob, dfs, queue, table, keyvault, appconfig, cosmos, eventgrid, identity, servicebus, eventhubs, kafka, arm
+- Services mounted (from `/_azemu/health`): blob, dfs, queue, table, keyvault, appconfig, cosmos, eventgrid, identity, servicebus, eventhubs, kafka, arm, monitor, file, auth
 - Produced by `tools/replay/run_all.py`; reports are in `fidelity/reports/`. Rules for every class: `tools/replay/README.md`.
 
 Raw = every entry that is not a pass counts against. Adjusted = unreplayable entries removed from the denominator and ahead-async counted as passing. A recording passes (adjusted) when no hard failure is left after classification.
@@ -11,7 +11,7 @@ Raw = every entry that is not a pass counts against. Adjusted = unreplayable ent
 
 | package | recordings passing (adjusted / total) | recordings passing (raw) | entries raw % | entries adjusted % | unreplayable | ahead-async | hard failures left | values that differ / compared |
 |---|---|---|---|---|---|---|---|---|
-| blob | 1594/1685 | 1501/1685 | 95.77 | 97.06 | 153 | 0 | 336 | 86/19491 (0.44%) |
+| blob | 1594/1685 | 1501/1685 | 95.78 | 97.06 | 153 | 0 | 336 | 90/19503 (0.46%) |
 | queue | 196/200 | 192/200 | 98.89 | 99.44 | 4 | 0 | 4 | 3/954 (0.31%) |
 | table | 423/428 | 413/428 | 98.34 | 98.71 | 10 | 0 | 34 | 20/13188 (0.15%) |
 | keyvault-secrets | 312/348 | 167/348 | 84.16 | 98.94 | 0 | 944 | 68 | 0/14037 (0.00%) |
@@ -20,10 +20,11 @@ Raw = every entry that is not a pass counts against. Adjusted = unreplayable ent
 | appconfig | 272/304 | 269/304 | 93.30 | 99.38 | 431 | 0 | 41 | 4/37575 (0.01%) |
 | eventgrid | 59/59 | 59/59 | 100.00 | 100.00 | 0 | 0 | 0 | 4/63 (6.35%) |
 | servicebus | 115/120 | 115/120 | 97.93 | 97.93 | 0 | 0 | 19 | 38/10564 (0.36%) |
+| file | 460/679 | 389/679 | 70.14 | 72.63 | 161 | 0 | 1242 | 382/6722 (5.68%) |
 | datalake | 404/451 | 331/451 | 95.03 | 97.52 | 87 | 0 | 82 | 10/5790 (0.17%) |
 | arm | 26/34 | 24/34 | 71.68 | 82.86 | 8 | 6 | 18 | 15/597 (2.51%) |
 
-Classified entries (all packages above): ahead-async: 2423, unreplayable:auth-dependent: 108, unreplayable:azure-server-error: 8, unreplayable:generated-key: 336, unreplayable:leftover-state: 124, unreplayable:sanitized-copy-source: 22, unreplayable:throttled: 431
+Classified entries (all packages above): ahead-async: 2423, unreplayable:auth-dependent: 176, unreplayable:azure-server-error: 8, unreplayable:generated-key: 336, unreplayable:leftover-state: 124, unreplayable:sanitized-copy-source: 115, unreplayable:throttled: 431
 
 ## Settings the emulator was started with, per package
 
@@ -36,6 +37,7 @@ Classified entries (all packages above): ahead-async: 2423, unreplayable:auth-de
 - appconfig: none
 - eventgrid: `AZEMU_EVENTGRID_AUTOCREATE=1` (the recorded publishes go to topics that were made outside the recordings (in the Azure portal); without auto-creation they answer 404)
 - servicebus: `AZEMU_SERVICEBUS_TIER=standard` (the recordings come from a Standard namespace, which takes 256 KB as the one message size (the emulator takes what Premium takes too unless told))
+- file: `AZEMU_LOOSE_AUTH=1` (the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
 - datalake: `AZEMU_LOOSE_AUTH=1` (the recordings carry placeholder signatures (`SharedKey <account>:replay`, `sig=Sanitized`) and dates from the day they were made; azemu refuses both by default, as Azure does)
 - arm: none
 
@@ -43,7 +45,7 @@ Classified entries (all packages above): ahead-async: 2423, unreplayable:auth-de
 
 Operation, status, then the header or the path of the value. `Azure` is the recorded value, `emulator` ours. The full lists are in `fidelity/reports/<package>.json` under `value_groups`.
 
-**blob** (86 of 19491 values)
+**blob** (90 of 19503 values)
 
 - 12 x `GET /{container}?comp=list&restype=container  200  header content-type`: Azure `application/vnd.apache.arrow.stream`, emulator `application/xml`
 - 12 x `GET /{container}?comp=list&restype=container&include  200  header content-type`: Azure `application/vnd.apache.arrow.stream`, emulator `application/xml`
@@ -70,8 +72,8 @@ Operation, status, then the header or the path of the value. `Azure` is the reco
 
 **keyvault-keys** (2 of 48999 values)
 
-- 1 x `POST /keys/{name}/create  200  value /key/x`: Azure `jQhc_CtdcMOyZPZKGSzmIxggYTcyxMmPQB-Nuzayn-w`, emulator `BXvZeUVjXdQ6M-xFVp6dIK-avBcGeyT7-YuhFM_I2ic`
-- 1 x `POST /keys/{name}/create  200  value /key/y`: Azure `HLDDFphpCphDvBxRoRWcClZYNxrLrANBZfTekTKjcto`, emulator `ORSsknqH7ZccQ_cAdnbeKN2QBT8eRmYsLuLhpbtJLv8`
+- 1 x `POST /keys/{name}/create  200  value /key/x`: Azure `jQhc_CtdcMOyZPZKGSzmIxggYTcyxMmPQB-Nuzayn-w`, emulator `NcwQStD2pASpSd7mPnCEzz2KyBqvitYQUm8jS_Hdmz0`
+- 1 x `POST /keys/{name}/create  200  value /key/y`: Azure `HLDDFphpCphDvBxRoRWcClZYNxrLrANBZfTekTKjcto`, emulator `pV2kxCZVePSHprLCg6EkSz4yc_DOTirxuWtDcRmiFco`
 
 **keyvault-certificates** (33 of 65760 values)
 
@@ -87,7 +89,7 @@ Operation, status, then the header or the path of the value. `Azure` is the reco
 - 1 x `DELETE /kv/{name}  200  value /content_type`: Azure `application/vnd.microsoft.appconfig.ff+json;charset=utf-8`, emulator `test content type`
 - 1 x `DELETE /kv/{name}  200  value /key`: Azure `.appconfig.featureflag/key40c43ad9`, emulator `PYTHON_UNIT_test_key_a6af8952-54a6-11e9-b600-2816a84d0309`
 - 1 x `DELETE /kv/{name}  200  value /value`: Azure `hello world`, emulator `test value`
-- 1 x `GET /revisions?after&tags  200  value /etag`: Azure `vaRJCadaADxrVq_RYwHZN_CuL-MSABwSxQNlxCKeEFU`, emulator `6HSqDfkTCYl_hB6DYRfi5itXeV0N706Ow63u0y1DpgM`
+- 1 x `GET /revisions?after&tags  200  value /etag`: Azure `vaRJCadaADxrVq_RYwHZN_CuL-MSABwSxQNlxCKeEFU`, emulator `24AgoTIOiYCYLKpWUlfSq6-14R4CEInCxCcNZsAFL7I`
 
 **eventgrid** (4 of 63 values)
 
@@ -96,12 +98,21 @@ Operation, status, then the header or the path of the value. `Azure` is the reco
 
 **servicebus** (38 of 10564 values)
 
-- 8 x `PUT /  401  error text /Error/Detail[]`: Azure `Generic: Provided resource identifier '/subscriptions/faa080af-c1d8-4…`, emulator `MissingToken: The authorization header was not found. TrackingId:1aea…`
+- 8 x `PUT /  401  error text /Error/Detail[]`: Azure `Generic: Provided resource identifier '/subscriptions/faa080af-c1d8-4…`, emulator `MissingToken: The authorization header was not found. TrackingId:7c29…`
 - 5 x `PUT /{entity}  400  error text /Error/Detail[]`: Azure `SubCode=40000. The entity description of type 'QueueDescription' has …`, emulator `SubCode=40000. The entity description of type 'QueueDescription' has …`
-- 4 x `GET /$Resources/queues?$skip&$top  401  error text /Error/Detail[]`: Azure `InvalidSignature: The token has an invalid signature. TrackingId:a990…`, emulator `MissingToken: The authorization header was not found. TrackingId:f657…`
+- 4 x `GET /$Resources/queues?$skip&$top  401  error text /Error/Detail[]`: Azure `InvalidSignature: The token has an invalid signature. TrackingId:a990…`, emulator `MissingToken: The authorization header was not found. TrackingId:5875…`
 - 4 x `GET /{entity}/subscriptions/{subscription}?enrich  200  value /entry/content[]/SubscriptionDescription[]/AutoDeleteOnIdle[]`: Azure `P10675199DT2H48M5.4775807S`, emulator `PT10M`
 - 4 x `PUT /{entity}/subscriptions/{subscription}  200  value /entry/content[]/SubscriptionDescription[]/AutoDeleteOnIdle[]`: Azure `P10675199DT2H48M5.4775807S`, emulator `PT10M`
 - 2 x `PUT /{entity}/subscriptions  400  error text /Error/Detail[]`: Azure `The specified HTTP verb (PUT) is not valid. To know more visit https:…`, emulator `The specified HTTP verb (PUT) is not valid. To know more visit https:…`
+
+**file** (382 of 6722 values)
+
+- 152 x `GET /{share}/{path}  206  header x-ms-file-permission-key`: Azure `13263868858466308832*1203114425774373486`, emulator `9541354914390863802*3227211760911779636`
+- 102 x `PUT /{share}/{path}  201  header x-ms-file-permission-key`: Azure `13263868858466308832*1203114425774373486`, emulator `9541354914390863802*3227211760911779636`
+- 20 x `HEAD /{share}/{path}  200  header x-ms-file-permission-key`: Azure `4010187179898695473*11459378189709739967`, emulator `9541354914390863802*3227211760911779636`
+- 18 x `GET /{share}/{path}?restype=directory  200  header x-ms-file-permission-key`: Azure `17860367565182308406*11459378189709739967`, emulator `4905121398068318397*3227211760911779636`
+- 14 x `PUT /{share}/{path}?restype=directory  201  header x-ms-file-permission-key`: Azure `17860367565182308406*11459378189709739967`, emulator `4905121398068318397*3227211760911779636`
+- 12 x `GET /?comp=list&include  200  value /EnumerationResults/Shares[]/Share[]/Properties[]/Quota[]`: Azure `100`, emulator `102400`
 
 **datalake** (10 of 5790 values)
 

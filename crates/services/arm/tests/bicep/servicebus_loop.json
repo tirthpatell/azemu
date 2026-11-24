@@ -1,0 +1,73 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "13350246259549229762"
+    }
+  },
+  "parameters": {
+    "namespaceName": {
+      "type": "string",
+      "defaultValue": "[format('sb{0}', uniqueString(resourceGroup().id))]"
+    },
+    "queueNames": {
+      "type": "array",
+      "defaultValue": [
+        "orders",
+        "billing",
+        "audit"
+      ]
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]"
+    }
+  },
+  "variables": {
+    "queueList": "[map(filter(parameters('queueNames'), lambda('n', not(startsWith(lambdaVariables('n'), 'audit')))), lambda('n', toLower(lambdaVariables('n'))))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[parameters('namespaceName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Standard"
+      }
+    },
+    {
+      "copy": {
+        "name": "queues",
+        "count": "[length(variables('queueList'))]"
+      },
+      "type": "Microsoft.ServiceBus/namespaces/queues",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[format('{0}/{1}', parameters('namespaceName'), variables('queueList')[copyIndex()])]",
+      "properties": {
+        "maxDeliveryCount": 5
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.ServiceBus/namespaces', parameters('namespaceName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "created": {
+      "type": "array",
+      "value": "[map(parameters('queueNames'), lambda('n', format('{0}/{1}', parameters('namespaceName'), lambdaVariables('n'))))]"
+    },
+    "sorted": {
+      "type": "array",
+      "value": "[sort(parameters('queueNames'), lambda('a', 'b', less(lambdaVariables('a'), lambdaVariables('b'))))]"
+    },
+    "endpoint": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.ServiceBus/namespaces', parameters('namespaceName')), '2022-10-01-preview').serviceBusEndpoint]"
+    }
+  }
+}

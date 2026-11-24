@@ -133,6 +133,7 @@ with `Accept-Datetime` look through the history (bounded by the store limit). Th
   answered `413` with an nginx page for a value of 12,000 bytes and took 9,000: that limit comes from the front end and may depend on the tier,
   so it is not copied), 429 for request rates. Only `.` and `..` are rejected as keys. What is enforced is under "Limits".
 - `Accept` is ignored; the content type is always the recorded one. The label `""` is the null label.
+- **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled request is `429` with `retry-after-ms` and the `too-many-requests` problem document, as the throttling page of the REST API shows it. The emulator never throttles by itself (no quota is counted).
 
 ## Keeping data between runs (`--data-dir`)
 
@@ -145,3 +146,9 @@ the load). The indexes (by key, by age, labels, byte counts) are built again. Th
 ## Reset, state file, unsupported list
 
 `POST /_azemu/reset?account=<store>` empties one store (settings, history, snapshots); persistence sees a change. The settings `AZEMU_APPCONFIG_*` are read through `azemu_core::settings` and described in `docs/SETTINGS.md`. Version 1 of `appconfig.state` is checked in under `crates/services/appconfig/tests/state-v1/appconfig/` and loaded by `tests/state_v1.rs`. A 501 is named `AppConfig_Unknown (GET /{}/{})` in `GET /_azemu/unsupported` (fixed words of the path stay, names of keys and snapshots are `{}`).
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked. A missing role is 403 and a token that is wrong 401 with `WWW-Authenticate: HMAC-SHA256, Bearer error="invalid_token", ...`, both with
+**no body and no `Content-Type`**, as on Azure. A Data Reader reads everything (key-values, keys, labels, revisions, snapshots); writes, deletes and locks need Data Owner. A missing key is 403 for a principal with no role and 404 for
+one that may read. The connection string (`HMAC-SHA256`) is checked as before. The read-only key could not be tried on Azure.

@@ -4,6 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use azemu_core::auth::sas::Claim;
 use azemu_kafka::api::err;
 use azemu_kafka::records::{encode_batch, Batch};
 use azemu_kafka::{Struct, Value};
@@ -57,6 +58,13 @@ impl Broker {
                 )
             })
             .collect();
+        let asked: Vec<(String, Vec<i32>)> = wanted.iter().map(|(t, ps)| (t.clone(), ps.iter().map(|p| p.0).collect())).collect();
+        // strict authorisation: reading a topic needs `Listen`; the others are answered with the error and no records
+        let denied: Vec<String> = wanted.iter().filter(|(t, _)| !self.may(c, t, Claim::Listen)).map(|(t, _)| t.clone()).collect();
+        for t in &denied {
+            self.log_refused(c, "fetch", t, Claim::Listen);
+        }
+        let wanted: Wanted = wanted.into_iter().filter(|(t, _)| !denied.contains(t)).collect();
         let deadline = Instant::now() + Duration::from_millis(max_wait);
         let round = loop {
             // take the current notifier before looking, so that nothing stored in between is missed
@@ -65,7 +73,11 @@ impl Broker {
             tokio::pin!(notified);
             notified.as_mut().enable();
             let round = self.fetch_round(&ns, &wanted, max_bytes);
-            let ready = round.any_error || max_wait == 0 || min_bytes <= 0 || (round.bytes > 0 && round.bytes as i64 >= min_bytes as i64);
+            let ready = round.any_error
+                || !denied.is_empty()
+                || max_wait == 0
+                || min_bytes <= 0
+                || (round.bytes > 0 && round.bytes as i64 >= min_bytes as i64);
             if ready || Instant::now() >= deadline {
                 break round;
             }
@@ -74,6 +86,30 @@ impl Broker {
                 _ = tokio::time::sleep_until(deadline) => {}
             }
         };
+        let refused: Vec<Struct> = denied
+            .iter()
+            .map(|t| {
+                let parts: Vec<Struct> = asked
+                    .iter()
+                    .find(|(n, _)| n == t)
+                    .map(|(_, ps)| ps.clone())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|idx| {
+                        Struct::new()
+                            .with("PartitionIndex", idx)
+                            .with("ErrorCode", err::TOPIC_AUTHORIZATION_FAILED)
+                            .with("HighWatermark", -1i64)
+                            .with("LastStableOffset", -1i64)
+                            .with("LogStartOffset", -1i64)
+                            .with("AbortedTransactions", Value::Null)
+                            .with("PreferredReadReplica", -1)
+                            .with("Records", Value::Null)
+                    })
+                    .collect();
+                Struct::new().with("Topic", t.clone()).with("Partitions", parts)
+            })
+            .collect();
         let topics: Vec<Struct> = round
             .topics
             .into_iter()
@@ -95,6 +131,7 @@ impl Broker {
                 Struct::new().with("Topic", name).with("Partitions", parts)
             })
             .collect();
+        let topics: Vec<Struct> = refused.into_iter().chain(topics).collect();
         // no fetch sessions: session id 0 tells the client to send full requests
         Struct::new().with("ThrottleTimeMs", 0).with("ErrorCode", 0).with("SessionId", 0).with("Responses", topics)
     }
@@ -162,11 +199,13 @@ impl Broker {
                 h.trim_all(now);
             }
             let mut parts = Vec::new();
+            let allowed = self.may(c, &name, Claim::Listen);
             for p in t.structs("Partitions") {
                 let idx = p.i32("PartitionIndex");
                 let ts = p.i64("Timestamp");
                 let part = st.hub(&ns, &name).and_then(|h| usize::try_from(idx).ok().and_then(|i| h.partitions.get(i)));
                 let (code, time, offset) = match part {
+                    _ if !allowed => (err::TOPIC_AUTHORIZATION_FAILED, -1, -1),
                     None => (err::UNKNOWN_TOPIC_OR_PARTITION, -1, -1),
                     // latest: the offset the next event gets
                     Some(p) if ts == -1 => (0, -1, p.next_seq),

@@ -153,7 +153,7 @@ async fn destination_handler_gets_a_finished_message_and_failures_are_retried() 
     let d = &calls[2];
     assert_eq!((d.target.namespace.as_str(), d.target.entity.as_str()), ("ns1", "q1"));
     assert_eq!(d.kind, DestinationKind::ServiceBusQueue);
-    assert_eq!(d.content_type, "application/json");
+    assert_eq!(d.content_type, "application/json; charset=utf-8");
     assert_eq!(d.event_id, "evt-1");
     let body: Value = serde_json::from_slice(&d.body).unwrap();
     assert!(body.is_object(), "one event, not an array");
@@ -278,4 +278,34 @@ async fn admin_api_and_config_file_for_storage_accounts() {
     t.srv.reset();
     assert_eq!(t.get_admin("/sources/storage/files/subscriptions").await.json()["value"].as_array().unwrap().len(), 1);
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn a_storage_subscription_with_no_event_types_gets_the_default_set_only() {
+    let svc = EventGridService::with_options(fast_options());
+    let src = SourceRef::storage_account("acct");
+    let plain = recording_handler(&svc, DestinationKind::StorageQueue, 0);
+    let dest = json!({"endpointType": "StorageQueue", "storageAccount": "acct", "queueName": "q"});
+    svc.put_source_subscription(&src, "plain", cfg(json!({"destination": dest})), None).await.unwrap();
+    svc.put_source_subscription(
+        &src,
+        "asked",
+        cfg(json!({"destination": dest, "filter": {"includedEventTypes": ["Microsoft.Storage.BlobTierChanged"]}})),
+        None,
+    )
+    .await
+    .unwrap();
+    let mut ev = blob_created("/blobServices/default/containers/c/blobs/b");
+    // Event Grid: a storage account's default set is BlobCreated and BlobDeleted
+    assert_eq!(svc.raise_source_event(&src, ev.clone()), 1, "BlobCreated: the plain subscription");
+    ev.event_type = "Microsoft.Storage.BlobDeleted".into();
+    assert_eq!(svc.raise_source_event(&src, ev.clone()), 1);
+    ev.event_type = "Microsoft.Storage.BlobTierChanged".into();
+    assert_eq!(svc.raise_source_event(&src, ev.clone()), 1, "only the subscription that asked for it");
+    ev.event_type = "Microsoft.Storage.DirectoryCreated".into();
+    assert_eq!(svc.raise_source_event(&src, ev), 0);
+    eventually(3.0, || (plain.lock().len() >= 3).then_some(())).await.expect("deliveries");
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // plain: BlobCreated, BlobDeleted, and the tier event for "asked" went to the same recording handler
+    assert_eq!(plain.lock().len(), 3);
 }

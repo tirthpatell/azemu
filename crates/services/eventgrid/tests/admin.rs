@@ -81,7 +81,13 @@ async fn bad_admin_input_is_a_400_with_a_message() {
     )
     .await;
     // not JSON
-    let r = t.srv.request("PUT", &t.admin("/topics/n/subscriptions/s?namespace=ns")).body("{").send().await;
+    let r = t
+        .srv
+        .request("PUT", &t.admin("/topics/n/subscriptions/s?namespace=ns"))
+        .header("content-type", "application/json")
+        .body("{")
+        .send()
+        .await;
     assert_eq!(r.status, 400);
     // topic does not exist
     assert_eq!(t.put_json("/topics/ghost/subscriptions/s", &json!({})).await.status, 404);

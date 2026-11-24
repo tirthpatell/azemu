@@ -18,7 +18,7 @@ With `--standard-ports`: `http://azemu:10014/{tenant}/oauth2/v2.0/token`. A clie
 authority (`docs/reaching-the-emulator.md`).
 
 **Not built.** Nothing is validated: any secret, assertion, password or certificate is accepted, and no registry of tenants, applications or managed
-identities exists. The other services do not check the tokens either. Older managed identity endpoints (`MSI_ENDPOINT`, Azure Arc, Service Fabric, Cloud
+identities exists. The other services do not check the tokens either (except in `--strict-auth` mode, below). Older managed identity endpoints (`MSI_ENDPOINT`, Azure Arc, Service Fabric, Cloud
 Shell), `form_post`, PKCE, consent and logout answer 501 or are ignored. Tokens are version 1.0 style and carry no `roles`.
 
 Crate `azemu-identity` (`crates/services/identity`). `name()` is `identity`. Mounts:
@@ -43,6 +43,7 @@ not single use and still work after a restart.
 | `GET /{tenant}/oauth2/v2.0/authorize` (and v1): signs the user in at once and redirects to `redirect_uri` with `code` and `state` in the query. `response_mode=query` and `response_type=code` only (others redirect with an `error`) | built |
 | `GET /common/userrealm/{user}` | built |
 | `GET /_azemu/identity/token?resource=` (or `scope=`; optional `client_id`, `tenant`, `expires_in`) returns the token JSON, for curl and scripts | built |
+| `GET /_azemu/identity/principal[?client_id=\|object_id=\|mi_res_id=]` gives `{clientId, objectId, tenantId, named}`: the object id (`oid`) that the tokens of a client id carry, or the default managed identity's when nothing is named. For giving a role to a client id without decoding a token (`docs/strict-auth.md`) | built |
 | anything else under the mounts (`/metadata/identity/info`, `/oauth2/v2.0/logout`, `userinfo`, ...) | 501 `NotImplemented` naming the operation |
 
 Every Entra path also exists under `/_azemu/identity/login/{tenant}/...`, so an authority is
@@ -191,10 +192,10 @@ URLs keep the port.
   `form_post`.
 - MSAL drops the port of the authority in instance discovery and in user realm discovery
   (`/common/userrealm/{user}`), so `UsernamePasswordCredential` needs a port-443 forward (see above).
-- Other services do not validate these tokens (they accept any bearer token). A clean way to add that later: a
-  small trait in core (`TokenValidator::validate(token) -> Result<Claims>`) implemented by `IdentityService`
-  (it already has `signing_key()`), handed to services by the `azemu` binary. Not built.
+- Other services do not validate these tokens (they accept any bearer token), unless the emulator is started with `--strict-auth`: then the identity service is the authority that checks the signature, `exp` and `nbf` of a token
+  (a trait in core, `azemu_core::auth::TokenAuthority`, handed to the services by the `azemu` binary), and the services that check roles decide by the token's `oid` ([`../strict-auth.md`](../strict-auth.md)).
 - The service is mounted by the `azemu` binary (`azemu::full_stack()`); `azemu-identity` also runs on its own.
+- **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled token request is `429` with `Retry-After` and `{"error":"temporarily_unavailable",..}`; the error name and text are a guess.
 
 ## Keeping data between runs (`--data-dir`)
 

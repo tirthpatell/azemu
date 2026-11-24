@@ -3,7 +3,7 @@
 use azemu_core::resp::Resp;
 use azemu_core::{json_error, Request, Response};
 
-const TENANT: &str = "00000000-0000-0000-0000-000000000000";
+pub(crate) const TENANT: &str = "00000000-0000-0000-0000-000000000000";
 const SERVICE_VERSION: &str = "1.9.2455.1";
 const REGION: &str = "westus";
 

@@ -24,6 +24,7 @@ mod handlers;
 mod limits;
 mod produce;
 pub mod store;
+pub mod strict;
 
 /// Largest request the server reads (Kafka's default `socket.request.max.bytes` is 100 MiB).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
@@ -71,6 +72,13 @@ impl KafkaConfig {
 pub struct KafkaEndpoint {
     pub(crate) broker: Arc<handlers::Broker>,
     connections: Arc<AtomicUsize>,
+}
+
+impl KafkaEndpoint {
+    /// How many connections are open now (the limit is [`MAX_CONNECTIONS`]).
+    pub fn open_connections(&self) -> usize {
+        self.connections.load(Ordering::Relaxed)
+    }
 }
 
 /// Log a request frame as hex at `trace`, except a `SaslAuthenticate` request: it carries the user name and the password (for
@@ -144,9 +152,115 @@ impl RawProtocol for KafkaEndpoint {
     }
 }
 
+/// The connection, with a few bytes the client sent during a fault wait (`faulted`) put back in front of what is still unread.
+struct Ahead {
+    io: Box<dyn azemu_core::Io>,
+    ahead: Vec<u8>,
+    taken: usize,
+}
+
+/// The most that is read ahead while a rule makes the connection wait: one request that was sent without waiting for the answer, not a stream.
+const MAX_AHEAD: usize = 64 * 1024;
+
+impl tokio::io::AsyncRead for Ahead {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.taken < self.ahead.len() {
+            let n = (self.ahead.len() - self.taken).min(buf.remaining());
+            let from = self.taken;
+            buf.put_slice(&self.ahead[from..from + n]);
+            self.taken += n;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        std::pin::Pin::new(&mut self.io).poll_read(cx, buf)
+    }
+}
+
+impl tokio::io::AsyncWrite for Ahead {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+impl Ahead {
+    /// Wait for `d`, and end it early (`false`) when the client has gone: a client that gives up and tries again must not hold its connection
+    /// (and a place in the limit of connections) for the whole wait. What the client sends meanwhile is kept for the next read.
+    async fn wait(&mut self, d: Duration) -> bool {
+        if self.taken == self.ahead.len() {
+            self.ahead.clear();
+            self.taken = 0;
+        }
+        let deadline = tokio::time::sleep(d);
+        tokio::pin!(deadline);
+        let mut chunk = [0u8; 4096];
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return true,
+                r = self.io.read(&mut chunk), if self.ahead.len() < MAX_AHEAD => match r {
+                    Ok(0) | Err(_) => return false,
+                    Ok(n) => self.ahead.extend_from_slice(&chunk[..n]),
+                },
+            }
+        }
+    }
+}
+
+/// What the fault rules (`docs/faults.md`) make of a Kafka connection or request: wait, or end the connection. Kafka takes no
+/// throttling or error answer from a rule (core leaves those rules out for the `kafka` service). `true`: close now (also when the client
+/// went away during the wait).
+async fn faulted(faults: &azemu_core::Faults, io: &mut Ahead, namespace: &str, entity: &str, op: azemu_core::faults::Operation) -> bool {
+    if !faults.is_active() {
+        return false;
+    }
+    let out = faults.messaging("kafka", namespace, entity, op);
+    if out.fired.is_empty() {
+        return false;
+    }
+    tracing::info!(service = "kafka", account = %namespace, entity = %entity, operation = op.name(), fault = %out.kinds(), rule = %out.rules(), "kafka fault");
+    if !out.delay.is_zero() && !io.wait(out.delay).await {
+        return true;
+    }
+    match out.action {
+        Some(azemu_core::faults::Action::Drop) => true,
+        Some(azemu_core::faults::Action::Timeout(d)) => {
+            // no answer: the request is read and left, until the time is up
+            io.wait(d.unwrap_or(std::time::Duration::from_secs(3600))).await;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// The operation a request is, for a rule: a produce is a send, a fetch a receive, anything else management.
+fn operation_of(api_key: i16) -> azemu_core::faults::Operation {
+    use azemu_core::faults::Operation;
+    match api_key {
+        api::PRODUCE => Operation::Send,
+        api::FETCH => Operation::Receive,
+        _ => Operation::Management,
+    }
+}
+
 async fn serve_connection(broker: Arc<handlers::Broker>, conn: RawConn) {
     let mut c = handlers::Conn::new(&conn);
-    let mut io = conn.io;
+    let faults = conn.faults.clone();
+    let mut io = Ahead { io: conn.io, ahead: Vec::new(), taken: 0 };
+    if faulted(&faults, &mut io, &c.namespace(), "", azemu_core::faults::Operation::Connect).await {
+        return;
+    }
     let mut buf: Vec<u8> = Vec::new();
     loop {
         // the length prefix, within the idle time
@@ -182,10 +296,22 @@ async fn serve_connection(broker: Arc<handlers::Broker>, conn: RawConn) {
         let out = match header::read_request(&buf) {
             Ok(req) => {
                 let h = req.header.clone();
+                if faults.is_active() {
+                    // the first topic the request names (a produce or fetch names its topics; others none)
+                    let topic = req.body.structs("TopicData").chain(req.body.structs("Topics")).find_map(|t| t.str("Name")).unwrap_or("");
+                    if faulted(&faults, &mut io, &c.namespace(), topic, operation_of(h.api_key)).await {
+                        return;
+                    }
+                }
                 match broker.handle(&mut c, req).await {
                     handlers::Reply::Answer(body) => header::write_response(&h, &body),
                     handlers::Reply::Nothing => continue,
                     handlers::Reply::Close => return,
+                    handlers::Reply::AnswerThenClose(body) => {
+                        let out = header::write_response(&h, &body);
+                        let _ = tokio::time::timeout(FRAME_TIMEOUT, io.write_all(&out)).await;
+                        return;
+                    }
                 }
             }
             Err(azemu_kafka::Error::Unsupported { api_key, version }) if api_key == api::API_VERSIONS => {
@@ -217,6 +343,11 @@ async fn serve_connection(broker: Arc<handlers::Broker>, conn: RawConn) {
 impl Service for KafkaEndpoint {
     fn name(&self) -> &'static str {
         "kafka"
+    }
+
+    /// Login and rights in strict mode (`strict.rs`).
+    fn enforces_strict_auth(&self) -> bool {
+        true
     }
 
     fn mounts(&self) -> Vec<Mount> {

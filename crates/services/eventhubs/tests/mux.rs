@@ -107,7 +107,7 @@ async fn a_namespace_that_has_an_event_hub_is_an_event_hubs_namespace() {
     let s = setup().await;
     // created through the admin API, the way a test suite would
     let url = format!("{}/_azemu/eventhubs/team/hubs/orders", s.srv.gateway_url());
-    let r = s.srv.send("PUT", &url, &[], r#"{"partitionCount":2}"#).await;
+    let r = s.srv.send("PUT", &url, &[("content-type", "application/json")], r#"{"partitionCount":2}"#).await;
     assert_eq!(r.status, 201, "{}", r.text());
     let mut c = connect(s.srv.port(), "team.servicebus.localhost").await;
     let l = attach_sender(&mut c, "orders/Partitions/1").await.unwrap();

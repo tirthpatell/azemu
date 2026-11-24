@@ -207,6 +207,7 @@ answered with `DataServiceVersion: 3.0;` (or `1.0;` for an empty body).
   is `400 InvalidInput`; what a request with no credentials is told was tried against Azure in November 2026 (above).
 - Cosmos DB Table API (`*.table.cosmos.azure.com`) behaviour is not emulated (it allows
   underscores in table names, empty keys, other error codes).
+- **Faults.** Only on request, with a fault rule ([`faults.md`](../faults.md)). A throttled request is `503 ServerBusy` as OData JSON (Table Storage shares the storage error codes); `Retry-After` is sent only when the rule gives a wait. The emulator never throttles by itself.
 
 ## Keeping data between runs (`--data-dir`)
 
@@ -215,3 +216,10 @@ policies, every entity with its typed properties and its timestamp, from which t
 key order and put back in the ordered map. Reads are not changes; every other request is. The file is written only when its bytes differ from the last save.
 
 Version 1 of `table.state` is checked in under `crates/services/table/tests/state-v1/table/` and loaded by `tests/state_v1.rs`. A request no route matches is `501` and is named `Table_Unknown (<METHOD> <Service|Tables|TableItem|Batch|Table|Query|Entity|NestedPath|BadKeys>)` in `GET /_azemu/unsupported`.
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked: the token, then the data action. A refusal is OData JSON with `AuthorizationPermissionMismatch` and **no**
+`x-ms-error-code` header. A Table Data Reader lists tables and reads and queries entities; writes need `entities/write` (or `add/action` and `update/action`), Delete Table looks for the table first (404 for every principal).
+An entity group transaction is judged per operation and the first refused operation fails the change set (what Azure sends for a refused part was not tried). A bad token is 403 `AuthenticationFailed` for `x-ms-version` before 2020-12-06
+(the Python SDK sends 2019-02-02) and 401 `InvalidAuthenticationInfo` from it, with no detail text.

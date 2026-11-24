@@ -223,6 +223,7 @@ leaves out come from the queue's stored access policy.
   message visible at once; responses show whole seconds as Azure does.
 - `timeout` is ignored. No quotas (number of queues, messages, bytes per queue).
 - State is lost on restart unless `--data-dir` is set (below); `/_azemu/reset` always starts empty.
+- **Faults.** Only on request, with a fault rule ([`faults.md`](../faults.md)). A throttled request is `503 ServerBusy` with the XML error, as Microsoft's list of storage error codes gives it; `Retry-After` is sent only when the rule gives a wait. The emulator never throttles by itself.
 
 ## Keeping data between runs (`--data-dir`)
 
@@ -233,3 +234,9 @@ expired message is dropped as before, when something looks at the queue. Nothing
 message is a change; peeks, listings and a `Get Messages` that finds nothing are not. The file is written only when its bytes differ from the last save.
 
 Version 1 of `queue.state` is checked in under `crates/services/queue/tests/state-v1/queue/` and loaded by `tests/state_v1.rs`. A 501 never happens in this service (an unknown verb is `405 UnsupportedHttpVerb`).
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked: the token, then the data action. A Queue Data Reader lists, peeks and reads the metadata; receiving (Get Messages) needs
+`messages/process/action` or `delete` and `read`; Put Message needs `add/action` or `write`; Create Queue is refused with `AuthorizationFailure`, the rest with `AuthorizationPermissionMismatch`. A role on one queue
+applies to that queue. Keys and SAS are checked as before. Set Queue Service Properties asks for `queueServices/write` (Microsoft's table says `read`, which is a typo: a Reader was refused on Azure).

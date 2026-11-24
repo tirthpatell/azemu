@@ -77,6 +77,18 @@ def check_queue():
     return f"send and receive on {HOST}:10001"
 
 
+def check_file():
+    from azure.storage.fileshare import ShareServiceClient
+
+    cs = f"DefaultEndpointsProtocol=http;AccountName={DEV_ACCOUNT};AccountKey={DEV_KEY};FileEndpoint=http://{HOST}:10004/{DEV_ACCOUNT};"
+    share = ShareServiceClient.from_connection_string(cs).create_share(uid("s"))
+    d = share.create_directory("docs")
+    d.upload_file("hello.txt", b"hello from a container")
+    assert d.get_file_client("hello.txt").download_file().readall() == b"hello from a container"
+    assert [i.name for i in d.list_directories_and_files()] == ["hello.txt"]
+    return f"create share, upload and download on {HOST}:10004"
+
+
 def check_table():
     from azure.data.tables import TableServiceClient
 
@@ -221,7 +233,26 @@ def check_arm_and_identity():
     return f"subscriptions list on https://{HOST}:10013, token on http://{HOST}:10014"
 
 
-CHECKS = [check_blob, check_datalake, check_queue, check_table, check_keyvault, check_appconfig, check_cosmos, check_eventgrid, check_servicebus, check_eventhubs, check_arm_and_identity]
+def check_monitor():
+    import datetime
+    import uuid
+
+    ikey = str(uuid.uuid4())
+    name = "ct" + uuid.uuid4().hex[:8]
+    now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f0Z")
+    envelope = {"ver": 1, "name": "Microsoft.ApplicationInsights.Event", "time": now, "iKey": ikey,
+                "data": {"baseType": "EventData", "baseData": {"ver": 2, "name": name}}}
+    # what `IngestionEndpoint=http://azemu:10015/` makes an SDK do
+    req = urllib.request.Request(f"http://{HOST}:10015/v2.1/track", data=json.dumps([envelope]).encode(), method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert json.load(r)["itemsAccepted"] == 1
+    with urllib.request.urlopen(f"{GATEWAY}/_azemu/monitor/telemetry?ikey={ikey}&name={name}", timeout=10) as r:
+        items = json.load(r)["items"]
+    assert [i["type"] for i in items] == ["EventData"], items
+    return f"event posted to http://{HOST}:10015 and read back through the admin API"
+
+
+CHECKS = [check_blob, check_datalake, check_queue, check_file, check_table, check_keyvault, check_appconfig, check_cosmos, check_eventgrid, check_servicebus, check_eventhubs, check_arm_and_identity, check_monitor]
 
 
 def main():

@@ -11,6 +11,7 @@ mod entity;
 mod entity_api;
 mod errors;
 mod filter;
+mod inspect;
 mod json;
 mod multipart;
 mod odata;
@@ -45,11 +46,19 @@ pub struct TableService {
     accounts: StorageAccounts,
     /// Raised on every change to the state that a save would write (see `persist_generation`).
     generation: AtomicU64,
+    /// Strict authorisation (`sas.rs`, `Grant::Role`); does nothing until the program hands over a real handle.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 impl TableService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check roles for bearer tokens in strict mode (`docs/strict-auth.md`).
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("table");
+        *self.auth.write() = auth;
     }
 
     /// The account's CORS rules in the form `azemu_core::storage::cors` takes.
@@ -94,11 +103,35 @@ impl TableService {
         if azemu_core::storage::credentials::refused_version(req).is_some() {
             return Err((errors::invalid_version(), false));
         }
+        // strict mode: the bearer token is checked first; the role is asked where each operation runs (`Grant::Role`)
+        let auth = self.auth.read().clone();
+        let role = if auth.applies(req) {
+            match azemu_core::storage::strict::authenticate(
+                &auth,
+                req,
+                azemu_core::storage::strict::Kind::Table,
+                &req.account.to_ascii_lowercase(),
+            ) {
+                Ok(who) => Some(who),
+                Err(refused) => return Ok(refused),
+            }
+        } else {
+            None
+        };
         let mut st = self.state.lock();
         let acct = st.account(&req.account);
 
         let found = table_name.and_then(|n| acct.tables.get(&n.to_ascii_lowercase()));
-        let grant = sas::authenticate(req, &self.accounts, table_name.map(|n| (n, found))).map_err(|e| (e, xml))?;
+        let grant = match role {
+            Some(who) => sas::Grant::Role(sas::RoleGrant {
+                auth,
+                who,
+                account: req.account.to_ascii_lowercase(),
+                table: table_name.map(str::to_string),
+                what: format!("{} {}", req.method, req.decoded_path()),
+            }),
+            None => sas::authenticate(req, &self.accounts, table_name.map(|n| (n, found))).map_err(|e| (e, xml))?,
+        };
         let rq = Rq::new(req, grant);
         let result = route(&rq, acct, target).map_err(|e| (e, xml));
         // Only a read leaves the state alone. Inside the lock and after the change, so a save that sees the new
@@ -261,6 +294,34 @@ impl Service for TableService {
         "devstoreaccount1"
     }
 
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    /// `503 ServerBusy` as OData JSON for a throttle (Table Storage shares the Storage common error codes; its own list names
+    /// no throttling code). `Retry-After` only when the rule gives a wait.
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(503);
+        let default_code = match status {
+            500 => "InternalError",
+            503 => "ServerBusy",
+            s => azemu_core::FaultAnswer::default_code(s),
+        };
+        let message = a.message_or(if a.throttle {
+            "The server is currently unable to receive requests. Please retry your request."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let e = errors::ApiError::new(status, &a.code_or(default_code), &message);
+        let mut resp = errors::render(&e, &req.ctx, false);
+        if let Some(s) = a.retry_after_secs() {
+            if let Ok(v) = azemu_core::http::HeaderValue::from_str(&s.to_string()) {
+                resp.headers_mut().insert(azemu_core::http::header::RETRY_AFTER, v);
+            }
+        }
+        finish(resp, req, SERVER)
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let preflight = req.method == Method::OPTIONS;
         let mut resp = if preflight {
@@ -293,6 +354,10 @@ impl Service for TableService {
         self.state.lock().accounts.retain(|k, _| !k.eq_ignore_ascii_case(account));
         self.generation.fetch_add(1, Ordering::SeqCst);
         true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::inspect(&self.state.lock(), req)
     }
 
     fn persist_generation(&self) -> Option<u64> {

@@ -14,6 +14,7 @@ mod documents;
 mod epk;
 mod errors;
 mod hybridrow;
+mod inspect;
 mod js;
 mod limits;
 mod offers;
@@ -32,6 +33,7 @@ mod script_run;
 mod scripts;
 mod select;
 mod state;
+mod strict;
 mod udf;
 mod users;
 mod validate;
@@ -64,6 +66,8 @@ pub struct CosmosService {
     /// Scripts (and queries with user-defined functions) that run now, by account, so that a reset can end their workers.
     runs: Arc<Mutex<Vec<(u64, String, js::proc::RunHandle)>>>,
     next_run: std::sync::atomic::AtomicU64,
+    /// Strict authorisation (`strict.rs`); does nothing until the program hands over a real handle.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 /// Takes a running script out of `CosmosService::runs` when it is over.
@@ -119,7 +123,14 @@ impl CosmosService {
             saved: Mutex::default(),
             runs: Arc::default(),
             next_run: std::sync::atomic::AtomicU64::new(1),
+            auth: Default::default(),
         }
+    }
+
+    /// Check Cosmos DB roles for Entra tokens in strict mode (`docs/strict-auth.md`).
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("cosmos");
+        *self.auth.write() = auth;
     }
 
     /// Lists a running script under its account until the guard is dropped.
@@ -273,6 +284,14 @@ impl Service for CosmosService {
         vec![Mount::AccountHost("documents")]
     }
 
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.state.lock(), req)
+    }
+
     fn default_account(&self) -> &'static str {
         "localhost"
     }
@@ -305,6 +324,39 @@ impl Service for CosmosService {
         )
     }
 
+    /// The throttling answer of Cosmos DB: `429` with `x-ms-retry-after-ms` and `x-ms-substatus: 3200`, and the "Request rate is
+    /// large" text in the usual `Message: {"Errors":[..]}` body. Sources: the REST response headers page (`x-ms-retry-after-ms`:
+    /// "the number of milliseconds to wait to retry the operation after an initial operation received HTTP status code 429"),
+    /// the troubleshooting page for 429 ("Request rate is large. More Request Units might be needed, so no changes were made."),
+    /// and the SDKs, which retry a 429 by waiting for that header.
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let activity =
+            req.header("x-ms-activity-id").filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(|| req.ctx.request_id.clone());
+        let status = a.status_or(429);
+        let default_message = if a.throttle {
+            "Request rate is large. More Request Units may be needed, so no changes were made. Please retry this request later. Learn more: http://aka.ms/cosmosdb-error-429"
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        };
+        let message = a.message_or(default_message);
+        let code = a.code_or(if a.throttle { "429" } else { azemu_core::FaultAnswer::default_code(status) });
+        let inner = serde_json::json!({ "Errors": [message] }).to_string();
+        let body = serde_json::json!({
+            "code": code,
+            "message": format!("Message: {inner}\r\nActivityId: {activity}, Microsoft.Azure.Documents.Common/2.14.0"),
+        });
+        let mut r = azemu_core::resp::Resp::new(status).header("x-ms-activity-id", &activity);
+        // Azure always sends the wait with a 429; a rule that names none gets a short one
+        let wait = a.retry_after_ms().or(if a.throttle && a.status.is_none() { Some(100) } else { None });
+        if let Some(ms) = wait {
+            r = r.header("x-ms-retry-after-ms", ms);
+        }
+        if a.throttle {
+            r = r.header("x-ms-substatus", 3200);
+        }
+        r.json(&body).build()
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let mut cx = Cx::new(&req);
         cx.cache = Some(self.pages.clone());
@@ -312,8 +364,13 @@ impl Service for CosmosService {
         self.pages.sweep(cx.now);
         // Parse the body before taking the lock; run queries after releasing it. What happens
         // under the lock is only the work on the stored state.
+        let strict_auth = self.auth.read().clone();
+        let strict_refusal = strict::gate(&strict_auth, &req);
         let result = if req.header("authorization").map(str::is_empty).unwrap_or(true) {
             Err(CosmosError::unauthorized("Required Header authorization is missing. Ensure a valid Authorization token is passed."))
+        } else if let Some(refused) = strict_refusal {
+            // strict mode: an Entra token is checked, and Cosmos DB's own roles decide (`strict.rs`)
+            Err(refused)
         } else if req.body.len() > limits::MAX_REQUEST_BYTES {
             Err(CosmosError::too_large())
         } else if let Err(e) = validate::check(&cx) {

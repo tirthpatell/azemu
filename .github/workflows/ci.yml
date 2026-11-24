@@ -165,8 +165,9 @@ jobs:
         run: |
           suites() {
             python tests/run_sdk_suites.py --bin dist/azemu --jobs 4 \
-              --only appconfig --only arm --only blob --only cosmos --only datalake --only eventgrid --only identity \
-              --only kafka --only keyvault --only persistence --only queue --only seed --only storage_events --only table \
+              --only appconfig --only arm --only auth --only blob --only cosmos --only datalake --only eventgrid --only faults \
+              --only file --only identity --only kafka --only keyvault --only monitor --only persistence --only queue \
+              --only schemaregistry --only seed --only storage_events --only table \
               | tee "$RUNNER_TEMP/python-suites.txt"
           }
           suites || { echo "::warning::the Python suites failed once; running them again"; suites; }
@@ -188,7 +189,7 @@ jobs:
           path: dist
       - run: chmod +x dist/azemu
       # puts the binary into a small image (Dockerfile.dev), runs it next to a Python client on a Docker network and reaches
-      # eleven services by name on the standard ports
+      # every service by name on the standard ports
       - run: tests/container/run.sh dist/azemu
 
   # ---- not on pull requests: the long suites ------------------------------------------------------------------------
@@ -252,6 +253,9 @@ jobs:
           AZEMU_BIN: ${{ github.workspace }}/dist/azemu
           JOBS: "3"
         run: npm test
+      # the inspector page in the runner's own headless Chrome: one path per service, a few clicks, no console error
+      - name: inspector page
+        run: node tests/inspector-ui/check.mjs --bin dist/azemu
 
   sdk-go:
     name: Go SDK suite

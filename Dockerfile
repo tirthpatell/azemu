@@ -3,7 +3,7 @@
 # The release image of azemu: the one `azemu` binary (all services, Linux x86-64 or arm64 glibc, whichever the Docker
 # host is) in a small image with no shell and no package manager, running as a user that is not root.
 #
-#   docker build -t azemu:0.2.0 -t azemu:latest .
+#   docker build -t azemu:0.3.0 -t azemu:latest .
 #   docker run --rm -p 127.0.0.1:4577:4577 azemu:latest
 #
 # Build memory: a release build of the whole emulator is the heaviest thing this project does, and it runs inside the
@@ -17,8 +17,8 @@
 # What the container does by default (the CMD below; replace it to change it):
 #   --host 0.0.0.0      listen on every address of the container, so other containers and published ports reach it
 #   --standard-ports    one fixed port per service next to the gateway 4577 (10000 Blob, 10001 Queue, 10002 Table,
-#                       10003 Data Lake, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM,
-#                       10014 Identity, 8081 Cosmos, 5672 AMQP, 5671 AMQP over TLS, 9093 Kafka, and 443 for ARM and
+#                       10003 Data Lake, 10004 Files, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM,
+#                       10014 Identity, 10015 Monitor, 8081 Cosmos, 5672 AMQP, 5671 AMQP over TLS, 9093 Kafka, and 443 for ARM and
 #                       AMQP over WebSocket), so any host name works and nothing under .localhost has to resolve
 # THE EMULATOR HAS NO SIGN-IN. Anyone who can reach a port can read, change and wipe everything in it. Publish ports to
 # your own machine only (`-p 127.0.0.1:4577:4577`, never `-p 4577:4577`), or to no host port at all and let other
@@ -43,6 +43,8 @@
 #
 # Health: `azemu __healthcheck [port]` (what HEALTHCHECK runs) asks the gateway for /_azemu/health and exits 0 or 1; the
 # image has no curl. If you start with another `--port`, give the check the same: `--health-cmd "/usr/local/bin/azemu __healthcheck 5000"`.
+# The first 10 seconds (`--start-period`) are checked every 250 ms (`--start-interval`, Docker Engine 25.0 or newer; a builder older than
+# that refuses the flag), so the container is healthy as soon as the emulator listens; after that every 5 seconds.
 # Stop: SIGTERM saves state (when there is a data directory) and exits within a second or two.
 
 ARG RUST_IMAGE=rust:1.99.1-bookworm
@@ -69,11 +71,11 @@ COPY LICENSE-MIT LICENSE-APACHE NOTICE THIRD-PARTY-LICENSES.md /out/licenses/
 COPY LICENSES /out/licenses/LICENSES
 
 FROM ${RUNTIME_IMAGE}
-ARG VERSION=0.2.0
+ARG VERSION=0.3.0
 ARG GIT_COMMIT=unknown
 ARG BUILD_DATE=unknown
 LABEL org.opencontainers.image.title="azemu" \
-      org.opencontainers.image.description="A local emulator of Azure services (Blob, Queue, Table, Data Lake, Key Vault, App Configuration, Cosmos DB, Service Bus, Event Hubs and Kafka, Event Grid, Identity, Resource Manager) in one binary. For development and tests; it has no sign-in. Not affiliated with or endorsed by Microsoft." \
+      org.opencontainers.image.description="A local emulator of Azure services (Blob, Queue, Table, Data Lake, Key Vault, App Configuration, Cosmos DB, Service Bus, Event Hubs and Kafka, Event Grid, Identity, Resource Manager, and a sink for Application Insights telemetry) in one binary. For development and tests; it has no sign-in. Not affiliated with or endorsed by Microsoft." \
       org.opencontainers.image.version="${VERSION}" \
       org.opencontainers.image.revision="${GIT_COMMIT}" \
       org.opencontainers.image.created="${BUILD_DATE}" \
@@ -85,8 +87,8 @@ COPY --from=build /out/ /
 USER 10001:10001
 ENV HOME=/home/azemu
 WORKDIR /home/azemu
-EXPOSE 4577 10000 10001 10002 10003 10010 10011 10012 10013 10014 8081 5671 5672 9093 443
-HEALTHCHECK --interval=5s --timeout=3s --start-period=3s --retries=3 CMD ["/usr/local/bin/azemu", "__healthcheck"]
+EXPOSE 4577 10000 10001 10002 10003 10004 10010 10011 10012 10013 10014 10015 8081 5671 5672 9093 443
+HEALTHCHECK --interval=5s --timeout=3s --start-period=10s --start-interval=250ms --retries=3 CMD ["/usr/local/bin/azemu", "__healthcheck"]
 STOPSIGNAL SIGTERM
 ENTRYPOINT ["/usr/local/bin/azemu"]
 CMD ["--host", "0.0.0.0", "--standard-ports"]

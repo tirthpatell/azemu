@@ -58,6 +58,9 @@ pub fn classic(shared: &Arc<Shared>, req: &Request) -> Response {
             found.filter(|h| h.kind == TopicKind::Custom).and_then(|h| h.resource_id.clone()),
         )
     };
+    if let Some(r) = auth::check_token(&shared.auth.read(), req) {
+        return r;
+    }
     if let Err(r) = auth::check_classic(req, &keys) {
         return r;
     }

@@ -1,0 +1,13 @@
+{
+ "basicInput": "2020-04-08T14:53:14Z",
+ "dateOnly": "2024-03-01T00:00:00Z",
+ "epochDateOnly": 1709164800,
+ "epochFraction": 1213537530,
+ "epochWithOffset": 1685613600,
+ "fractionDefault": "2008-06-15T13:45:30Z",
+ "fractionF": "123",
+ "fractionO": "2008-06-15T13:45:30.1234567+00:00",
+ "noZone": "2023-06-01T13:00:00Z",
+ "withOffset": "2023-06-01T12:00:00Z",
+ "withOffsetFormatted": "2023-06-01 12:00"
+}

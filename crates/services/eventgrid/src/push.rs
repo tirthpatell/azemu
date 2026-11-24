@@ -31,6 +31,8 @@ pub fn spawn_jobs(shared: &Arc<Shared>, jobs: Vec<PushJob>) {
         return;
     };
     let generation = shared.generation();
+    // events that were shed to make room for these were dead-lettered under the lock
+    crate::dead_letter::flush(shared);
     for job in jobs {
         let sh = shared.clone();
         handle.spawn(async move { deliver(sh, job, generation, None).await });
@@ -85,7 +87,24 @@ fn request_parts(job: &PushJob, attempt: u32) -> (Vec<(String, String)>, Bytes) 
         ("aeg-event-type".to_string(), "Notification".to_string()),
         ("User-Agent".to_string(), "Azure-EventGrid/1.0".to_string()),
     ];
+    let mut headers = headers;
+    for (name, value) in &job.attrs {
+        // a name or value that cannot be an HTTP header is left out, as Event Grid leaves out a header that does not conform
+        // a state written before these names were refused may still hold one: it is left out, as a header that does not conform is
+        if !is_header_name(name)
+            || crate::delivery_props::is_transport_header(name)
+            || value.bytes().any(|b| b < 0x20 && b != b'\t' || b == 0x7f)
+        {
+            continue;
+        }
+        headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
+    }
     (headers, Bytes::from(serde_json::to_vec(&body).unwrap_or_default()))
+}
+
+fn is_header_name(n: &str) -> bool {
+    !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
 /// Hand the event to the handler registered for the destination kind.
@@ -98,9 +117,23 @@ fn run_handler(shared: &Arc<Shared>, job: &PushJob, dest: &crate::state::Dest, a
     })?;
     let content_type = match job.schema {
         Schema::CloudEvents => "application/cloudevents+json; charset=utf-8",
-        _ => "application/json",
+        // Azure's own message had `application/json; charset=utf-8` (a Service Bus queue, November 2026)
+        _ => "application/json; charset=utf-8",
     };
-    let properties = vec![
+    let known: &[&'static str] = match dest.kind {
+        crate::destination::DestinationKind::ServiceBusQueue | crate::destination::DestinationKind::ServiceBusTopic => {
+            &crate::delivery_props::SERVICE_BUS_NAMES
+        }
+        crate::destination::DestinationKind::EventHub => &crate::delivery_props::EVENT_HUB_NAMES,
+        // a Storage queue message has no properties to map (its time to live is a setting of the destination)
+        _ => &[],
+    };
+    let (system, mapped) = if dest.kind == crate::destination::DestinationKind::StorageQueue {
+        (Vec::new(), Vec::new())
+    } else {
+        crate::delivery_props::split(job.attrs.clone(), known)
+    };
+    let mut properties = vec![
         ("aeg-subscription-name".to_string(), job.sub_name.clone()),
         ("aeg-delivery-count".to_string(), attempt.saturating_sub(1).to_string()),
         ("aeg-event-type".to_string(), "Notification".to_string()),
@@ -108,6 +141,7 @@ fn run_handler(shared: &Arc<Shared>, job: &PushJob, dest: &crate::state::Dest, a
         ("aeg-data-version".to_string(), job.data_version.clone()),
         ("aeg-output-event-id".to_string(), job.event_id.clone()),
     ];
+    properties.extend(mapped);
     let delivery = crate::destination::DestinationDelivery {
         kind: dest.kind,
         target: dest.target.clone(),
@@ -118,6 +152,7 @@ fn run_handler(shared: &Arc<Shared>, job: &PushJob, dest: &crate::state::Dest, a
         subscription: job.sub_name.clone(),
         attempt,
         ttl_seconds: dest.ttl_seconds,
+        system,
     };
     handler(&delivery)
 }
@@ -148,6 +183,20 @@ async fn deliver(shared: Arc<Shared>, job: PushJob, generation: u64, resume: Opt
         }
         let t0 = Instant::now();
         let (success, status, detail) = match &job.dest {
+            Some(dest) if dest.kind == crate::destination::DestinationKind::AzureFunction => {
+                let url = crate::functions::target_url(&shared.function_hosts.read(), &dest.target.namespace, &dest.target.entity);
+                match url {
+                    Err(e) => (false, None, e),
+                    Ok(url) => {
+                        let (headers, body) = request_parts(&job, attempt);
+                        match http_client::send("POST", &url, &headers, body, timeout, &shared.opts.webhooks).await {
+                            Ok(r) if (200..=204).contains(&r.status) => (true, Some(r.status), format!("HTTP {}", r.status)),
+                            Ok(r) => (false, Some(r.status), format!("HTTP {}", r.status)),
+                            Err(e) => (false, None, e),
+                        }
+                    }
+                }
+            }
             Some(dest) => match run_handler(&shared, &job, dest, attempt) {
                 Ok(()) => {
                     (true, None, format!("Delivered to {} {}/{}", dest.kind.endpoint_type(), dest.target.namespace, dest.target.entity))
@@ -201,8 +250,10 @@ async fn deliver(shared: Arc<Shared>, job: PushJob, generation: u64, resume: Opt
                     } else {
                         "MaxDeliveryAttemptsExceeded"
                     };
+                    let started_ms = sub.pending.get(&job.id).map(|p| p.started_ms).unwrap_or(0);
                     sub.finish_pending(job.id);
-                    sub.queue.dead_letter_sized((*job.body).clone(), size, reason, &format!("Last outcome: {detail}"), attempt, &now);
+                    let outcome = crate::dead_letter::outcome_name(status, &detail);
+                    sub.dead_letter_push(&job.body, size, reason, &format!("Last outcome: {detail}"), attempt, &outcome, started_ms, &now);
                     sub.log_attempt(mk("DeadLettered", format!("{detail}; {reason}")));
                     Next::Done
                 } else {
@@ -215,7 +266,10 @@ async fn deliver(shared: Arc<Shared>, job: PushJob, generation: u64, resume: Opt
             }
         };
         match next {
-            Next::Done => return,
+            Next::Done => {
+                crate::dead_letter::flush(&shared);
+                return;
+            }
             Next::Retry(d) => {
                 tokio::select! {
                     _ = tokio::time::sleep(d) => {}

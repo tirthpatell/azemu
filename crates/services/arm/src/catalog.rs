@@ -108,6 +108,7 @@ const PROVIDERS: &[(&str, &[&str], &str)] = &[
             "namespaces/eventhubs/consumergroups",
             "namespaces/authorizationRules",
             "namespaces/eventhubs/authorizationRules",
+            "namespaces/schemagroups",
             "checkNameAvailability",
         ],
         "2024-01-01",

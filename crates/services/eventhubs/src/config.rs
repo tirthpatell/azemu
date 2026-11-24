@@ -6,6 +6,10 @@
 //!                     "ConsumerGroups": [ { "Name": "cg1" } ] } ] } ] } }
 //! ```
 //!
+//! Schema groups of the Schema Registry go in the namespace, next to `Entities` (ours, Microsoft's emulator has no registry):
+//! `"SchemaGroups": [ { "Name": "orders", "SchemaType": "Avro", "SchemaCompatibility": "Forward" } ]` (type Avro and
+//! compatibility None when left out).
+//!
 //! Two additions of ours on an entity: `MessageRetentionInDays` (a number) and
 //! `MessageRetentionInSeconds` (for tests that need a short retention).
 //!
@@ -17,6 +21,7 @@ use std::path::Path;
 use serde_json::Value;
 
 use crate::model::{DEFAULT_PARTITIONS, DEFAULT_RETENTION_MS};
+use crate::schema_registry::{Compatibility, SchemaType};
 use crate::state::{State, DEFAULT_NAMESPACE};
 
 pub struct Config {
@@ -59,8 +64,35 @@ fn is_eventhubs_namespace(n: &Value) -> bool {
     }
 }
 
+/// The authorization rules the file declares, as `(namespace, event hub, rule)`: `AuthorizationRules` on a namespace or on an entity, each
+/// `{"Name", "Rights": ["Send", "Listen", "Manage"], "PrimaryKey"?, "SecondaryKey"?}` (ours; Microsoft's emulator has none). Used in strict
+/// authorisation mode. A mistake is an error that names the entity.
+pub fn declared_rules(cfg: &Config) -> Result<Vec<(String, Option<String>, azemu_core::auth::sas::SasRule)>, String> {
+    use azemu_core::auth::sas::SasRule;
+    let user = get(&cfg.raw, "UserConfig").unwrap_or(&cfg.raw);
+    let mut out = Vec::new();
+    for n in list(user, "NamespaceConfig").into_iter().chain(list(user, "Namespaces")).filter(|n| is_eventhubs_namespace(n)) {
+        let ns = name_of(n).ok_or("namespace without a name")?.to_ascii_lowercase();
+        for r in list(n, "AuthorizationRules") {
+            out.push((ns.clone(), None, SasRule::from_json(&ns, None, r).map_err(|e| format!("namespace '{ns}': {e}"))?));
+        }
+        for e in list(n, "Entities").into_iter().chain(list(n, "EventHubs")) {
+            let name = name_of(e).ok_or("entity without a name")?.to_ascii_lowercase();
+            for r in list(e, "AuthorizationRules") {
+                out.push((
+                    ns.clone(),
+                    Some(name.clone()),
+                    SasRule::from_json(&ns, Some(&name), r).map_err(|er| format!("event hub '{name}': {er}"))?,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Create everything in the config. Event hubs that already exist are left alone.
 pub fn apply(state: &mut State, cfg: &Config, now: i64) -> Result<(), String> {
+    declared_rules(cfg)?;
     let user = get(&cfg.raw, "UserConfig").unwrap_or(&cfg.raw);
     let namespaces: Vec<&Value> =
         list(user, "NamespaceConfig").into_iter().chain(list(user, "Namespaces")).filter(|n| is_eventhubs_namespace(n)).collect();
@@ -97,6 +129,26 @@ pub fn apply(state: &mut State, cfg: &Config, now: i64) -> Result<(), String> {
                 if let Some(c) = name_of(cg) {
                     hub.add_consumer_group(&c);
                 }
+            }
+        }
+        for g in list(n, "SchemaGroups") {
+            let name = name_of(g).ok_or("schema group without a name")?;
+            let text = |k: &str| get(g, k).and_then(|v| v.as_str());
+            let schema_type = match text("SchemaType") {
+                Some(t) => SchemaType::parse(t).ok_or_else(|| {
+                    format!("schema group '{name}': SchemaType '{t}' is not one of Avro, Json, Custom, Protobuf, Unknown")
+                })?,
+                None => SchemaType::Avro,
+            };
+            let mode = match text("SchemaCompatibility") {
+                Some(c) => Compatibility::parse(c)
+                    .ok_or_else(|| format!("schema group '{name}': SchemaCompatibility '{c}' is not one of None, Backward, Forward"))?,
+                None => Compatibility::None,
+            };
+            if state.schema_group(&ns_name, &name).is_none() {
+                state
+                    .put_schema_group(&ns_name, &name, schema_type, mode, None)
+                    .map_err(|e| format!("schema group '{name}': {}", e.message))?;
             }
         }
     }

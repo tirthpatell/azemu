@@ -493,10 +493,15 @@ def test_errors(egm, acct, rg, uniq, resource_client):
         subscribe(egm, f"/subscriptions/{SUB}/resourceGroups/{rg}/providers/Microsoft.Compute/virtualMachines/vm1", "vmhook", dest)
     assert e.value.status_code == 501
     assert "Microsoft.Compute/virtualMachines" in str(e.value)
+    # a function destination is built (the emulator delivers to a Functions host it was told about): the subscription is made
+    func = subscribe(egm, acct.id, "func-dest", {"endpointType": "AzureFunction", "properties": {"resourceId": "/subscriptions/x/resourceGroups/y/providers/Microsoft.Web/sites/z/functions/f"}})
+    assert func.destination.endpoint_type == "AzureFunction"
+    egm.event_subscriptions.begin_delete(acct.id, "func-dest").result()
     # destinations that are not built, and a missing destination
     with pytest.raises(HttpResponseError) as e:
-        subscribe(egm, acct.id, "func-dest", {"endpointType": "AzureFunction", "properties": {"resourceId": "/subscriptions/x/resourceGroups/y/providers/Microsoft.Web/sites/z/functions/f"}})
+        subscribe(egm, acct.id, "hybrid-dest", {"endpointType": "HybridConnection", "properties": {"resourceId": "/subscriptions/x/resourceGroups/y/providers/Microsoft.Relay/namespaces/n/hybridConnections/h"}})
     assert e.value.status_code == 501
+    assert "HybridConnection" in str(e.value)
     with pytest.raises(HttpResponseError) as e:
         egm.event_subscriptions.begin_create_or_update(acct.id, "empty", {"properties": {}}).result()
     assert e.value.status_code == 400

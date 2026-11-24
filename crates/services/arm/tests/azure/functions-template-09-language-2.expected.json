@@ -1,0 +1,33 @@
+{
+ "coalesced": 10,
+ "fromFunction": "STANDARD",
+ "maybeIsNull": true,
+ "maybeOut": {
+  "__raw__": {
+   "type": "String"
+  }
+ },
+ "names": [
+  "a",
+  "b"
+ ],
+ "namesUpper": [
+  "A",
+  "B"
+ ],
+ "settingsOut": [
+  {
+   "name": "a"
+  },
+  {
+   "maxDelivery": 3,
+   "name": "b"
+  }
+ ],
+ "skuOut": "Standard",
+ "tryGetMissing": {
+  "__raw__": {
+   "type": "String"
+  }
+ }
+}

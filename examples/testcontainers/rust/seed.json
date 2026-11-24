@@ -1,0 +1,4 @@
+{
+  "blob": { "devstoreaccount1": { "containers": ["uploads"] } },
+  "keyvault": { "default": { "secrets": { "db-password": "local-only-password" } } }
+}

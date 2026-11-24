@@ -6,7 +6,8 @@ import seutil as su
 
 
 def sub_all(emu, hook):
-    return su.subscribe(emu, "all", {"webhookUrl": hook.url})
+    # the Data Lake events are not in the default set of a storage account: a subscription has to ask for them
+    return su.subscribe(emu, "all", {"webhookUrl": hook.url, "filter": {"includedEventTypes": su.ALL_TYPES}})
 
 
 def by_type(events):

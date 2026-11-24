@@ -22,6 +22,9 @@ const TYPES: &[&str] = &[
     "databaseAccounts/sqlDatabases/containers",
     "databaseAccounts/sqlDatabases/throughputSettings",
     "databaseAccounts/sqlDatabases/containers/throughputSettings",
+    // Cosmos DB's own role system (`docs/strict-auth.md`); the registry in core decides in strict mode
+    "databaseAccounts/sqlRoleDefinitions",
+    "databaseAccounts/sqlRoleAssignments",
 ];
 
 fn valid_account_name(n: &str) -> bool {
@@ -221,6 +224,29 @@ impl Cosmos {
     }
 }
 
+/// The id of the account a Cosmos DB child is in.
+fn account_id(child_id: &str) -> String {
+    let lower = child_id.to_ascii_lowercase();
+    match lower.find("/databaseaccounts/") {
+        Some(i) => {
+            let rest = &child_id[i + "/databaseAccounts/".len()..];
+            let end = rest.find('/').unwrap_or(rest.len());
+            child_id[..i + "/databaseAccounts/".len() + end].to_string()
+        }
+        None => child_id.to_string(),
+    }
+}
+
+/// A built-in Cosmos DB role as the account lists it.
+fn builtin_definition(account: &Stored, d: &azemu_core::auth::RoleDef) -> Value {
+    json!({"properties": {
+        "roleName": d.name,
+        "type": "BuiltInRole",
+        "assignableScopes": [account.id],
+        "permissions": [{"dataActions": d.data_actions, "notDataActions": d.not_data_actions}]
+    }})
+}
+
 fn pick(v: &Value, keys: &[&str]) -> Value {
     let mut o = serde_json::Map::new();
     for k in keys {
@@ -289,6 +315,28 @@ impl Provider for Cosmos {
                 let now = cx.now_iso();
                 // the endpoint is not stored (it holds the port): `render` fills it in
                 self.account_defaults(res, existed, &now, "");
+                // the two definitions every account has
+                for d in azemu_core::auth::roles::cosmos_builtin() {
+                    children.push(super::stored_child(res, "sqlRoleDefinitions", &d.id, builtin_definition(res, d)));
+                }
+                Ok(())
+            }
+            "databaseAccounts/sqlRoleDefinitions" => {
+                let id = res.id.clone();
+                let p = util::props_mut(&mut res.body);
+                util::set_default(p, "type", json!("CustomRole"));
+                util::set_default(p, "assignableScopes", json!([account_id(&id)]));
+                Ok(())
+            }
+            "databaseAccounts/sqlRoleAssignments" => {
+                let account = account_id(&res.id);
+                let p = util::props_mut(&mut res.body);
+                for k in ["roleDefinitionId", "principalId"] {
+                    if p.get(k).and_then(Value::as_str).is_none_or(str::is_empty) {
+                        return Err(ArmError::bad_request("BadRequest", format!("The property '{k}' is required.")));
+                    }
+                }
+                util::set_default(p, "scope", json!(account));
                 Ok(())
             }
             "databaseAccounts/sqlDatabases" => self.put_database(cx, res, children).await,

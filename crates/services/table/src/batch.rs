@@ -199,7 +199,7 @@ fn try_change_set(rq: &Rq, acct: &mut Account, ops: &[Inner]) -> Res<Vec<String>
             )
             .at_index(i));
         }
-        rq.grant.check(p.op(), Some((&p.pk, &p.rk)))?;
+        rq.grant.in_table(&p.table).check(p.op(), Some((&p.pk, &p.rk)))?;
     }
 
     let mut done = Vec::new();

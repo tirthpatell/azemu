@@ -80,6 +80,10 @@ impl EhConn {
         let Some(hub) = text(req, "name").map(str::to_string).filter(|n| !n.is_empty()) else {
             return Response::err(EhError::argument("The management request has no 'name' (the event hub)."));
         };
+        // strict authorisation: a connection that can neither send nor receive there gets a 401 in the answer
+        if let Err(e) = self.strict_management(&hub) {
+            return Response::err(e);
+        }
         let now = now_ms();
         let mut st = self.shared.state.lock();
         if let Err(e) = st.ensure_hub(&self.ns, &hub, self.shared.autocreate, now) {
@@ -136,6 +140,10 @@ impl EhConn {
         let op = text(req, "operation").unwrap_or("");
         if !op.eq_ignore_ascii_case("put-token") {
             return Response::err(EhError::not_implemented(&format!("$cbs operation '{op}'")));
+        }
+        // strict authorisation: the credential is checked first (`strict.rs`); a good one is accepted whatever its rights
+        if let Some(Err(r)) = self.strict_put_token(req) {
+            return Response { status: r.status, description: r.text, condition: Some(r.condition), body: None };
         }
         if !self.shared.autocreate {
             if let Some((hub, _group)) = text(req, "name").and_then(audience_entity) {

@@ -18,17 +18,35 @@ use crate::cx::Cx;
 use crate::error::{ArmError, ArmResult};
 use crate::groups::{canonical_group_name_for, group_json, put_group_body};
 use crate::ids::resource_id;
-use crate::limits::{self, Budget, Memo};
+use crate::limits::{self, Budget};
 use crate::resources::put_by_type;
 use crate::state::{key, Stored};
-use crate::template::{eval_value, Env, EvalError};
+use crate::template::userfn::Functions;
+use crate::template::{eval_value, EvalError};
 use crate::util;
+
+mod params;
+mod scope;
+
+use scope::{Scope, Symbol};
 
 /// Resources inside resources (`resources` in a resource) may go this deep.
 const MAX_CHILD_LEVELS: usize = 8;
 
-const KEEP_OUT: &[&str] =
-    &["type", "apiVersion", "name", "dependsOn", "condition", "copy", "resources", "scope", "comments", "resourceGroup", "subscriptionId"];
+const KEEP_OUT: &[&str] = &[
+    "type",
+    "apiVersion",
+    "name",
+    "dependsOn",
+    "condition",
+    "copy",
+    "resources",
+    "scope",
+    "comments",
+    "resourceGroup",
+    "subscriptionId",
+    "existing",
+];
 
 pub async fn handle(cx: &Cx<'_>, sub: &str, rg: Option<&str>, tail: &[String]) -> ArmResult<Response> {
     let method = cx.req.method.as_str();
@@ -132,6 +150,10 @@ struct Item {
     names: Vec<String>,
     target_rg: String,
     parent_id: Option<String>,
+    /// The key of the resource in a `languageVersion` 2.0 template.
+    symbol: Option<String>,
+    /// `existing: true`: the template reads the resource and deploys nothing.
+    existing: bool,
 }
 
 struct Outcome {
@@ -142,85 +164,11 @@ struct Outcome {
     ops: Vec<Value>,
     providers: Vec<(String, String, String)>,
     failure: Option<ArmError>,
+    /// The resource id a `list*` action failed for (Azure names it as the `target` of the error).
+    failure_target: Option<String>,
+    /// The output whose evaluation failed: the deployment then fails with `DeploymentOutputEvaluationFailed`.
+    failed_output: Option<String>,
     validated: Vec<String>,
-}
-
-/// Everything needed to evaluate expressions, owned so no borrow crosses an `.await`.
-struct Scope {
-    sub: String,
-    rg: String,
-    params: Map<String, Value>,
-    variables: Map<String, Value>,
-    rg_info: Value,
-    sub_info: Value,
-    tenant: String,
-    deployment: Value,
-    /// Work counters of the whole request, shared with nested deployments.
-    budget: Arc<Budget>,
-    /// Variables of this template that are already evaluated.
-    memo: Arc<Memo>,
-}
-
-impl Scope {
-    fn with_env<R>(&self, cx: &Cx<'_>, copy: &[(String, i64)], f: impl FnOnce(&Env<'_>) -> R) -> R {
-        let look = |arg: &str, full: bool| lookup_resource(cx, &self.sub, &self.rg, arg, full);
-        let mut env = Env::new(
-            &self.params,
-            &self.variables,
-            &self.sub,
-            &self.rg,
-            &self.rg_info,
-            &self.sub_info,
-            &self.tenant,
-            &self.deployment,
-            &look,
-        )
-        .with_shared(self.budget.clone(), self.memo.clone());
-        env.copy = copy.to_vec();
-        f(&env)
-    }
-
-    fn eval(&self, cx: &Cx<'_>, copy: &[(String, i64)], v: &Value) -> Result<Value, EvalError> {
-        self.with_env(cx, copy, |e| eval_value(v, e))
-    }
-}
-
-fn lookup_resource(cx: &Cx<'_>, sub: &str, rg: &str, arg: &str, full: bool) -> Result<Value, EvalError> {
-    let st = cx.inner.state.lock();
-    let found: Option<Stored> = if arg.starts_with("/subscriptions") {
-        st.resources.get(&key(arg)).cloned()
-    } else {
-        let prefix = if rg.is_empty() {
-            format!("/subscriptions/{}/", sub.to_ascii_lowercase())
-        } else {
-            format!("{}/", crate::state::group_key(sub, rg))
-        };
-        let want = arg.to_ascii_lowercase();
-        st.resources
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .map(|(_, s)| s)
-            .filter(|s| {
-                s.names.join("/").to_ascii_lowercase() == want
-                    || s.name().eq_ignore_ascii_case(arg)
-                    || format!("{}/{}", s.type_string(), s.names.join("/")).eq_ignore_ascii_case(arg)
-            })
-            .min_by_key(|s| s.types.len())
-            .cloned()
-    };
-    let Some(s) = found else {
-        return Err(EvalError::Defer(format!("The Resource '{arg}' is not deployed yet or does not exist.")));
-    };
-    drop(st);
-    let rendered = match cx.inner.provider(&s.ns) {
-        Some(p) => p.render(cx, &s),
-        None => s.body.clone(),
-    };
-    if full {
-        Ok(rendered)
-    } else {
-        Ok(rendered.get("properties").cloned().unwrap_or(json!({})))
-    }
 }
 
 fn titlecase(t: &str) -> String {
@@ -243,108 +191,14 @@ fn template_hash(t: &Value) -> String {
     (u64::from_be_bytes(n) % 10_000_000_000_000_000_000).to_string()
 }
 
-fn bind_parameters(cx: &Cx<'_>, scope: &Scope, template: &Value, given: &Value) -> ArmResult<(Map<String, Value>, Map<String, Value>)> {
-    let declared = template.get("parameters").and_then(Value::as_object).cloned().unwrap_or_default();
-    let given_map = given.as_object().cloned().unwrap_or_default();
-    for k in given_map.keys() {
-        if !declared.keys().any(|d| d.eq_ignore_ascii_case(k)) {
-            return Err(ArmError::bad_request(
-                "InvalidTemplate",
-                format!("Deployment template validation failed: The template parameters '{k}' in the parameters file are not valid; they are not present in the original template and can therefore not be provided at deployment time."),
-            ));
-        }
-    }
-    let mut bound = Map::new();
-    let mut shown = Map::new();
-    for (name, decl) in &declared {
-        let ty = decl.get("type").and_then(Value::as_str).unwrap_or("string").to_ascii_lowercase();
-        let secure = ty.starts_with("secure");
-        let provided = given_map.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v);
-        let raw = match provided {
-            Some(p) if p.get("reference").is_some() => {
-                return Err(ArmError::not_implemented(format!("parameter '{name}' uses a Key Vault reference; the emulator cannot read secrets from a deployment parameters object")));
-            }
-            Some(p) => p.get("value").cloned().ok_or_else(|| invalid_template(format!("The value for the template parameter '{name}' is not provided.")))?,
-            None => match decl.get("defaultValue") {
-                Some(d) => scope.eval(cx, &[], d).map_err(|e| invalid_template(e.text()))?,
-                None => {
-                    return Err(invalid_template(format!(
-                        "The template parameter '{name}' is not found in the parameters file and has no default value. Please see https://aka.ms/arm-deploy/#parameter-file for usage details."
-                    )))
-                }
-            },
-        };
-        let v = coerce(&ty, raw)
-            .map_err(|m| invalid_template(format!("The provided value for the template parameter '{name}' is not valid: {m}")))?;
-        if let Some(allowed) = decl.get("allowedValues").and_then(Value::as_array) {
-            if !allowed.iter().any(|a| {
-                a == &v
-                    || (a.is_string()
-                        && v.is_string()
-                        && a.as_str().map(|x| x.eq_ignore_ascii_case(v.as_str().unwrap_or(""))).unwrap_or(false))
-            }) {
-                return Err(invalid_template(format!(
-                    "The provided value for the template parameter '{name}' is not valid. The value must be one of {}.",
-                    Value::Array(allowed.clone())
-                )));
-            }
-        }
-        if let Some(n) = v.as_i64() {
-            if decl.get("minValue").and_then(Value::as_i64).map(|m| n < m).unwrap_or(false)
-                || decl.get("maxValue").and_then(Value::as_i64).map(|m| n > m).unwrap_or(false)
-            {
-                return Err(invalid_template(format!("The provided value for the template parameter '{name}' is out of range.")));
-            }
-        }
-        if let Some(t) = v.as_str() {
-            let len = t.chars().count() as i64;
-            if decl.get("minLength").and_then(Value::as_i64).map(|m| len < m).unwrap_or(false)
-                || decl.get("maxLength").and_then(Value::as_i64).map(|m| len > m).unwrap_or(false)
-            {
-                return Err(invalid_template(format!("The provided value for the template parameter '{name}' is not the right length.")));
-            }
-        }
-        let mut entry = json!({"type": titlecase(&ty).replace("Securestring", "SecureString").replace("Secureobject", "SecureObject")});
-        if !secure {
-            entry["value"] = v.clone();
-        }
-        shown.insert(name.clone(), entry);
-        bound.insert(name.clone(), v);
-    }
-    Ok((bound, shown))
-}
-
-fn coerce(ty: &str, v: Value) -> Result<Value, String> {
-    match (ty, &v) {
-        ("string" | "securestring", Value::String(_)) => Ok(v),
-        ("string" | "securestring", Value::Number(n)) => Ok(Value::String(n.to_string())),
-        ("int", Value::Number(_)) => Ok(v),
-        ("int", Value::String(t)) => t.trim().parse::<i64>().map(|n| json!(n)).map_err(|_| format!("'{t}' is not an integer")),
-        ("bool", Value::Bool(_)) => Ok(v),
-        ("bool", Value::String(t)) if t.eq_ignore_ascii_case("true") => Ok(json!(true)),
-        ("bool", Value::String(t)) if t.eq_ignore_ascii_case("false") => Ok(json!(false)),
-        ("array", Value::Array(_)) => Ok(v),
-        ("object" | "secureobject", Value::Object(_)) => Ok(v),
-        (t, other) => Err(format!(
-            "expected {t}, got {}",
-            match other {
-                Value::String(_) => "string",
-                Value::Number(_) => "number",
-                Value::Bool(_) => "bool",
-                Value::Array(_) => "array",
-                Value::Object(_) => "object",
-                Value::Null => "null",
-            }
-        )),
-    }
-}
-
 /// Expand conditions, copy loops and nested resources into a flat list. At most `MAX_RESOURCES` items come out, and
 /// child resources nest at most `MAX_CHILD_LEVELS` deep.
+#[allow(clippy::too_many_arguments)]
 fn expand(
     cx: &Cx<'_>,
     scope: &Scope,
     resources: &[Value],
+    symbols: Option<&[String]>,
     parent: Option<(&str, &[String])>,
     default_rg: &str,
     level: usize,
@@ -353,7 +207,8 @@ fn expand(
     if level > MAX_CHILD_LEVELS {
         return Err(invalid_template(format!("resources are nested in each other more than {MAX_CHILD_LEVELS} levels deep.")));
     }
-    for raw in resources {
+    for (position, raw) in resources.iter().enumerate() {
+        let symbol = symbols.and_then(|s| s.get(position)).cloned();
         let raw_shared = Arc::new(raw.clone());
         let count = match raw.get("copy") {
             Some(c) => {
@@ -429,10 +284,12 @@ fn expand(
                 names: names.clone(),
                 target_rg,
                 parent_id,
+                symbol: symbol.clone(),
+                existing: raw.get("existing").and_then(Value::as_bool).unwrap_or(false),
             };
             out.push(item);
             if let Some(children) = raw.get("resources").and_then(Value::as_array) {
-                expand(cx, scope, children, Some((&full_type, &names)), default_rg, level + 1, out)?;
+                expand(cx, scope, children, None, Some((&full_type, &names)), default_rg, level + 1, out)?;
             }
         }
     }
@@ -521,24 +378,30 @@ fn run<'a>(
         let tenant = crate::basics::default_tenant();
         let sub_info =
             json!({"id": format!("/subscriptions/{sub}"), "subscriptionId": sub, "tenantId": tenant, "displayName": "azemu subscription"});
-        let mut scope = Scope {
-            sub: sub.to_string(),
-            rg: rg.to_string(),
-            params: Map::new(),
-            variables: template.get("variables").and_then(Value::as_object).cloned().unwrap_or_default(),
+        let v2 = language_v2(&template)?;
+        let (resources, symbol_names) = split_resources(&template, v2)?;
+        check_variables(&template)?;
+        let funcs =
+            Functions::from_template(&template).map_err(|m| invalid_template(format!("The user-defined functions are not valid: {m}")))?;
+        let mut scope = Scope::new(
+            cx,
+            sub,
+            rg,
+            template.get("variables").and_then(Value::as_object).cloned().unwrap_or_default(),
             rg_info,
             sub_info,
             tenant,
-            deployment: json!({"name": name, "properties": {"template": template.clone(), "mode": mode}}),
-            budget: level.budget.clone(),
-            memo: Arc::new(Memo::default()),
-        };
-        let (bound, shown) = bind_parameters(cx, &scope, &template, props.get("parameters").unwrap_or(&json!({})))?;
+            json!({"name": name, "properties": {"template": template.clone(), "mode": mode}}),
+            level.budget.clone(),
+            funcs,
+        );
+        let (bound, shown) = params::bind_parameters(cx, &scope, &template, props.get("parameters").unwrap_or(&json!({})))?;
         scope.params = bound;
         // `variables` with `copy` entries are expanded on use by eval_value; nothing to do here.
-        let resources = template.get("resources").and_then(Value::as_array).cloned().unwrap_or_default();
         let mut items = Vec::new();
-        expand(cx, &scope, &resources, None, rg, 0, &mut items)?;
+        expand(cx, &scope, &resources, symbol_names.as_deref(), None, rg, 0, &mut items)?;
+        scope.symbols = symbol_table(&scope, &items);
+        scope.declared = declared_names(&scope, &items);
         if level.budget.resources.fetch_add(items.len(), Ordering::Relaxed) + items.len() > limits::MAX_TOTAL_RESOURCES {
             return Err(invalid_template(format!(
                 "the request deploys more than {} resources in all (nested deployments included).",
@@ -554,6 +417,8 @@ fn run<'a>(
             ops: vec![],
             providers: vec![],
             failure: None,
+            failure_target: None,
+            failed_output: None,
             validated: vec![],
         };
         // Order: an item waits until every item it depends on is done. `remaining[i]` counts those still open.
@@ -576,39 +441,50 @@ fn run<'a>(
             for i in ready {
                 let Some(it) = slots[i].take() else { continue };
                 let copy_stack: Vec<(String, i64)> = it.copy.iter().cloned().collect();
-                // Evaluate the resource body in a synchronous block (no Env across an await).
-                let body = scope.with_env(cx, &copy_stack, |env| {
-                    let mut o = Map::new();
-                    let is_nested = it.full_type.eq_ignore_ascii_case("Microsoft.Resources/deployments");
-                    if let Some(raw) = it.raw.as_object() {
-                        for (k, v) in raw {
-                            if KEEP_OUT.iter().any(|x| x.eq_ignore_ascii_case(k)) {
-                                continue;
-                            }
-                            if is_nested && k == "properties" {
-                                // Parameters of a nested deployment are evaluated here; its template runs on its own.
-                                let mut p = v.as_object().cloned().unwrap_or_default();
-                                if let Some(params) = p.get("parameters").cloned() {
-                                    match eval_value(&params, env) {
+                if it.existing {
+                    // `existing: true` reads a resource the template does not deploy
+                    progressed = true;
+                    done.push(i);
+                    continue;
+                }
+                // Evaluate the resource body in a synchronous block (no Env across an await); a `list*` call asks for an
+                // action to run, which `settle` does before it evaluates again.
+                let body = scope
+                    .settle(cx, || {
+                        scope.with_env(cx, &copy_stack, |env| {
+                            let mut o = Map::new();
+                            let is_nested = it.full_type.eq_ignore_ascii_case("Microsoft.Resources/deployments");
+                            if let Some(raw) = it.raw.as_object() {
+                                for (k, v) in raw {
+                                    if KEEP_OUT.iter().any(|x| x.eq_ignore_ascii_case(k)) {
+                                        continue;
+                                    }
+                                    if is_nested && k == "properties" {
+                                        // Parameters of a nested deployment are evaluated here; its template runs on its own.
+                                        let mut p = v.as_object().cloned().unwrap_or_default();
+                                        if let Some(params) = p.get("parameters").cloned() {
+                                            match eval_value(&params, env) {
+                                                Ok(x) => {
+                                                    p.insert("parameters".into(), x);
+                                                }
+                                                Err(e) => return Err(e),
+                                            }
+                                        }
+                                        o.insert(k.clone(), Value::Object(p));
+                                        continue;
+                                    }
+                                    match eval_value(v, env) {
                                         Ok(x) => {
-                                            p.insert("parameters".into(), x);
+                                            o.insert(k.clone(), x);
                                         }
                                         Err(e) => return Err(e),
                                     }
                                 }
-                                o.insert(k.clone(), Value::Object(p));
-                                continue;
                             }
-                            match eval_value(v, env) {
-                                Ok(x) => {
-                                    o.insert(k.clone(), x);
-                                }
-                                Err(e) => return Err(e),
-                            }
-                        }
-                    }
-                    Ok(Value::Object(o))
-                });
+                            Ok(Value::Object(o))
+                        })
+                    })
+                    .await;
                 let body = match body {
                     Ok(b) => b,
                     Err(EvalError::Defer(_)) => {
@@ -618,7 +494,17 @@ fn run<'a>(
                     }
                     // A broken limit or impossible arithmetic makes the whole template invalid, wherever it shows up.
                     Err(EvalError::Invalid(m)) => return Err(invalid_template(m)),
-                    Err(EvalError::Msg(m)) => {
+                    Err(EvalError::Remote(r)) => {
+                        let e = ArmError::new(404, &r.code, r.message.clone());
+                        if validate_only {
+                            return Err(e);
+                        }
+                        out.failure_target = r.target.clone();
+                        out.failure = Some(e);
+                        continue;
+                    }
+                    Err(e @ (EvalError::Msg(_) | EvalError::Action(_) | EvalError::Runtime(_))) => {
+                        let m = e.text();
                         let e = ArmError::bad_request("InvalidTemplate", format!("Deployment template validation failed: {m}"));
                         if validate_only {
                             return Err(e);
@@ -689,27 +575,110 @@ fn run<'a>(
         }
 
         if out.failure.is_none() {
-            // outputs
-            if let Some(outputs) = template.get("outputs").and_then(Value::as_object) {
-                for (n, o) in outputs {
-                    let ty = o.get("type").and_then(Value::as_str).unwrap_or("string");
-                    match scope.eval(cx, &[], o.get("value").unwrap_or(&Value::Null)) {
-                        Ok(v) => {
-                            out.outputs.insert(n.clone(), json!({"type": titlecase(ty), "value": v}));
-                        }
-                        Err(EvalError::Invalid(m)) => return Err(invalid_template(format!("The template output '{n}' is not valid: {m}"))),
-                        Err(EvalError::Defer(m)) | Err(EvalError::Msg(m)) => {
-                            if validate_only {
-                                continue;
-                            }
-                            return Err(invalid_template(format!("The template output '{n}' is not valid: {m}")));
-                        }
-                    }
+            match params::evaluate_outputs(cx, &scope, &template, v2, validate_only).await? {
+                params::Outputs::Done(o) => out.outputs = o,
+                params::Outputs::Failed { error, target, output } => {
+                    out.failure = Some(error);
+                    out.failure_target = target;
+                    out.failed_output = output;
                 }
             }
         }
         Ok(out)
     })
+}
+
+/// A variable that calls `utcNow`, `newGuid` or a `list*` function: Azure refuses the template when it validates it
+/// (checked against a real deployment; the same functions in an output fail the deployment instead).
+fn check_variables(template: &Value) -> ArmResult<()> {
+    let Some(vars) = template.get("variables").and_then(Value::as_object) else { return Ok(()) };
+    for (name, v) in vars {
+        let mut stack = vec![v];
+        while let Some(x) = stack.pop() {
+            match x {
+                Value::String(t) => {
+                    if let Some(f) = crate::template::forbidden_in_variable(t) {
+                        let rest = if f.eq_ignore_ascii_case("utcNow") || f.eq_ignore_ascii_case("newGuid") {
+                            "The function can only be used with parameter default value expresions. "
+                        } else {
+                            ""
+                        };
+                        return Err(invalid_template(format!(
+                            "The template variable '{name}' is not valid: The template function '{f}' is not expected at this location. {rest}Please see https://aka.ms/arm-functions for usage details."
+                        )));
+                    }
+                }
+                Value::Array(a) => stack.extend(a),
+                Value::Object(o) => stack.extend(o.values()),
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `languageVersion` 2.0 (or `2.0-experimental`) puts the resources in an object and brings user-defined types.
+fn language_v2(template: &Value) -> ArmResult<bool> {
+    match template.get("languageVersion") {
+        None => Ok(false),
+        Some(Value::String(v)) => Ok(v.trim_start().starts_with("2.")),
+        Some(other) => Err(invalid_template(format!("the languageVersion {other} is not valid; it is a text such as \"2.0\"."))),
+    }
+}
+
+/// The resources of the template as a list, and (for `languageVersion` 2.0) their symbolic names in the same order.
+fn split_resources(template: &Value, v2: bool) -> ArmResult<(Vec<Value>, Option<Vec<String>>)> {
+    match (template.get("resources"), v2) {
+        (None, _) => Ok((Vec::new(), None)),
+        (Some(Value::Array(a)), false) => Ok((a.clone(), None)),
+        (Some(Value::Object(o)), true) => {
+            let mut names = Vec::with_capacity(o.len());
+            let mut list = Vec::with_capacity(o.len());
+            for (k, r) in o {
+                if !r.is_object() {
+                    return Err(invalid_template(format!("the resource '{k}' must be an object.")));
+                }
+                names.push(k.clone());
+                list.push(r.clone());
+            }
+            Ok((list, Some(names)))
+        }
+        (Some(Value::Object(_)), false) => Err(invalid_template(
+            "'resources' is an object, which needs \"languageVersion\": \"2.0\" in the template; without it 'resources' is an array.",
+        )),
+        (Some(Value::Array(_)), true) => {
+            Err(invalid_template("in a template with \"languageVersion\": \"2.0\" 'resources' is an object that names each resource."))
+        }
+        (Some(_), _) => {
+            Err(invalid_template("'resources' must be an array (or an object in a template with \"languageVersion\": \"2.0\")."))
+        }
+    }
+}
+
+/// Every way a `dependsOn` or a `list*` call can name a resource of this template, lower case.
+fn declared_names(scope: &Scope, items: &[Item]) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    for it in items {
+        let joined = it.names.join("/");
+        for key in [item_id(scope, it), joined.clone(), format!("{}/{}", it.full_type, joined)] {
+            set.insert(key.to_ascii_lowercase());
+        }
+        if let Some(n) = it.names.last() {
+            set.insert(n.to_ascii_lowercase());
+        }
+    }
+    set
+}
+
+/// Symbolic names to the ids of the resources (all the copies of a loop).
+fn symbol_table(scope: &Scope, items: &[Item]) -> std::collections::HashMap<String, Symbol> {
+    let mut table: std::collections::HashMap<String, Symbol> = std::collections::HashMap::new();
+    for it in items {
+        let Some(sym) = &it.symbol else { continue };
+        let e = table.entry(sym.to_ascii_lowercase()).or_insert_with(|| Symbol { ids: Vec::new(), looped: it.raw.get("copy").is_some() });
+        e.ids.push(item_id(scope, it));
+    }
+    table
 }
 
 /// For each item, the items it has to wait for: those named in its `dependsOn` and its parent. Built once, with
@@ -718,7 +687,9 @@ fn dependency_graph(cx: &Cx<'_>, scope: &Scope, items: &[Item]) -> Vec<BTreeSet<
     let mut by_name: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, it) in items.iter().enumerate() {
         let joined = it.names.join("/");
-        for key in [item_id(scope, it), joined.clone(), format!("{}/{}", it.full_type, joined)] {
+        let mut keys = vec![item_id(scope, it), joined.clone(), format!("{}/{}", it.full_type, joined)];
+        keys.extend(it.symbol.clone());
+        for key in keys {
             by_name.entry(key.to_ascii_lowercase()).or_default().push(i);
         }
     }
@@ -859,11 +830,26 @@ async fn store_deployment(
         "outputResources": outcome.deployed_ids.iter().map(|i| json!({"id": i})).collect::<Vec<_>>(),
     });
     if let Some(e) = &outcome.failure {
-        p["error"] = json!({
-            "code": "DeploymentFailed",
-            "message": "At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details.",
-            "details": [error_of(e)],
-        });
+        p["error"] = match &outcome.failed_output {
+            // an output that could not be evaluated (what a real deployment answers, with the same words)
+            Some(output) => json!({
+                "code": "DeploymentOutputEvaluationFailed",
+                "target": id,
+                "message": format!("Unable to evaluate template outputs: '{output}'. Please see error details and deployment operations. Please see https://aka.ms/arm-common-errors for usage details."),
+                "details": [{"code": "DeploymentOutputEvaluationFailed", "target": output, "message": e.message}],
+            }),
+            None => {
+                let mut detail = error_of(e);
+                if let Some(t) = &outcome.failure_target {
+                    detail["target"] = json!(t);
+                }
+                json!({
+                    "code": "DeploymentFailed",
+                    "message": "At least one resource deployment operation failed. Please list deployment operations for details. Please see https://aka.ms/arm-deployment-operations for usage details.",
+                    "details": [detail],
+                })
+            }
+        };
     }
     let mut body = json!({"id": id, "name": name, "type": "Microsoft.Resources/deployments", "properties": p});
     if rg.is_empty() {

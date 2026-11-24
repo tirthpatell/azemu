@@ -41,6 +41,7 @@ reads the setting, in the constructor of its service (so that `azemu __settings-
 | `AZEMU_APPCONFIG_STORE_MB` | 100 | megabytes of settings and history in one store; a write over it gets 429 |
 | `AZEMU_ARM_DEPLOYMENT_HISTORY_MB` | 64 | ARM: megabytes of deployment records one subscription keeps; the oldest are dropped first (Azure also keeps at most 800 per group). |
 | `AZEMU_ARM_STRICT` | off | ARM: a write for a resource type that no provider emulates (Microsoft.Web/sites) answers 501 instead of being stored as plain JSON. |
+| `AZEMU_AUTH_CONFIG` | none | A JSON file of role assignments, custom roles, Cosmos DB role assignments and Key Vault access policies that exist from the start and again after every reset (`docs/strict-auth.md`). Option: `--auth-config`. |
 | `AZEMU_BLOB_LOG_DELAY` | 3s | how long Storage Analytics log entries (Blob logging switched on with Set Blob Service Properties) wait before they are written to the `$logs` container; Azure takes up to an hour |
 | `AZEMU_BLOB_LOG_MAX_BLOBS` | 2000 | log blobs one account keeps in `$logs`; the oldest are removed first |
 | `AZEMU_BLOB_LOG_MAX_BYTES` | 64M | bytes of log blobs one account keeps in `$logs`; the oldest are removed first |
@@ -62,6 +63,7 @@ reads the setting, in the constructor of its service (so that `azemu __settings-
 | `AZEMU_EVENTGRID_AUTOCREATE` | off (on with `AZEMU_LENIENT`) | Publishing to a custom topic or namespace topic that was never created, or receiving from a namespace subscription that was never created, makes it, instead of the not-found answer Azure gives. |
 | `AZEMU_EVENTGRID_CONFIG` | none | Path of a JSON file with topics, domains, namespaces and subscriptions to create at start and after every reset. |
 | `AZEMU_EVENTGRID_DELIVERY_TIMEOUT_MS` | 10000 | Milliseconds a webhook may take to answer before the delivery counts as failed. |
+| `AZEMU_EVENTGRID_FUNCTION_HOSTS` | none | Where the Azure Functions host of each function app runs, as `app=http://localhost:7071` pairs separated by commas. An event subscription with an `AzureFunction` destination delivers to `{address}/runtime/webhooks/EventGrid?functionName={name}`; without an entry for the app every delivery fails. The address follows the rule of `AZEMU_ALLOW_WEBHOOK_HOST`. |
 | `AZEMU_EVENTGRID_MAX_PENDING` | 1000 | Most deliveries waiting for a retry per subscription; the oldest is dead-lettered when more come. |
 | `AZEMU_EVENTGRID_MAX_PENDING_MB` | 32 | Most megabytes of deliveries waiting for a retry per subscription. |
 | `AZEMU_EVENTGRID_MAX_PENDING_TOTAL` | 5000 | Most deliveries waiting for a retry in all subscriptions together. |
@@ -70,11 +72,16 @@ reads the setting, in the constructor of its service (so that `azemu __settings-
 | `AZEMU_EVENTGRID_RETRY_MAX_MS` | 10000 | Longest wait in milliseconds between two retries of a webhook delivery. |
 | `AZEMU_EVENTHUBS_AUTOCREATE` | off (on with `AZEMU_LENIENT`) | An event hub that an AMQP client sends to or reads from but was never created comes into being, instead of the not-found answer Azure gives. (The Kafka endpoint makes the event hub for a producer or an admin client either way, as Azure does.) |
 | `AZEMU_EVENTHUBS_CONFIG` | none | Path of a JSON file with event hubs and consumer groups to create at start and after every reset. |
+| `AZEMU_FAULTS` | none | A JSON file of fault rules that exist from the start and again after every full reset: throttling answers, errors, delays, dropped connections (`docs/faults.md`). Without it, and without rules added through `/_azemu/faults`, nothing fails on purpose. Option: `--faults`. |
+| `AZEMU_FILE_SOFT_DELETE_DAYS` | 7 | days a deleted file share can be restored (List Shares with include=deleted, then Restore Share); 0 deletes shares for good. On Azure this is a setting of the storage account (a new account has 7 days) |
 | `AZEMU_KAFKA_ADVERTISED_HOST` | none (the host the client connected to) | Broker host name the Kafka endpoint puts in Metadata and FindCoordinator answers, for plain connections that do not name one. |
 | `AZEMU_KAFKA_ADVERTISED_PORT` | none (the port the emulator listens on) | Broker port the Kafka endpoint advertises when clients reach the emulator through another port. |
 | `AZEMU_KAFKA_INITIAL_REBALANCE_DELAY_MS` | 500 | Milliseconds the first round of a new Kafka consumer group waits for more members to join (at most 30000). |
 | `AZEMU_LENIENT` | off | Turn on every convenience Azure does not have: things a client names but nobody created (queues, topics, event hubs, consumer groups, Event Grid topics) come into being on first use, and new storage accounts keep blob versions. Option: `--lenient`. A convenience's own variable overrides this for that convenience. |
 | `AZEMU_LOOSE_AUTH` | off | Check no signature of a storage request (Blob, Queue, Table, Data Lake): a Shared Key or SAS signature that is malformed (`replay`, `Sanitized`) or wrong passes, so does an old `x-ms-date`. Without it azemu refuses a malformed signature for every account and a wrong one for `devstoreaccount1`, as Azure does. It is for replaying recorded traffic. A warning at start says it is on. |
+| `AZEMU_MONITOR_MAX_ITEMS` | 50000 | most Application Insights telemetry items the monitor service keeps; the oldest are dropped (the admin API says how many) |
+| `AZEMU_MONITOR_MAX_LOG_ROWS` | 50000 | most Logs Ingestion rows the monitor service keeps; the oldest are dropped |
+| `AZEMU_MONITOR_MAX_MB` | 128 | megabytes of telemetry, and of log rows, the monitor service keeps (each list on its own); the oldest are dropped |
 | `AZEMU_SAVE_INTERVAL` | 15 (seconds) | Seconds between saves of changed state when a data directory is set; 0 saves only on `POST /_azemu/save` and at shutdown. Option: `--save-interval`. |
 | `AZEMU_SCRIPT_WORKER` | the emulator's own program | Cosmos: the program that runs a script worker (it must handle the worker's hidden first argument); only embedders and tests need it. |
 | `AZEMU_SEED` | none | A JSON file of things to create at start and again after every reset: blob containers, queues, tables, Cosmos databases and containers, Key Vault secrets, App Configuration key-values (`docs/seed.md`). Option: `--seed`. |
@@ -85,7 +92,8 @@ reads the setting, in the constructor of its service (so that `azemu __settings-
 | `AZEMU_SERVICEBUS_TXN_MAX_MB` | 128 | Most megabytes of messages one open AMQP transaction may hold. |
 | `AZEMU_SERVICEBUS_TXN_TIMEOUT_SECONDS` | 120 (seconds) | How long an AMQP transaction may stay open before it is rolled back (seconds, or a number with ms, s, m). |
 | `AZEMU_SERVICEBUS_TXN_TOTAL_MAX_MB` | 1024 | Most megabytes of messages all open transactions together may hold. |
-| `AZEMU_STANDARD_PORTS` | off | Open one fixed port per service next to the gateway port: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 8081 Cosmos, 5672 and 5671 AMQP (plain and TLS on both), 9093 Kafka, and 443 when the process may bind it (a warning when it may not). Option: `--standard-ports`. |
+| `AZEMU_STANDARD_PORTS` | off | Open one fixed port per service next to the gateway port: 10000 Blob, 10001 Queue, 10002 Table, 10003 Data Lake, 10004 Files, 10010 Key Vault, 10011 App Configuration, 10012 Event Grid, 10013 ARM, 10014 Identity, 10015 Monitor, 8081 Cosmos, 5672 and 5671 AMQP (plain and TLS on both), 9093 Kafka, and 443 when the process may bind it (a warning when it may not). Option: `--standard-ports`. |
+| `AZEMU_STRICT_AUTH` | off | Check bearer tokens and decide by role assignments what the caller may do (`docs/strict-auth.md`): a missing role is refused with Azure's own answer. Keys and SAS are checked as without it, except those of Service Bus and Event Hubs (they have rights and an expiry). Option: `--strict-auth`. |
 | `AZEMU_TLS_NAME` | none | Extra names the local CA may sign for, besides localhost and loopback addresses (comma separated). A different set makes a new CA. Option: `--tls-name`. |
 <!-- END TABLE -->
 

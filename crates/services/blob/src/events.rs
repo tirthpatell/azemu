@@ -15,6 +15,14 @@
 //!   `State::events`; nothing leaves the blob lock yet.
 //! * After the lock is released, the service passes the events to the sink.
 //!
+//! What raises an event was tried against a real storage account in November 2026 (a system topic sending every event type
+//! to a Storage queue): Put Blob of any blob type (`PutBlob`; an append or page blob is a `BlobCreated` with
+//! `contentLength` 0 or the declared size), Put Block List, Copy Blob and Delete Blob raise `BlobCreated` / `BlobDeleted`; Set Blob Tier raises
+//! `BlobTierChanged`, or `AsyncOperationInitiated` when the answer is 202 (a rehydration). These raised nothing: Create Container,
+//! Set Container Metadata, Delete Container, Snapshot Blob, Delete Blob of a snapshot or with `x-ms-delete-snapshots: only`,
+//! Set Blob Metadata, Set Blob Properties, Set Blob Tags, Put Block, Append Block, Put Page, Clear Pages, lease operations. Undelete
+//! could not be tried (soft delete is off on that account).
+//!
 //! The shapes follow the system event schemas in
 //! `refs/specs/specification/eventgrid/data-plane/EventGridSystemEvents` (Storage.tsp and the
 //! examples) and the Microsoft Learn page "Azure Blob Storage as an Event Grid source".
@@ -77,6 +85,7 @@ pub(crate) struct Pre {
     content_type: String,
     blob_type: &'static str,
     size: u64,
+    etag: String,
     /// The explicitly set tier before the operation (`None` when the tier is inferred).
     tier: Option<String>,
     is_dir: bool,
@@ -84,7 +93,14 @@ pub(crate) struct Pre {
 
 impl Pre {
     fn of(b: &Blob) -> Pre {
-        Pre { content_type: b.props.content_type.clone(), blob_type: b.kind.name(), size: b.size, tier: b.tier.clone(), is_dir: is_dir(b) }
+        Pre {
+            content_type: b.props.content_type.clone(),
+            blob_type: b.kind.name(),
+            size: b.size,
+            etag: b.etag.clone(),
+            tier: b.tier.clone(),
+            is_dir: is_dir(b),
+        }
     }
 }
 
@@ -238,7 +254,10 @@ pub(crate) fn after_blob(
                 return;
             }
             let mut d = head(req, "DeleteBlob");
+            // Azure sends `eTag` and `contentLength` here (seen in November 2026), in this order
+            d.insert("eTag".into(), json!(pre.etag.trim_matches('"')));
             d.insert("contentType".into(), json!(pre.content_type));
+            d.insert("contentLength".into(), json!(pre.size));
             d.insert("blobType".into(), json!(pre.blob_type));
             d.insert("url".into(), json!(url_of(req, Endpoint::Blob, Endpoint::Blob, c, name)));
             tail(&mut d);
@@ -254,6 +273,8 @@ pub(crate) fn after_blob(
             // and Event Grid gets "AsyncOperationInitiated" instead.
             let rehydrating = resp.status().as_u16() == 202;
             let mut d = head(req, "SetBlobTier");
+            // `eTag` is in what Azure sent for both events (November 2026)
+            d.insert("eTag".into(), json!(pre.etag.trim_matches('"')));
             d.insert("contentType".into(), json!(pre.content_type));
             d.insert("contentLength".into(), json!(pre.size));
             d.insert("blobType".into(), json!(pre.blob_type));

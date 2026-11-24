@@ -1,0 +1,19 @@
+{
+ "add1Hour": "2020-04-07T15:53:14Z",
+ "add1HourFormatBasic": "20200407T155314Z",
+ "add1HourFormatU": "2020-04-07 15:53:14Z",
+ "add3Years": "2023-04-07T14:53:14Z",
+ "addDaysAcrossMonth": "2024-03-01T10:00:00Z",
+ "addOneMonthLeap": "2024-03-02T00:00:00Z",
+ "addOneMonthNonLeap": "2023-03-03T00:00:00Z",
+ "addOneYearLeap": "2024-12-31T00:00:00Z",
+ "addOneYearNonLeap": "2024-01-01T00:00:00Z",
+ "datetimeValue": "2023-05-02T15:16:13Z",
+ "epochBeforeZero": "1969-12-31T00:00:00Z",
+ "epochOfBaseTime": 1586271194,
+ "epochRoundTrip": 1714576573,
+ "epochValue": 1683040573,
+ "epochZero": "1970-01-01T00:00:00Z",
+ "subtract9Days": "2020-03-29T14:53:14Z",
+ "subtractAcrossYear": "2023-12-31T23:59:59Z"
+}

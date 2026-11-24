@@ -105,7 +105,7 @@ impl Service for Probe {
                 return azemu_core::unsupported::mark(
                     azemu_core::json_error::response(501, "NotImplemented", "probe: GetThing for acct-123"),
                     "GetThing",
-                )
+                );
             }
             // a resource type ARM stored without emulating it
             "/stored" => {

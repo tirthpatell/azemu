@@ -137,3 +137,34 @@ def test_delete_deployment_record(deployments, rg):
     deployments.deployments.begin_delete(rg, "empty").result()
     with pytest.raises(ResourceNotFoundError):
         deployments.deployments.get(rg, "empty")
+
+
+def test_list_keys_environment_and_lambdas_in_outputs(deployments, rg, uniq, emu):
+    """What the Bicep compiler writes for `sa.listKeys().keys[0].value`, `environment().suffixes.storage`, `map`, `sort` and
+    `dateTimeAdd` (Microsoft Learn, "ARM template functions"). The key and the host built from the suffix have to work with the Blob SDK."""
+    name = uniq("tplkeys")
+    tpl = {
+        "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+        "contentVersion": "1.0.0.0",
+        "parameters": {"name": {"type": "string"}, "queues": {"type": "array", "defaultValue": ["b", "a", "c"]}},
+        "resources": [
+            {"type": "Microsoft.Storage/storageAccounts", "apiVersion": "2023-05-01", "name": "[parameters('name')]", "location": "eastus",
+             "sku": {"name": "Standard_LRS"}, "kind": "StorageV2"}
+        ],
+        "outputs": {
+            "key": {"type": "string", "value": "[listKeys(resourceId('Microsoft.Storage/storageAccounts', parameters('name')), '2023-05-01').keys[0].value]"},
+            "host": {"type": "string", "value": "[format('{0}.blob.{1}', parameters('name'), environment().suffixes.storage)]"},
+            "sorted": {"type": "array", "value": "[sort(map(parameters('queues'), lambda('q', toUpper(lambdaVariables('q')))), lambda('a', 'b', less(lambdaVariables('a'), lambdaVariables('b'))))]"},
+            "expires": {"type": "string", "value": "[dateTimeAdd('2024-02-01 00:00:00Z', 'P1M', 'yyyy-MM-dd')]"},
+        },
+    }
+    result = deployments.deployments.begin_create_or_update(
+        rg, "keys", {"properties": {"mode": "Incremental", "template": tpl, "parameters": {"name": {"value": name}}}}
+    ).result()
+    out = result.properties.outputs
+    assert out["sorted"]["value"] == ["A", "B", "C"]
+    assert out["expires"]["value"] == "2024-03-02"  # a month is 30 days in dateTimeAdd
+    blob = BlobServiceClient(f"http://{out['host']['value']}", credential=out["key"]["value"])
+    assert out["host"]["value"] == f"{name}.blob.core.localhost:{emu.port}"
+    blob.create_container("fromoutput")
+    assert "fromoutput" in [c.name for c in blob.list_containers()]

@@ -58,6 +58,8 @@ use a copy of its file with the `{ skip: '...' }` option removed.
 | `@azure/keyvault-certificates` | 4.11.0 | `@azure/arm-storage` | 21.0.0 |
 | `@azure/app-configuration` | 1.13.1 | `@azure/arm-servicebus` | 7.0.0 |
 | `@azure/cosmos` | 4.10.2 | `ws` | 8.22.2 |
+| `@azure/monitor-opentelemetry-exporter` | 1.0.0-beta.32 | `@opentelemetry/sdk-trace-base`, `sdk-metrics` | 2.12.1 |
+| `@opentelemetry/sdk-logs`, `api-logs` | 0.200.0 | `@opentelemetry/resources`, `api` | 2.12.1, 1.9.1 |
 
 ## Coverage
 
@@ -80,6 +82,7 @@ use a copy of its file with the `{ skip: '...' }` option removed.
 | `test/eventgrid.test.mjs` | 20 | custom topic publish (Event Grid, CloudEvents, custom schema, SAS key), push delivery to a local webhook (headers, filters, retry, handshake), namespace topics with `@azure/eventgrid-namespaces` (send, receive, acknowledge, release, reject, renew) |
 | `test/arm.test.mjs` | 15 | resource groups, storage accounts / containers / queues, Service Bus namespaces / queues / topics, deployments, and the created resources used from the data plane |
 | `test/azurite.test.mjs` | 8 | `--pin` ports, path-style connection strings, Cosmos drop-in port |
+| `test/monitor.test.mjs` | 5 | the Azure Monitor OpenTelemetry exporter (traces, a recorded exception, metrics, logs) sending to `/v2.1/track` and the test reading the items back through `/_azemu/monitor/`; the emulator's log shows no refused request |
 | `test/http_depth.test.mjs` | 7 | 200 parallel uploads, 48 MiB parallel blocks, aborted download, short body, chunked request |
 
 ## Blob versioning and the Key Vault challenge

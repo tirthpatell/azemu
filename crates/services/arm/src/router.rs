@@ -46,6 +46,11 @@ pub async fn route(inner: &Inner, req: &Request, stored_only: &std::sync::atomic
         return tags::handle(&cx, &segs[..n - 4]);
     }
 
+    // Role assignments and role definitions of any scope (`authz.rs`): kept in the registry, answered whatever the mode is.
+    if let Some((at, kind)) = crate::authz::find(&segs) {
+        return crate::authz::handle(&cx, at, kind);
+    }
+
     let rest_lc: Vec<String> = sc.rest.iter().map(|s| s.to_ascii_lowercase()).collect();
     let rest: Vec<&str> = rest_lc.iter().map(String::as_str).collect();
 

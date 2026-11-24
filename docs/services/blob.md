@@ -310,6 +310,7 @@ are unchanged.
   and 64 levels deep (`400 InvalidXmlDocument`), 100,000 staged blocks per blob
   (`409 BlockCountExceedsLimit`), 256 soft-deleted containers per account (older ones, and those past
   the retention period, are dropped when another container is deleted).
+- **Faults.** Only on request, with a fault rule ([`faults.md`](../faults.md)). A throttled request is `503 ServerBusy` with the XML error, as Microsoft's list of storage error codes gives it; that list names no retry header, so `Retry-After` is sent only when the rule gives a wait. The emulator never throttles by itself.
 
 ## Storage Analytics logging (`$logs`)
 
@@ -428,3 +429,15 @@ The `blob` service owns the files for both Blob and Data Lake (they share one st
 * Reads are not changes. A request changes the state unless it is `GET`/`HEAD`/`OPTIONS`, except that a read of a Data Lake filesystem that first makes
   it hierarchical or takes in blob-endpoint writes counts as a change. Lazily applied time (an expired lease, an expired Data Lake path, a soft-deleted item past
   retention) is not a change until something acts on it; the saved absolute times mean the same after a restart.
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request with a bearer token is checked: the token (signature, expiry, audience `https://storage.azure.com` or the account's own URL), then the
+data action of the operation against the caller's role assignments, before the body is read and before the blob or container is looked up. A missing role is 403 `AuthorizationPermissionMismatch` (create container:
+`AuthorizationFailure`); a token that is wrong is 401 `InvalidAuthenticationInfo` with the challenge for an `x-ms-version` from 2019-12-12, 403 `AuthenticationFailed` before it. A blob batch is accepted and each
+part judged. Account keys and SAS are checked as described above, and a request with no credentials keeps its answer. Not checked: the `allowSharedKeyAccess` setting of an account, network rules; `Delete Blob` of a version
+asks for `delete`, not `deleteBlobVersion/action`; Put Blob asks for `write` or `add/action` without looking whether the blob exists. What Azure did is in [`../strict-auth.md`](../strict-auth.md#storage).
+
+**Copy sources.** Copy Blob, Put Blob From URL, Put Block From URL, Append Block From URL and Put Page From URL also need `blobs/read` on the source, for the principal of the request (a source in the
+same account), or for the principal of `x-ms-copy-source-authorization: Bearer <token>`, which is verified; a source with a SAS in its URL is read with the SAS. The source is resolved the way the copy resolves it, so
+`acct-secondary`, an escaped or upper case account and the path style are the same source. The answer is `CannotVerifyCopySource` (403; 401 for a source token that does not verify). **Not probed on Azure.**

@@ -2,7 +2,7 @@
 
 Tests that drive the emulator with the official Azure SDKs for Python. They are the largest suite and the quickest to run: one directory per service
 (`blob`, `queue`, `table`, `datalake`, `keyvault`, `appconfig`, `cosmos`, `servicebus`, `eventhubs`, `kafka`, `eventgrid`, `storage_events`, `identity`, `arm`,
-`persistence`, `seed`). The tests were written from the SDKs and Microsoft's documentation, not from the emulator's code, and they double as examples of how to point each
+`persistence`, `seed`, `monitor`, `faults`, `schemaregistry`, `auth`, `file`). The tests were written from the SDKs and Microsoft's documentation, not from the emulator's code, and they double as examples of how to point each
 Python SDK at it. What the Python SDKs need set is in [`docs/sdk-notes.md`](../../docs/sdk-notes.md#python).
 
 ## What you need
@@ -34,7 +34,7 @@ the Service Bus and Event Hubs suites are split per file because their tests wai
   someone turns it on. Tests about the opposite behaviour carry the markers `autocreate` and `versioning`; they are skipped in the first pass and the runner runs them in a
   second pass with the emulator's `AZEMU_*_AUTOCREATE`, `AZEMU_BLOB_VERSIONING` or `AZEMU_LENIENT` variables set (`autocreate_gate.py` has the rules). Tests that check
   what Azure answers for a missing entity (`no_autocreate`, `no_versioning`) are skipped in that second pass.
-* `emulator_only` marks tests of behaviour that only the emulator has (its admin API, `/_azemu/...`); `slow` marks tests that wait for a lock, a TTL or a schedule (a few seconds each).
+* `emulator_only` marks tests of behaviour that only the emulator has (its admin API, `/_azemu/...`), or that was not probed on Azure (`@pytest.mark.emulator_only("not probed on Azure")`: the reason is shown when it is skipped); `slow` marks tests that wait for a lock, a TTL or a schedule (a few seconds each).
 * The suites can also run against another service with `AZEMU_GATEWAY` / `AZEMU_STORAGE_CONN_STR` (for example Azurite, to check an expectation against a second implementation). The
   tests skipped in that case say so in their reason ("Azurite does not implement ..."); against azemu itself they run.
 
@@ -52,6 +52,11 @@ differently carry `azure_differs("reason")`. Both are skipped with `AZEMU_AZURE=
   throughput are `emulator_only`, and the fixtures refuse such a request before it is sent. A provisioned-throughput account would bill every container by the hour.
 * Needs nothing else. Features an account must enable first are not assumed: the tests of the "all versions and deletes" change feed mode are `emulator_only` because
   the account answers 400 until the feature is on.
+* The messaging files (`test_servicebus.py`, `test_eventhubs.py`, `test_kafka.py`, `test_schemaregistry.py`) need more: `AZ_SERVICEBUS_NAMESPACE`, `AZ_SERVICEBUS_CONN_STR` (a rule with `Manage`), `AZ_SERVICEBUS_SEND_CONN_STR` and
+  `AZ_SERVICEBUS_LISTEN_CONN_STR` (a send-only and a listen-only rule of the namespace), `AZ_SERVICEBUS_QUEUE_SEND_CONN_STR` (a send-only rule of the queue), `AZ_SERVICEBUS_AUTH_QUEUE` (the queue the tests use; they empty it), `AZ_EVENTHUBS_CONN_STR`,
+  `AZ_EVENTHUBS_SEND_CONN_STR`, `AZ_EVENTHUBS_LISTEN_CONN_STR`, `AZ_EVENTHUBS_AUTH_HUB`, `AZ_SCHEMA_GROUP`. They use none of the helpers of the other Service Bus and Event Hubs suites (those make and delete entities on the management plane). The roles
+  of the four principals for them: `main` Azure Service Bus Data Owner, Azure Event Hubs Data Owner, Schema Registry Contributor; `reader` Reader, Azure Service Bus Data Receiver, Azure Event Hubs Data Receiver; `scoped` Azure Service Bus Data Sender on the queue.
+  Each successful send to an event hub leaves its event there until the retention ends (six events in all).
 * What it leaves behind: nothing in the normal case. Every database a test makes is deleted after the test (by resource id, so names with `#` or `?` work too);
   a test that is killed half way can leave its database. The runs create and delete many containers (a few seconds each) and send a few hundred to a few thousand requests per module;
   the modules add up to about 25 minutes of test time (they can run in parallel, one pytest process per module; use `--timeout=300`, the default of 60 seconds is short for a real account).
@@ -61,7 +66,7 @@ differently carry `azure_differs("reason")`. Both are skipped with `AZEMU_AZURE=
   and four containers of seven to twelve documents; a minute on the account). The same file runs against the emulator.
 
 ```bash
-set -a; . path/to/your/env; set +a
+set -a; . path/to/your/env; set +a    # a value that holds a `;` (a connection string) needs the file read without a shell: export the variables from Python
 AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/cosmos/test_cosmos_query_basic.py -q --timeout=300
 ```
 
@@ -88,6 +93,41 @@ AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/eventhubs/test_send.py -q --time
 AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/kafka -q --timeout=240
 ```
 
+### Azure Files (`file/`)
+
+* `azure-storage-file-share` 12.27.1 and raw REST requests signed with the account key (`fileutil.Raw`). Variables: `AZ_STORAGE_ACCOUNT` and `AZ_STORAGE_KEY` (the account name and its
+  key; nothing else, and nothing calls the management plane, unlike the helpers of some other suites).
+* Account: a general-purpose v2 account with SMB shares (a standard account: `Premium` and NFS are refused there, and the tests about that expect it).
+* What it leaves behind: shares are deleted when a test ends, but **a deleted share stays on the account for the soft delete days (7 by default) and cannot be purged through the data
+  plane**: a run leaves about 30 soft-deleted shares, all empty and gone from `list_shares`. The tests that only need directories and files share one share per run. Nothing is
+  left in the live account: check with `list_shares` (the run ends with no share). The only setting the tests change is CORS (`test_file_service.py`), and they put it back.
+* Azure answers `ShareBeingDeleted` for about half a minute after a delete: the one test that restores a share waits (`fileutil.eventually`), and a new share has a new name every time.
+  A new CORS rule takes a few seconds to apply (the preflight test polls).
+* The emulator-only tests are `emulator_only`; a run takes about 2 minutes.
+
+```bash
+set -a; . path/to/your/env; set +a
+AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/file -q --timeout=240
+```
+
+### Schema Registry (`schemaregistry/`)
+
+* The registry of an Event Hubs namespace (`azure-schemaregistry` 1.3.0 and `azure-schemaregistry-avroencoder` 1.0.0, the REST API without an SDK, and a round trip of an encoded event
+  through Event Hubs). Variables: `AZ_EVENTHUBS_NAMESPACE`, `AZ_SCHEMA_GROUP` (the namespace's schema group: Avro, compatibility Forward) and `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+  `AZURE_CLIENT_SECRET` of a principal with the roles Schema Registry Contributor and Azure Event Hubs Data Owner (or Sender and Receiver). The clients sign in with Microsoft Entra ID;
+  a shared access key is not used, so a namespace with local authentication off works.
+* Tier: **Standard**: one schema group and 25 schema versions (Microsoft Learn, "Event Hubs quotas and limits"). Every test makes schemas under a name of its own and deletes them when it
+  ends (the REST API has a `DELETE` that the SDKs do not call; it takes away the latest version of a schema, so the cleanup repeats it). A run that is killed leaves schemas in the group:
+  list them with `GET /$schemaGroups/{group}/schemas` and delete them, or the next run may hit the limit of 25.
+* The round trip sends to the namespace's existing hub `AZ_EVENTHUBS_AUTH_HUB` (the suite calls no Resource Manager API): its events carry a marker property and are read from 30 seconds before
+  the send. They stay in the hub for its retention.
+* The emulator-only tests (a reset, any token passing) are `emulator_only`.
+
+```bash
+set -a; . path/to/your/env; set +a
+AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/schemaregistry -q --timeout=120
+```
+
 ### Service Bus (`servicebus/`)
 
 * Variable: `AZ_SERVICEBUS_CONN_STR` (the namespace connection string, with a key that may manage: the tests make and delete queues, topics, subscriptions and rules).
@@ -104,6 +144,58 @@ AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/kafka -q --timeout=240
 set -a; . path/to/your/env; set +a
 AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/servicebus/test_queue_locks.py -q --timeout=180
 ```
+
+### Event Grid delivery properties (`storage_events/test_delivery_properties.py`)
+
+* Four tests of this module (delivery properties from the event, a value over 4096 bytes and an empty `MessageId`, `SessionId` for a session queue, events without a usable session id) run against Azure; the
+  rest is `emulator_only`. The custom topic, its three subscriptions and the queues are made beforehand by whoever owns the resources: the tests only publish and receive, and call no management API.
+* Variables: `AZ_EVENTGRID_ENDPOINT` and `AZ_EVENTGRID_KEY` (a custom topic with `Event Grid` input schema), `AZ_EVENTGRID_PROPS_QUEUE` (a Service Bus queue that gets the events whose subject starts with `props/`, with the
+  delivery properties `x-static` (static `abc`), `x-dyn` (dynamic `data.key1`), `MessageId` (dynamic `data.mid`) and `PartitionKey` (dynamic `data.pk`)), `AZ_EVENTGRID_SESSION_QUEUE` (a session-enabled queue that gets
+  `session/…` with `SessionId` dynamic from `data.sid`) and `AZ_SERVICEBUS_CONN_STR` (the namespace connection string).
+* What it leaves behind: nothing. The messages are received with delete; an event the queue refuses (an empty `MessageId`, no session id) is retried by Event Grid for a day and then dropped. The run takes about 30 seconds.
+* The dead letter blob test is `emulator_only`: Azure writes dead letters about five minutes after the event, in one blob for the events of that time, and the test would have to delete the destination queue.
+
+### Monitor (`monitor/`)
+
+* Only `monitor/test_track_protocol.py` can run against Azure: it sends raw requests to the ingestion endpoint of an Application Insights resource and checks the status and
+  the message of every answer (what the emulator copies is what these tests found). Variable: `AZ_APPINSIGHTS_CONN_STR`, a connection string with the instrumentation key
+  (with no `IngestionEndpoint` in it the global endpoint, `dc.services.visualstudio.com`, is used, which answers `v2.1/track` with a redirect: the tests use `v2/track`).
+  The SDK tests read telemetry back through the emulator's admin API and are `emulator_only`; Application Insights has no way to read it back that is quick.
+* What it leaves behind: the telemetry it sent, named `azemu-probe`. Telemetry cannot be taken back; the run sends about 60 requests of one or two items.
+* Tests about a difference that was left are `azure_differs` (the emulator takes every GUID as an instrumentation key; Azure refuses one it does not know).
+
+```bash
+set -a; . path/to/your/env; set +a
+AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/monitor/test_track_protocol.py -q
+```
+
+Every test of this suite also fails when the emulator refused a request of the monitor service while it ran (read from the emulator's own log), unless it carries the marker
+`expects_refusals`.
+
+### Strict authorisation (`auth/`)
+
+* One suite that runs on **both sides** (`docs/strict-auth.md`). Against the emulator its fixture starts the unified binary with `AZEMU_STRICT_AUTH=1` (the runner sets it for this suite), makes the accounts through Resource Manager and
+  gives four principals the roles that the Azure side has (`main`: every data role; `reader`: the read roles; `norole`; `scoped`: Blob Data Reader on one container and Secrets User on one secret), with Resource Manager requests, as Terraform does.
+  Against Azure it uses the four service principals of the environment and creates **nothing** on the management plane.
+* Variables for `AZEMU_AZURE=1`: `AZURE_TENANT_ID`, `AZURE_CLIENT_ID` / `AZURE_CLIENT_SECRET` (main), `AZ_READER_CLIENT_ID` / `_SECRET`, `AZ_NOROLE_CLIENT_ID` / `_SECRET`, `AZ_SCOPED_CLIENT_ID` / `_SECRET`, `AZ_STORAGE_ACCOUNT`
+  (a flat account), `AZ_HNS_ACCOUNT` (hierarchical namespace), `AZ_SCOPED_CONTAINER` (a container, in the flat account, where `scoped` has a role), `AZ_KEYVAULT_URL` (role-based), `AZ_KEYVAULT_POLICY_URL` (access policies),
+  `AZ_SCOPED_SECRET` (a secret of the first vault where `scoped` has a role), `AZ_APPCONFIG_ENDPOINT`, `AZ_COSMOS_ENDPOINT` and `AZ_COSMOS_KEY` (for making the database: no token may), `AZ_EVENTGRID_ENDPOINT` (a custom topic).
+  The roles are the ones in the table at the top of `docs/strict-auth.md`; the principals need them in force before the run.
+* What it leaves behind: nothing in the normal case. Every container, blob, queue, table, file system, secret, key-value and database a test makes is deleted at the end of its module (by the principal `main`); the secret of `scoped` and the
+  container of `scoped` are written and removed too. A run that is killed can leave a few of them. About 60 requests to each service and about 50 token requests; about a minute.
+* Tests of what only the emulator has (the admin API, `/_azemu/auth/check`, the principal endpoint, an expired token, Resource Manager's answers) are `emulator_only`. The Rust tests in `crates/azemu/tests/strict_auth.rs` cover the mode off, persistence, the config file and Resource Manager.
+
+```bash
+set -a; . path/to/your/env; set +a
+AZEMU_AZURE=1 .venv/bin/pytest tests/sdk-python/auth -q --timeout=300
+.venv/bin/python tests/run_sdk_suites.py --bin target/debug/azemu --only auth      # the emulator side
+```
+
+### Faults (`faults/`)
+
+* Fault rules ([`docs/faults.md`](../../docs/faults.md)) through the Blob, Queue, Table, Cosmos DB, Key Vault, App Configuration and Service Bus clients: they retry what is throttled
+  or dropped and then succeed, they waited as long as the retry header said where the SDK honours it, and with retries off they raise the right error. Every test is
+  `emulator_only` and needs the unified binary (the runner knows). About two minutes; the Service Bus file takes half of it.
 
 ## Helpers
 

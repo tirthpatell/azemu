@@ -12,12 +12,17 @@ pub struct Backends {
     pub blob: Option<Arc<azemu_blob::BlobService>>,
     pub queue: Option<Arc<dyn Service>>,
     pub table: Option<Arc<dyn Service>>,
+    /// Azure Files: shares made through ARM are made here, and the shares made here are listed by ARM.
+    pub file: Option<Arc<dyn Service>>,
     pub cosmos: Option<Arc<dyn Service>>,
     pub eventgrid: Option<Arc<azemu_eventgrid::EventGridService>>,
     pub keyvault: Option<Arc<azemu_keyvault::KeyVaultService>>,
     pub appconfig: Option<Arc<azemu_appconfig::AppConfigService>>,
     pub servicebus: Option<Arc<azemu_servicebus::Shared>>,
     pub eventhubs: Option<Arc<azemu_eventhubs::Shared>>,
+    /// The handle of strict authorisation (`docs/strict-auth.md`): role assignments and definitions are kept in its registry, and it is told
+    /// which data resources Resource Manager made. Without one, ARM keeps a registry of its own that nothing else reads.
+    pub auth: Option<azemu_core::auth::Auth>,
 }
 
 impl Backends {
@@ -81,5 +86,5 @@ pub async fn call(svc: &Arc<dyn Service>, c: Call<'_>) -> Response {
             },
         },
     };
-    svc.handle(req).await
+    azemu_core::auth::in_process(svc.handle(req)).await
 }

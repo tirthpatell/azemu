@@ -12,12 +12,16 @@ mod admin;
 mod admin_subs;
 mod auth;
 mod config;
+mod dead_letter;
+mod delivery_props;
 mod destination;
 mod eg_schema;
 mod errors;
 mod events;
 mod filter;
+mod functions;
 mod http_client;
+mod inspect;
 mod model;
 mod ns;
 mod persist;
@@ -38,7 +42,11 @@ use azemu_core::{async_trait, Mount, Request, Response, Service};
 use parking_lot::Mutex;
 use tokio::sync::Notify;
 
-pub use destination::{DestinationConfig, DestinationDelivery, DestinationHandler, DestinationKind, DestinationTarget, Resolved};
+pub use dead_letter::{DeadLetterBlob, DeadLetterWriter};
+pub use delivery_props::DeliveryAttribute;
+pub use destination::{
+    BlobTarget, DestinationConfig, DestinationDelivery, DestinationHandler, DestinationKind, DestinationTarget, Resolved,
+};
 pub use events::{Event, Schema};
 pub use filter::{AdvancedFilter, Filter};
 pub use model::{DeliveryMode, InputSchema, RetryPolicy, SubscriptionConfig, TopicKind};
@@ -66,6 +74,9 @@ pub struct Options {
     /// Where webhooks may point (see `webhook_policy.rs`): loopback and private addresses, names with no dot and
     /// names the host check serves, plus what `AZEMU_ALLOW_WEBHOOK_HOST` / `--allow-webhook-host` added.
     pub webhooks: WebhookPolicy,
+    /// Where the Functions host of a function app runs (`app` in lower case, base address): the targets of `AzureFunction`
+    /// destinations (`functions.rs`). The admin API adds to them; a reset puts back these.
+    pub function_hosts: Vec<(String, String)>,
 }
 
 impl Default for Options {
@@ -79,6 +90,7 @@ impl Default for Options {
             delivery_timeout_ms: 10_000,
             push_limits: state::PushLimits::default(),
             webhooks: WebhookPolicy::default(),
+            function_hosts: Vec::new(),
         }
     }
 }
@@ -125,7 +137,13 @@ impl Options {
             "128",
             "Most megabytes of deliveries waiting for a retry in all subscriptions together.",
         );
+        settings::describe(
+            "AZEMU_EVENTGRID_FUNCTION_HOSTS",
+            "none",
+            "Where the Azure Functions host of each function app runs, as `app=http://localhost:7071` pairs separated by commas. An event subscription with an `AzureFunction` destination delivers to `{address}/runtime/webhooks/EventGrid?functionName={name}`; without an entry for the app every delivery fails. The address follows the rule of `AZEMU_ALLOW_WEBHOOK_HOST`.",
+        );
         let mut o = Options::default();
+        o.function_hosts = settings::text("AZEMU_EVENTGRID_FUNCTION_HOSTS").map(|t| functions::parse_hosts(&t)).unwrap_or_default();
         o.autocreate = settings::lenient_flag("AZEMU_EVENTGRID_AUTOCREATE");
         o.config_path = settings::text("AZEMU_EVENTGRID_CONFIG").map(PathBuf::from);
         o.retry_base_ms = settings::number("AZEMU_EVENTGRID_RETRY_BASE_MS", o.retry_base_ms);
@@ -139,6 +157,12 @@ impl Options {
         let mut served = settings::list("AZEMU_ALLOW_HOST");
         served.extend(settings::list("AZEMU_TLS_NAME"));
         o.webhooks = WebhookPolicy::new(&settings::list("AZEMU_ALLOW_WEBHOOK_HOST"), &served);
+        for (app, url) in &o.function_hosts {
+            if let Err(e) = functions::check_base(url, &o.webhooks) {
+                tracing::error!("eventgrid: AZEMU_EVENTGRID_FUNCTION_HOSTS: the address of '{app}' is not used: {e}");
+            }
+        }
+        o.function_hosts.retain(|(_, url)| functions::check_base(url, &o.webhooks).is_ok());
         o
     }
 }
@@ -154,6 +178,12 @@ pub(crate) struct Shared {
     /// Handlers for Storage queue, Service Bus and Event Hubs destinations, registered by the
     /// unified binary (see `destination.rs`). Not cleared by `reset()`.
     pub destinations: parking_lot::RwLock<std::collections::HashMap<DestinationKind, DestinationHandler>>,
+    /// Writes dead letters as blobs (`dead_letter.rs`), registered by the unified binary. Not cleared by `reset()`.
+    pub dead_letter_writer: parking_lot::RwLock<Option<DeadLetterWriter>>,
+    /// Function app (lower case) to the base address of its Functions host (`functions.rs`).
+    pub function_hosts: parking_lot::RwLock<std::collections::BTreeMap<String, String>>,
+    /// Strict authorisation (`auth.rs`, `check_token`); does nothing until the program hands over a real handle.
+    pub auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 impl Shared {
@@ -183,6 +213,7 @@ impl EventGridService {
     pub fn with_options(opts: Options) -> Self {
         let mut st = state::State::new(opts.push_limits);
         config::load_into(&opts, &mut st);
+        let hosts = opts.function_hosts.iter().cloned().collect();
         EventGridService {
             saved: Default::default(),
             shared: Arc::new(Shared {
@@ -191,8 +222,17 @@ impl EventGridService {
                 opts,
                 generation: AtomicU64::new(0),
                 destinations: Default::default(),
+                dead_letter_writer: Default::default(),
+                function_hosts: parking_lot::RwLock::new(hosts),
+                auth: Default::default(),
             }),
         }
+    }
+
+    /// Check roles for bearer tokens in strict mode (`docs/strict-auth.md`): publishing needs `EventGrid Data Sender`.
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("eventgrid");
+        *self.shared.auth.write() = auth;
     }
 
     /// Say how events for destinations of `kind` (Storage queue, Service Bus queue or topic,
@@ -202,6 +242,13 @@ impl EventGridService {
     /// A second call for the same kind replaces the handler. `reset()` keeps handlers.
     pub fn register_destination(&self, kind: DestinationKind, handler: DestinationHandler) {
         self.shared.destinations.write().insert(kind, handler);
+    }
+
+    /// Say how a dead-lettered event is written to a blob container (`deadLetterDestination` of type `StorageBlob`): the writer
+    /// gets the finished blob. It must not raise a blob event for it. Without a writer a subscription with such a destination is
+    /// refused with 501. A second call replaces the writer; `reset()` keeps it.
+    pub fn register_dead_letter_writer(&self, writer: DeadLetterWriter) {
+        *self.shared.dead_letter_writer.write() = Some(writer);
     }
 
     /// Raise an event as if it had been published to the topic `topic` (a custom topic or a
@@ -229,6 +276,15 @@ impl Service for EventGridService {
         vec![Mount::AccountHost("eventgrid"), Mount::PathPrefix("/_azemu/eventgrid")]
     }
 
+    /// Publishing to a topic with a bearer token (the classic endpoint). The namespace endpoints take any credential, as before.
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.shared.state.lock(), req)
+    }
+
     /// The largest body any Event Grid request may have here: the classic publish API (1.5 MB; the namespace API checks its own, smaller, limit).
     fn max_body_bytes(&self, _method: &azemu_core::http::Method, _path: &str) -> Option<usize> {
         Some(publish::MAX_CLASSIC_BODY)
@@ -236,6 +292,25 @@ impl Service for EventGridService {
 
     fn body_too_large(&self, limit: usize) -> Option<Response> {
         Some(errors::payload_too_large(limit))
+    }
+
+    /// `429` with `Retry-After` (seconds) and the Event Grid error body. The throttling status and header are Azure's usual ones
+    /// for a management or data plane that limits a caller; Event Grid's own pages name no body for it (see docs/faults.md).
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(429);
+        let code = a.code_or(if a.throttle { "TooManyRequests" } else { azemu_core::FaultAnswer::default_code(status) });
+        let message = a.message_or(if a.throttle {
+            "Too many requests. Retry the request after the time in the Retry-After header."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let mut resp = errors::error(status, &code, &message, None);
+        if let Some(s) = a.retry_after_secs() {
+            if let Ok(v) = azemu_core::http::HeaderValue::from_str(&s.to_string()) {
+                resp.headers_mut().insert(azemu_core::http::header::RETRY_AFTER, v);
+            }
+        }
+        auth::finish(resp, req)
     }
 
     async fn handle(&self, req: Request) -> Response {
@@ -250,6 +325,7 @@ impl Service for EventGridService {
     fn reset(&self) {
         let mut st = self.shared.state.lock();
         *st = state::State::new(self.shared.opts.push_limits);
+        *self.shared.function_hosts.write() = self.shared.opts.function_hosts.iter().cloned().collect();
         self.shared.generation.fetch_add(1, Ordering::SeqCst);
         config::load_into(&self.shared.opts, &mut st);
         drop(st);

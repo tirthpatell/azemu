@@ -46,6 +46,8 @@ pub struct Pre {
     /// An error found in the request before the state was looked at that Azure answers only after it has checked the
     /// credentials (a broken structured message: a request without credentials is `401`, not `400`).
     pub deferred: Option<ApiError>,
+    /// Strict mode: the checked caller, for the parts of a batch (each part is judged on its own).
+    pub strict: Option<(azemu_core::auth::Auth, azemu_core::auth::Principal)>,
 }
 
 impl Pre {

@@ -349,6 +349,35 @@ fn parse_origin(origin: &str) -> Option<OriginPart> {
     Some(OriginPart { scheme, host: parse_authority(authority)? })
 }
 
+/// Is this address one that no private network owns (not loopback, private, link-local, unique-local, shared (carrier-grade NAT) or
+/// unspecified)? An IPv4 address inside an IPv6 one counts as the IPv4 address.
+fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => {
+            let [o0, o1, ..] = a.octets();
+            !(a.is_loopback()
+                || a.is_private()
+                || a.is_link_local()
+                || a.is_unspecified()
+                || a.is_broadcast()
+                || (o0 == 100 && (64..=127).contains(&o1)))
+        }
+        IpAddr::V6(a) => match a.to_ipv4_mapped() {
+            Some(v4) => is_public(IpAddr::V4(v4)),
+            None => {
+                !(a.is_loopback() || a.is_unspecified() || (a.segments()[0] & 0xfe00) == 0xfc00 || (a.segments()[0] & 0xffc0) == 0xfe80)
+            }
+        },
+    }
+}
+
+impl HostPart {
+    /// The port, or the default of the scheme when none is written.
+    fn effective_port_for(&self, scheme: &str) -> u16 {
+        self.port.unwrap_or(if scheme == "https" { 443 } else { 80 })
+    }
+}
+
 impl OriginPart {
     fn effective_port(&self) -> u16 {
         self.host.port.unwrap_or(if self.scheme == "https" { 443 } else { 80 })
@@ -471,8 +500,18 @@ impl AccessPolicy {
         None
     }
 
-    fn origin_served(&self, origin: &str) -> bool {
-        parse_origin(origin).is_some_and(|o| self.host_served(&o.host))
+    /// Is this `Origin` (or the origin of a `Referer`) a page of the emulator's own: a name it serves, an address on the developer's own
+    /// networks, or the very address the request was sent to? An IP address is not enough by itself: a page on a public address
+    /// (`http://203.0.113.9`) is another web site, and an older browser, which sends no `Sec-Fetch-Site`, shows nothing but the `Origin`. An
+    /// emulator that is reached by its public address sends its own page from that address, which `authority` (the host the request was
+    /// sent to) says, with the same port.
+    fn origin_served(&self, origin: &str, authority: &str) -> bool {
+        let Some(o) = parse_origin(origin) else { return false };
+        let Some(ip) = o.host.ip else { return self.host_served(&o.host) };
+        if !is_public(ip) {
+            return true;
+        }
+        parse_authority(authority).is_some_and(|a| a.ip == Some(ip) && a.effective_port_for(&o.scheme) == o.effective_port())
     }
 
     fn rule_allows(&self, origin: &str) -> bool {
@@ -485,7 +524,7 @@ impl AccessPolicy {
     }
 
     /// Read `Origin`, `Referer` and `Sec-Fetch-Site`.
-    pub fn classify(&self, headers: &HeaderMap) -> Browser {
+    pub fn classify(&self, headers: &HeaderMap, authority: &str) -> Browser {
         let get = |n: header::HeaderName| headers.get(n).and_then(|v| v.to_str().ok()).map(|s| s.trim().to_string());
         let sec = get(header::HeaderName::from_static("sec-fetch-site"));
         let origin_h = get(header::ORIGIN);
@@ -499,14 +538,14 @@ impl AccessPolicy {
         let origin_present = headers.contains_key(header::ORIGIN);
         match (origin_h, referer_h) {
             (Some(o), _) => {
-                if !self.origin_served(&o) {
+                if !self.origin_served(&o, authority) {
                     b.cross_site = true;
                 }
                 b.origin = Some(o);
             }
             (None, _) if origin_present => b.cross_site = true,
             (None, Some(r)) => {
-                if !self.origin_served(&r) {
+                if !self.origin_served(&r, authority) {
                     b.cross_site = true;
                 }
                 b.origin = parse_origin(&r).map(|o| format!("{}://{}", o.scheme, o.host.host));
@@ -529,6 +568,56 @@ pub(crate) fn host_refusal(authority: &str) -> Response {
             "azemu refused this request: it is addressed to the host '{shown}', which this emulator does not serve. It answers to IP addresses, localhost and *.localhost, names with no dot (such as a Docker Compose service name), host.docker.internal, and names equal to or under a suffix given with --tls-name or --allow-host. Start azemu with --allow-host {name} (or set AZEMU_ALLOW_HOST={name}) to serve this name. The check stops DNS rebinding from web pages. If the aim is only to reach azemu from another container or machine without name set-up, start it with --standard-ports (every service gets a port of its own, so a name with no dot works: http://azemu:10000/{{account}}/... for Blob), or use a name such as {{account}}.blob.core.localhost on the gateway port."
         ),
     )
+}
+
+/// The sign-in protocol of the identity service (OAuth 2.0): its requests are forms.
+const IDENTITY_LOGIN: &str = "/_azemu/identity/login";
+
+/// An admin request from a browser that sends a body (or a form) without saying it is JSON is refused with 415.
+///
+/// A web page can send a form post, or a `fetch` with `Content-Type: text/plain`, to `http://localhost:4577` without asking first (no
+/// preflight), and the admin endpoints read their body as JSON whatever its type says. `application/json` is not a type a page may send that
+/// way: it makes the browser ask first, and the answer to that is a refusal. So the type is the last defence for a browser that sends neither
+/// `Sec-Fetch-Site` nor a usable `Origin`. It applies to every admin path (the services' own included), to `POST`, `PUT` and `PATCH`.
+///
+/// Only a browser is held to it. A browser names itself in `User-Agent` (`Mozilla/5.0 ...` in every one of them), and a page cannot change
+/// or remove that header on a request it sends without asking first. A program that is not a browser (`curl -d`, which sends a form type
+/// unless told otherwise, and every script written for the versions before this rule) is no part of the threat and keeps working.
+///
+/// The sign-in protocol of the identity service ([`IDENTITY_LOGIN`]) is not part of it. A request with no body needs no type
+/// (`POST /_azemu/reset`), and what it can do is what the cross-site check already decides.
+pub(crate) fn admin_body_refusal(method: &http::Method, path: &str, headers: &HeaderMap, has_body: bool) -> Option<Response> {
+    if !matches!(*method, http::Method::POST | http::Method::PUT | http::Method::PATCH) {
+        return None;
+    }
+    // The sign-in protocol of the identity service lives under the admin prefix so that a client can be given it as an authority
+    // (`https://localhost:4577/_azemu/identity/login`). Its token and device-code requests are forms, as OAuth 2.0 says, and every
+    // library sends them so.
+    if path == IDENTITY_LOGIN || path.strip_prefix(IDENTITY_LOGIN).is_some_and(|rest| rest.starts_with('/')) {
+        return None;
+    }
+    let declared = headers.get(header::CONTENT_TYPE).map(|v| v.to_str().unwrap_or("").trim().to_string());
+    let is_json = declared.as_deref().is_some_and(|t| {
+        let media = t.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+        media == "application/json" || (media.starts_with("application/") && media.ends_with("+json"))
+    });
+    if is_json || !has_body || !from_a_browser(headers) {
+        return None;
+    }
+    let shown: String = declared.as_deref().unwrap_or("").chars().filter(|c| !c.is_control()).take(80).collect();
+    let got = if shown.is_empty() { "no Content-Type".to_string() } else { format!("Content-Type '{shown}'") };
+    Some(json_error::response(
+        http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        "UnsupportedMediaType",
+        &format!(
+            "The admin API reads JSON, and a request with a body that comes from a browser (the User-Agent says so) must say so with 'Content-Type: application/json' (this one has {got}). A web page can send other types to this port without asking first, which is why they are refused."
+        ),
+    ))
+}
+
+/// Does the request name a browser as its sender? Every browser's `User-Agent` holds `Mozilla/`.
+fn from_a_browser(headers: &HeaderMap) -> bool {
+    headers.get_all(header::USER_AGENT).iter().any(|v| v.to_str().is_ok_and(|s| s.contains("Mozilla/")))
 }
 
 /// What a refused cross-site request was for.
@@ -675,7 +764,7 @@ mod tests {
     #[test]
     fn cross_site_is_sec_fetch_site_or_an_origin_that_fails_the_host_check() {
         let p = policy(&["corp.example"], &["http://localhost:3000", "app.example.org", "*.partner.test"]);
-        let c = |pairs: &[(&str, &str)]| p.classify(&headers(pairs));
+        let c = |pairs: &[(&str, &str)]| p.classify(&headers(pairs), "localhost:4577");
         // not cross-site: no headers (an SDK), same-origin, same-site, none, an origin that passes the host check
         assert!(!c(&[]).cross_site);
         assert!(!c(&[("sec-fetch-site", "same-origin")]).cross_site);
@@ -707,9 +796,44 @@ mod tests {
         assert!(c(&[("origin", "https://a.b.partner.test")]).permitted);
         assert!(c(&[("origin", "https://partner.test")]).permitted);
         assert!(!c(&[("origin", "https://notpartner.test")]).permitted);
+        // an IP address as the origin: a page served from a machine of the developer's own networks may talk to the emulator, a page on a public
+        // address is another site (an older browser sends no `Sec-Fetch-Site`, and the Origin is all there is)
+        for ok in [
+            "http://10.1.2.3",
+            "http://192.168.1.20:3000",
+            "http://172.20.0.5",
+            "http://169.254.1.1",
+            "http://100.64.1.1",
+            "http://[::1]:3000",
+            "http://[fd12:3456::1]",
+            "http://[fe80::1]",
+            "http://127.0.0.1",
+            "http://0.0.0.0",
+            "http://[::ffff:10.0.0.1]",
+        ] {
+            assert!(!c(&[("origin", ok)]).cross_site, "{ok}");
+        }
+        for no in [
+            "http://203.0.113.9",
+            "https://8.8.8.8:8443",
+            "http://[2001:db8::1]",
+            "http://[::ffff:8.8.8.8]",
+            "http://172.32.0.1",
+            "http://100.128.0.1",
+        ] {
+            assert!(c(&[("origin", no)]).cross_site, "{no}");
+            assert!(c(&[("referer", &format!("{no}/page"))]).cross_site, "{no} as a Referer");
+        }
+        // unless it is the address the request was sent to: the emulator on a machine with a public address, and its own page
+        let own = |origin: &str, authority: &str| !p.classify(&headers(&[("origin", origin)]), authority).cross_site;
+        assert!(own("http://203.0.113.9:4577", "203.0.113.9:4577"));
+        assert!(own("https://203.0.113.9", "203.0.113.9:443"));
+        assert!(own("http://[2001:db8::1]:4577", "[2001:db8::1]:4577"));
+        assert!(!own("http://203.0.113.9:80", "203.0.113.9:4577"), "another port is another site");
+        assert!(!own("http://203.0.113.9:4577", "203.0.113.10:4577"));
         // `*` allows everything (the check is off)
         let any = policy(&[], &["*"]);
-        let b = any.classify(&headers(&[("sec-fetch-site", "cross-site")]));
+        let b = any.classify(&headers(&[("sec-fetch-site", "cross-site")]), "localhost:4577");
         assert!(b.cross_site && b.permitted && any.any_origin());
     }
 

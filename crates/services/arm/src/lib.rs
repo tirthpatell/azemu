@@ -8,6 +8,7 @@ use azemu_core::resp::Resp;
 use azemu_core::{async_trait, Mount, Request, Response, Service};
 use parking_lot::Mutex;
 
+mod authz;
 pub mod backends;
 mod basics;
 mod catalog;
@@ -18,11 +19,12 @@ mod eventsubs;
 mod groups;
 mod history;
 mod ids;
+mod inspect;
 mod limits;
 mod metadata;
 mod persist;
 mod provider;
-mod providers;
+pub(crate) mod providers;
 mod resources;
 mod router;
 mod state;
@@ -34,6 +36,7 @@ mod writers;
 
 pub use backends::Backends;
 pub use error::ArmError;
+pub use providers::sas::Service as SasService;
 
 use provider::Provider;
 use state::State;
@@ -47,6 +50,8 @@ pub struct Inner {
     pub(crate) history_bytes: usize,
     providers: Vec<Box<dyn Provider>>,
     pub(crate) backends: Backends,
+    /// Role assignments and definitions, and what the registry knows about the data resources (`authz.rs`).
+    pub(crate) auth: azemu_core::auth::Auth,
 }
 
 impl Inner {
@@ -56,7 +61,7 @@ impl Inner {
 }
 
 pub struct ArmService {
-    inner: Inner,
+    inner: std::sync::Arc<Inner>,
     /// What the last save left on disk (see `persist.rs`).
     saved: persist::SaveMemory,
 }
@@ -65,6 +70,12 @@ impl ArmService {
     /// ARM with no emulated services behind it: resources are stored and nothing else happens.
     pub fn standalone() -> ArmService {
         ArmService::new(Backends::none())
+    }
+
+    /// The authorization rules of the namespaces this service made, for the data plane of Service Bus (`servicebus`) or Event Hubs: the
+    /// keys are the ones `listKeys` gives out (`docs/strict-auth.md`).
+    pub fn sas_source(&self, service: SasService) -> std::sync::Arc<dyn azemu_core::auth::sas::SasSource> {
+        std::sync::Arc::new(providers::sas::ArmSas { inner: self.inner.clone(), service })
     }
 
     /// Reads its settings (`AZEMU_ARM_STRICT`, `AZEMU_ARM_DEPLOYMENT_HISTORY_MB`) through `azemu_core::settings`.
@@ -84,8 +95,16 @@ impl ArmService {
     }
 
     fn build(backends: Backends, strict: bool, history_bytes: usize) -> ArmService {
+        let auth = backends.auth.clone().unwrap_or_default();
         ArmService {
-            inner: Inner { state: Mutex::new(State::default()), strict, history_bytes, providers: providers::all(&backends), backends },
+            inner: std::sync::Arc::new(Inner {
+                state: Mutex::new(State::default()),
+                strict,
+                history_bytes,
+                providers: providers::all(&backends),
+                backends,
+                auth,
+            }),
             saved: Default::default(),
         }
     }
@@ -95,6 +114,10 @@ impl ArmService {
 impl Service for ArmService {
     fn name(&self) -> &'static str {
         "arm"
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.inner, req)
     }
 
     fn mounts(&self) -> Vec<Mount> {
@@ -111,6 +134,28 @@ impl Service for ArmService {
         let e =
             error::ArmError::new(413, "RequestEntityTooLarge", format!("The request content is larger than the limit of {limit} bytes."));
         Some(Resp::new(e.status).json(&e.body()).build())
+    }
+
+    /// `429` with `Retry-After` (seconds) and the ARM error envelope: "When you reach the limit, you receive the HTTP status code
+    /// 429 Too many requests. The response includes a Retry-After value, which specifies the number of seconds your application
+    /// should wait" (learn.microsoft.com/azure/azure-resource-manager/management/request-limits-and-throttling). The code
+    /// `TooManyRequests` and the text are not from a recorded answer.
+    fn fault_response(&self, req: &Request, a: &azemu_core::FaultAnswer) -> Response {
+        let status = a.status_or(429);
+        let code = a.code_or(if a.throttle { "TooManyRequests" } else { azemu_core::FaultAnswer::default_code(status) });
+        let message = a.message_or(if a.throttle {
+            "The request could not be processed due to an excessive volume of traffic. Please try again later."
+        } else {
+            azemu_core::FaultAnswer::DEFAULT_MESSAGE
+        });
+        let e = error::ArmError::new(status, &code, message);
+        let mut resp = Resp::new(e.status).json(&e.body()).build();
+        if let Some(s) = a.retry_after_secs() {
+            if let Ok(v) = azemu_core::http::HeaderValue::from_str(&s.to_string()) {
+                resp.headers_mut().insert(azemu_core::http::header::RETRY_AFTER, v);
+            }
+        }
+        finish(resp, req)
     }
 
     async fn handle(&self, req: Request) -> Response {
@@ -142,6 +187,7 @@ impl Service for ArmService {
 
     fn reset(&self) {
         *self.inner.state.lock() = State::default();
+        authz::on_reset(&self.inner.auth);
         self.saved.0.lock().forget();
         state::next_revision();
     }
@@ -161,7 +207,9 @@ impl Service for ArmService {
             let keys: Vec<String> =
                 st.resources.range(prefix.clone()..).take_while(|(k, _)| k.starts_with(&prefix)).map(|(k, _)| k.clone()).collect();
             for k in keys {
-                st.resources.remove(&k);
+                if let Some(gone) = st.resources.remove(&k) {
+                    authz::on_delete(&self.inner.auth, &gone);
+                }
             }
             st.scope_tags.retain(|k, _| k != &scope && !k.starts_with(&prefix));
             st.tag_names.remove(&sub);

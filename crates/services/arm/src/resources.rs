@@ -29,7 +29,7 @@ pub enum Kind {
 }
 
 /// Canonical spelling of each type segment, and what is known about the full chain.
-fn classify(provider: Option<&dyn Provider>, types: &[String]) -> (Vec<String>, Kind) {
+pub(crate) fn classify(provider: Option<&dyn Provider>, types: &[String]) -> (Vec<String>, Kind) {
     let Some(p) = provider else {
         return (types.to_vec(), Kind::Generic);
     };
@@ -47,6 +47,8 @@ fn classify(provider: Option<&dyn Provider>, types: &[String]) -> (Vec<String>, 
         Kind::Built
     } else if p.passthrough().iter().any(|t| t.to_ascii_lowercase() == full) {
         Kind::Passthrough
+    } else if p.other_types_stored() {
+        Kind::Generic
     } else {
         Kind::UnbuiltInKnownProvider
     };
@@ -88,28 +90,34 @@ pub async fn handle(cx: &Cx<'_>, sub: &str, rg: Option<&str>, ns_raw: &str, tail
     }
     match (path.trailing.as_deref(), types.is_empty()) {
         // /providers/{ns}/{type}/{name}
-        (None, false) => match method {
-            "PUT" | "PATCH" => {
-                let body = util::body_object(&cx.req.body)?;
-                let patch = method == "PATCH";
-                let (stored, existed, statuses) = put_core(cx, sub, rg, &ns, &types, &path.names, kind, provider, body, patch).await?;
-                let status = if existed { statuses.update } else { statuses.create };
-                Ok(util::json_ok(status, &render(cx, provider, &stored)))
+        (None, false) => {
+            if kind == Kind::Built && matches!(method, "GET" | "HEAD" | "PUT" | "PATCH" | "DELETE") {
+                sync_before(cx, sub, rg, provider, &types, &path.names).await?;
             }
-            "GET" => get_resource(cx, sub, rg, &ns, &types, &path.names, kind, provider),
-            "HEAD" => match get_resource(cx, sub, rg, &ns, &types, &path.names, kind, provider) {
-                Ok(_) => Ok(util::empty(204)),
-                Err(e) if e.status == 404 => Ok(util::empty(404)),
-                Err(e) => Err(e),
-            },
-            "DELETE" => delete_resource(cx, sub, rg, &ns, &types, &path.names, provider).await,
-            m => Err(ArmError::new(405, "MethodNotAllowed", format!("The method {m} is not allowed on this resource."))),
-        },
+            match method {
+                "PUT" | "PATCH" => {
+                    let body = util::body_object(&cx.req.body)?;
+                    let patch = method == "PATCH";
+                    let (stored, existed, statuses) = put_core(cx, sub, rg, &ns, &types, &path.names, kind, provider, body, patch).await?;
+                    let status = if existed { statuses.update } else { statuses.create };
+                    Ok(util::json_ok(status, &render(cx, provider, &stored)))
+                }
+                "GET" => get_resource(cx, sub, rg, &ns, &types, &path.names, kind, provider),
+                "HEAD" => match get_resource(cx, sub, rg, &ns, &types, &path.names, kind, provider) {
+                    Ok(_) => Ok(util::empty(204)),
+                    Err(e) if e.status == 404 => Ok(util::empty(404)),
+                    Err(e) => Err(e),
+                },
+                "DELETE" => delete_resource(cx, sub, rg, &ns, &types, &path.names, provider).await,
+                m => Err(ArmError::new(405, "MethodNotAllowed", format!("The method {m} is not allowed on this resource."))),
+            }
+        }
         // /providers/{ns}/.../{type}   or   .../{name}/{action}
         (Some(t), _) => {
-            if method == "GET"
-                && !types.is_empty()
-                && provider.map(|p| p.get_actions().iter().any(|a| a.eq_ignore_ascii_case(t))).unwrap_or(false)
+            let named = |list: &[&str]| list.iter().any(|a| a.eq_ignore_ascii_case(t));
+            if !types.is_empty()
+                && ((method == "GET" && provider.map(|p| named(p.get_actions())).unwrap_or(false))
+                    || (method == "PUT" && provider.map(|p| named(p.put_actions())).unwrap_or(false)))
             {
                 return action(cx, sub, rg, &ns, &types, &path.names, t, kind, provider).await;
             }
@@ -120,6 +128,9 @@ pub async fn handle(cx: &Cx<'_>, sub: &str, rg: Option<&str>, ns_raw: &str, tail
                 if listed_kind == Kind::Generic && !cx.inner.strict {
                     cx.mark_stored_only();
                 }
+                if listed_kind == Kind::Built {
+                    sync_before(cx, sub, rg, provider, &chain, &path.names).await?;
+                }
                 return list_resources(cx, sub, rg, &ns, &chain, &path.names, provider);
             }
             if method == "POST" {
@@ -129,6 +140,21 @@ pub async fn handle(cx: &Cx<'_>, sub: &str, rg: Option<&str>, ns_raw: &str, tail
         }
         (None, true) => Err(ArmError::not_implemented(format!("{method} {}", cx.req.decoded_path()))),
     }
+}
+
+/// Let the provider bring its records in line with the service before a read or a write (`Provider::sync`).
+async fn sync_before(
+    cx: &Cx<'_>,
+    sub: &str,
+    rg: Option<&str>,
+    provider: Option<&dyn Provider>,
+    types: &[String],
+    names: &[String],
+) -> ArmResult<()> {
+    let (Some(p), Some(rg)) = (provider, rg) else { return Ok(()) };
+    // a group that does not exist is answered by the code that follows
+    let Ok(group) = canonical_group_name(cx, sub, rg) else { return Ok(()) };
+    p.sync(cx, sub, &group, &types.join("/"), names).await
 }
 
 fn rg_name(rg: Option<&str>) -> &str {
@@ -285,9 +311,13 @@ async fn put_core(
     {
         let mut st = cx.inner.state.lock();
         st.resources.insert(k, stored.clone());
-        for c in children {
-            st.resources.insert_if_absent(key(&c.id), c);
+        for c in &children {
+            st.resources.insert_if_absent(key(&c.id), c.clone());
         }
+    }
+    crate::authz::on_put(&cx.inner.auth, &stored);
+    for c in &children {
+        crate::authz::on_put(&cx.inner.auth, c);
     }
     if kind == Kind::Generic {
         // stored as JSON and nothing else: a made-up success unless the user is told
@@ -376,6 +406,9 @@ fn get_resource(
                 if !st.resources.contains_key(&pk) {
                     return Err(parent_missing(&types[..n], &names[..n]));
                 }
+            }
+            if let Some(e) = provider.and_then(|p| p.missing(&types.join("/"))) {
+                return Err(e);
             }
             Err(ArmError::resource_not_found(&type_string(ns, types), &names.join("/"), rg_s))
         }

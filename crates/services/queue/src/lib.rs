@@ -15,12 +15,14 @@
 mod auth;
 mod enqueue;
 mod errors;
+mod inspect;
 mod messages;
 mod persist;
 mod props;
 mod queues;
 mod routing;
 mod state;
+mod strict;
 mod xml;
 
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,11 +48,19 @@ pub struct QueueService {
     accounts: storage::StorageAccounts,
     /// Raised on every change to the state that a save would write (see `persist_generation`).
     generation: AtomicU64,
+    /// Strict authorisation (`strict.rs`); does nothing until the program hands over a real handle.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 impl QueueService {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check roles for bearer tokens in strict mode (`docs/strict-auth.md`).
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("queue");
+        *self.auth.write() = auth;
     }
 
     fn dispatch(&self, req: &Request) -> Response {
@@ -60,6 +70,11 @@ impl QueueService {
         };
         if let Some(v) = storage::credentials::refused_version(req) {
             return errors::invalid_version(&req.ctx, v);
+        }
+        // strict mode: the bearer token and the role come first (`strict.rs`)
+        let auth = self.auth.read().clone();
+        if let Some(refused) = strict::gate(&auth, req, &routed) {
+            return refused;
         }
         // The lock is taken and released inside this function, never across an .await.
         let mut state = self.state.lock();
@@ -156,6 +171,14 @@ impl Service for QueueService {
         storage::DEV_ACCOUNT
     }
 
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    fn fault_response(&self, req: &Request, answer: &azemu_core::FaultAnswer) -> Response {
+        storage::fault_response(req, SERVER, answer)
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let mut resp = if req.method == Method::OPTIONS {
             // Preflight: no credentials, judged against the service's CORS rules.
@@ -182,6 +205,10 @@ impl Service for QueueService {
         self.state.lock().accounts.retain(|k, _| !k.eq_ignore_ascii_case(account));
         self.generation.fetch_add(1, Ordering::SeqCst);
         true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::inspect(&self.state.lock(), req)
     }
 
     fn persist_generation(&self) -> Option<u64> {

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [],
+  "outputs": {
+    "minutes": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'PT90M')]"
+    },
+    "combined": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'P1Y2M3DT4H5M6S')]"
+    },
+    "zero": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'P0D')]"
+    },
+    "negativeTime": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', '-PT1H')]"
+    },
+    "fractionSeconds": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'PT1.5S', 'o')]"
+    },
+    "manyDays": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'P400D')]"
+    },
+    "tenYears": {
+      "type": "string",
+      "value": "[dateTimeAdd('2020-04-07T14:53:14Z', 'P10Y')]"
+    }
+  }
+}

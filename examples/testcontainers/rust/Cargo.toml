@@ -1,0 +1,30 @@
+# Tests that start azemu in a container with Testcontainers: Blob, Key Vault and Service Bus.
+# The versions are the ones this example was run with (azemu 0.3.0). Keep the Azure crates on one azure_core
+# (docs/rust.md, "Pick the crates").
+[package]
+name = "azemu-testcontainers-rust"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of azemu's own workspace: this project has its own Cargo.lock and target directory.
+[workspace]
+
+[dependencies]
+
+[dev-dependencies]
+testcontainers = { version = "=0.28.0", features = ["http_wait_plain"] }
+azure_core = "=1.1.0"
+azure_identity = "=1.0.0"
+azure_storage_blob = "=1.1.0"
+azure_security_keyvault_secrets = "=1.0.1"
+azservicebus = { version = "=0.25.1", features = ["unsecured"] }
+reqwest = "0.13"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+futures = "0.3"
+# Removes the container of tests/shared.rs when the test program exits.
+dtor = "=1.0.7"
+# Only for the account SAS that lets the Blob client work over plain http (tests/common/mod.rs).
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"

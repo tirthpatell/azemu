@@ -1,0 +1,276 @@
+{
+ "dogNameIndex": [
+  {
+   "age": 3,
+   "interests": [
+    "Other dogs"
+   ],
+   "name": "Casper"
+  }
+ ],
+ "dogNames": [
+  "Evie",
+  "Casper",
+  "Indy",
+  "Kira"
+ ],
+ "dogsByAge": [
+  {
+   "age": 2,
+   "interests": [
+    "Butter"
+   ],
+   "name": "Indy"
+  },
+  {
+   "age": 3,
+   "interests": [
+    "Other dogs"
+   ],
+   "name": "Casper"
+  },
+  {
+   "age": 5,
+   "interests": [
+    "Ball",
+    "Frisbee"
+   ],
+   "name": "Evie"
+  },
+  {
+   "age": 8,
+   "interests": [
+    "Rubs"
+   ],
+   "name": "Kira"
+  }
+ ],
+ "dogsObject": {
+  "Casper": {
+   "age": 3,
+   "interests": [
+    "Other dogs"
+   ],
+   "name": "Casper"
+  },
+  "Evie": {
+   "age": 5,
+   "interests": [
+    "Ball",
+    "Frisbee"
+   ],
+   "name": "Evie"
+  },
+  "Indy": {
+   "age": 2,
+   "interests": [
+    "Butter"
+   ],
+   "name": "Indy"
+  },
+  "Kira": {
+   "age": 8,
+   "interests": [
+    "Rubs"
+   ],
+   "name": "Kira"
+  }
+ },
+ "dogsObjectProps": {
+  "Casper": [
+   "Other dogs"
+  ],
+  "Evie": [
+   "Ball",
+   "Frisbee"
+  ],
+  "Indy": [
+   "Butter"
+  ],
+  "Kira": [
+   "Rubs"
+  ]
+ },
+ "dogsObjectValue": {
+  "Casper": {
+   "age": 3,
+   "interests": [
+    "Other dogs"
+   ],
+   "name": "Casper"
+  },
+  "Evie": {
+   "age": 5,
+   "interests": [
+    "Ball",
+    "Frisbee"
+   ],
+   "name": "Evie"
+  },
+  "Indy": {
+   "age": 2,
+   "interests": [
+    "Butter"
+   ],
+   "name": "Indy"
+  },
+  "Kira": {
+   "age": 8,
+   "interests": [
+    "Rubs"
+   ],
+   "name": "Kira"
+  }
+ },
+ "emptyMap": [],
+ "filterNone": [],
+ "filteredLoop": [
+  6,
+  7,
+  8,
+  9
+ ],
+ "groupByLength": {
+  "1": [
+   "a",
+   "c"
+  ],
+  "2": [
+   "bb",
+   "dd"
+  ],
+  "3": [
+   "eee"
+  ]
+ },
+ "groupedByLetter": {
+  "b": [
+   "bar",
+   "baz"
+  ],
+  "f": [
+   "foo"
+  ]
+ },
+ "isEven": [
+  0,
+  2,
+  4,
+  6,
+  8
+ ],
+ "mapArray": [
+  {
+   "dog": "Evie",
+   "greeting": "Ahoy, Evie!",
+   "i": 0
+  },
+  {
+   "dog": "Casper",
+   "greeting": "Ahoy, Casper!",
+   "i": 1
+  },
+  {
+   "dog": "Indy",
+   "greeting": "Ahoy, Indy!",
+   "i": 2
+  },
+  {
+   "dog": "Kira",
+   "greeting": "Ahoy, Kira!",
+   "i": 3
+  }
+ ],
+ "mapArrayIndex": [
+  {
+   "index": 0,
+   "val": "Evie"
+  },
+  {
+   "index": 1,
+   "val": "Casper"
+  },
+  {
+   "index": 2,
+   "val": "Indy"
+  },
+  {
+   "index": 3,
+   "val": "Kira"
+  }
+ ],
+ "mapObject": {
+  "bar": "BAR",
+  "foo": "FOO"
+ },
+ "mapObjectsToNames": [
+  "bar",
+  "foo"
+ ],
+ "mapValuesNumbers": {
+  "a": 10,
+  "b": 20
+ },
+ "nestedLambda": [
+  [
+   11,
+   21
+  ],
+  [
+   12,
+   22
+  ]
+ ],
+ "oddAge": 7,
+ "oldDogs": [
+  {
+   "age": 5,
+   "interests": [
+    "Ball",
+    "Frisbee"
+   ],
+   "name": "Evie"
+  },
+  {
+   "age": 8,
+   "interests": [
+    "Rubs"
+   ],
+   "name": "Kira"
+  }
+ ],
+ "reduceObjectUnion": {
+  "bar": 456,
+  "baz": 789,
+  "foo": 123
+ },
+ "reduceStrings": "abc",
+ "sayHi": [
+  "Hello Evie!",
+  "Hello Casper!",
+  "Hello Indy!",
+  "Hello Kira!"
+ ],
+ "sortedDescending": [
+  3,
+  2,
+  1
+ ],
+ "sortedNumbers": [
+  1,
+  1,
+  2,
+  3
+ ],
+ "sortedStrings": [
+  "A",
+  "b",
+  "c"
+ ],
+ "toObjectDuplicateFree": {
+  "x": "X",
+  "y": "Y"
+ },
+ "totalAge": 18,
+ "totalAgeAdd1": 19
+}

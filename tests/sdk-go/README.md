@@ -10,6 +10,7 @@ and `go-amqp`, the AMQP 1.0 library under Service Bus and Event Hubs. What the G
 cd tests/sdk-go
 go test -count=1 -p 2 ./...              # everything, about 75 seconds once built (-count=1: go test does not see a new emulator binary)
 go test -p 2 ./servicebus                # one service
+go test -count=1 ./faults                # fault rules (docs/faults.md) with the Blob and Cosmos DB clients: retries, Retry-After, dropped connections, delays
 AZEMU_RUN_FINDINGS=1 go test -count=1 ./servicebus   # also run the tests that show a known emulator difference (they fail)
 AZEMU_DUMP=1 go test ./cosmos -run X     # print every HTTP request and response of the SDK clients that use emu.Dump
 AZEMU_KEEP_LOG=/tmp/azemu.log go test .. # copy the emulator's debug log here when the package ends
@@ -41,6 +42,7 @@ The emulator does not create queues, topics, event hubs, consumer groups or Even
 | `storage/azblob` | 1.8.3 |
 | `storage/azdatalake` | 1.7.1 |
 | `storage/azqueue` | 1.0.1 |
+| `storage/azfile` | 1.7.2 |
 | `data/aztables` | 1.4.1 |
 | `security/keyvault/azsecrets`, `azkeys`, `azcertificates` | 1.5.1, 1.5.0, 1.5.0 |
 | `data/azappconfig` | 1.2.0 |
@@ -59,6 +61,7 @@ The emulator does not create queues, topics, event hubs, consumer groups or Even
 | `identity` | `ManagedIdentityCredential` and `DefaultAzureCredential` through `IDENTITY_ENDPOINT`/`IDENTITY_HEADER` (user assigned client id, caching), then used for a Blob and a Key Vault call over HTTPS; `ClientSecretCredential`, `ClientCertificateCredential`, `WorkloadIdentityCredential`, `EnvironmentCredential` against `https://login.localhost:{port}` with `DisableInstanceDiscovery`; token signature checked with the emulator's key set; instance discovery left on; device code and on-behalf-of (findings) |
 | `blob` | containers (create, metadata, ACL, list with paging, public access), block blobs (`UploadBuffer`, `UploadStream` of unknown length, parallel staged blocks, `DownloadBuffer` with parallel ranges, `UploadFile`/`DownloadFile`, ranges, MD5, CRC64 and structured message validation), properties, metadata, tags and tag queries, tiers, soft delete and undelete, names that need encoding, flat and hierarchy pagers, leases (blob and container), snapshots, versions, copy, service/container/account/user delegation SAS and stored access policies, batch delete and set tier, conditional requests, append blobs, page blobs, wrong blob type, Shared Key with the right and a wrong key, HTTPS with the CA |
 | `datalake` | file systems, directories, files, `AppendData` + `FlushData`, parallel `UploadBuffer`/`UploadStream`, ranges, rename of files and trees, ACLs (set, get, update, recursive), recursive delete, metadata and headers, shared data with the Blob endpoint, names, file system SAS |
+| `file` | shares (create, properties, listing with prefix and paging, delete), directories and files with an upload of 11 MB in ranges of 4 MiB and a download, ranges and clear, file leases and rename, share snapshots, a file SAS and what a read-only SAS may not do |
 | `queue` | create (idempotent and conflict), enqueue, dequeue with visibility timeout, peek, update, delete with stale pop receipt, TTL, delayed messages, properties, clear, FIFO order, XML characters, size limit, listing with paging, SAS (https only and manual), wrong key |
 | `tables` | create, delete, list; every EDM type (int64, GUID, binary, DateTime...); add, get, update (merge/replace), upsert, delete with ETags; queries with filters, select and paging; transactions (commit and rollback); SAS; forbidden key characters; wrong key |
 | `keyvault` | secrets (versions, properties, delete/recover/purge, paging over 25, backup/restore, disabled), keys (RSA and EC create; sign and verify checked with `crypto/rsa` and `crypto/ecdsa`; encrypt/decrypt, wrap/unwrap, rotate, rotation policy, import, key operations, random bytes, backup/restore), certificates (self-signed create with the operation polled by hand, PEM import, policy, versions, delete/recover, issuers, contacts, backup/restore) |

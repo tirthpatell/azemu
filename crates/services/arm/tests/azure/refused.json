@@ -1,0 +1,44 @@
+[
+  {
+    "name": "standard_U_upper",
+    "template": "functions-template-02-date-formats",
+    "expression": "[dateTimeAdd('2019-03-05T17:53:18Z', 'PT0S', 'U')]",
+    "type": "string",
+    "azure_error": "The template output 'standard_U_upper' is not valid: The template function 'dateTimeAdd' has an invalid parameter. The third parameter 'U' is not a valid DateTime format string. Please see https://aka.ms/arn-template#functions .."
+  },
+  {
+    "name": "week",
+    "template": "functions-template-04-durations",
+    "expression": "[dateTimeAdd('2020-04-07T14:53:14Z', 'P1W')]",
+    "type": "string",
+    "azure_error": "The template output 'week' is not valid: The template function 'dateTimeAdd' has an invalid parameter. The second parameter 'P1W' is not a valid ISO8601 Duration string. Please see https://aka.ms/arm-syntax-functions .."
+  },
+  {
+    "name": "floatFromInt",
+    "template": "functions-template-07-strings",
+    "expression": "[string(float(2))]",
+    "type": "string",
+    "azure_error": "The template output 'floatFromInt' is not valid: The template language function 'string' expects its first parameter to be one of the following types 'Integer, String, Boolean, Object, Array'. The provided value is of type 'Float'. Please see https://aka.ms/arm-functions for usage details.."
+  },
+  {
+    "name": "floatFromString",
+    "template": "functions-template-07-strings",
+    "expression": "[string(float('1.25'))]",
+    "type": "string",
+    "azure_error": "The template output 'floatFromString' is not valid: The template language function 'string' expects its first parameter to be one of the following types 'Integer, String, Boolean, Object, Array'. The provided value is of type 'Float'. Please see https://aka.ms/arm-functions for usage details.."
+  },
+  {
+    "name": "formatNumber",
+    "template": "functions-template-07-strings",
+    "expression": "[format('{0:N2}', 3.14159)]",
+    "type": "string",
+    "azure_error": "Deployment template validation failed: 'The template output 'formatNumber' at line '1' and column '3187' is not valid: The language expression 'format('{0:N2}', 3.14159)' at position '17' is not valid: float point numbers are not supported.. Please see https://aka.ms/arm-functions for usage details.'."
+  },
+  {
+    "name": "stringOfFloat",
+    "template": "functions-template-07-strings",
+    "expression": "[string(float('3.5'))]",
+    "type": "string",
+    "azure_error": "The template output 'stringOfFloat' is not valid: The template language function 'string' expects its first parameter to be one of the following types 'Integer, String, Boolean, Object, Array'. The provided value is of type 'Float'. Please see https://aka.ms/arm-functions for usage details.."
+  }
+]

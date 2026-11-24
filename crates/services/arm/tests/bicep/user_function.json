@@ -1,0 +1,78 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "languageVersion": "2.0",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.49.2.45890",
+      "templateHash": "14189452212428918496"
+    }
+  },
+  "functions": [
+    {
+      "namespace": "__bicep",
+      "members": {
+        "queueName": {
+          "parameters": [
+            {
+              "type": "string",
+              "name": "prefix"
+            },
+            {
+              "type": "int",
+              "name": "i"
+            }
+          ],
+          "output": {
+            "type": "string",
+            "value": "[toLower(format('{0}-q{1}', parameters('prefix'), padLeft(string(parameters('i')), 3, '0')))]"
+          }
+        }
+      }
+    }
+  ],
+  "parameters": {
+    "prefix": {
+      "type": "string",
+      "defaultValue": "Orders"
+    },
+    "namespaceName": {
+      "type": "string",
+      "defaultValue": "[format('sbfn{0}', uniqueString(resourceGroup().id))]"
+    }
+  },
+  "resources": {
+    "ns": {
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[parameters('namespaceName')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "Standard",
+        "tier": "Standard"
+      }
+    },
+    "q": {
+      "copy": {
+        "name": "q",
+        "count": "[length(range(1, 2))]"
+      },
+      "type": "Microsoft.ServiceBus/namespaces/queues",
+      "apiVersion": "2022-10-01-preview",
+      "name": "[format('{0}/{1}', parameters('namespaceName'), __bicep.queueName(parameters('prefix'), range(1, 2)[copyIndex()]))]",
+      "dependsOn": [
+        "ns"
+      ]
+    }
+  },
+  "outputs": {
+    "names": {
+      "type": "array",
+      "copy": {
+        "count": "[length(range(1, 2))]",
+        "input": "[__bicep.queueName(parameters('prefix'), range(1, 2)[copyIndex()])]"
+      }
+    }
+  }
+}

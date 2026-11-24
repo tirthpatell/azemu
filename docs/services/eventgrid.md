@@ -2,7 +2,7 @@
 
 **What it emulates.** Event Grid publishing and delivery, which Microsoft has no emulator for: classic publish to custom topics and domains
 (`POST /api/events`), namespace topics with pull delivery (`:publish`, `:receive`, `:acknowledge`, `:release`, `:reject`, `:renewLock`), push delivery to
-webhooks (the validation handshake, retries, dead-lettering) and to a Storage queue, a Service Bus queue or topic, or an event hub, filters, and the
+webhooks (the validation handshake, retries, dead-lettering) and to a Storage queue, a Service Bus queue or topic, an event hub, or an Azure Function (a Functions host you point the emulator at), with custom delivery properties, dead letters written as blobs, filters, and the
 events of other emulated services (Blob Storage, Data Lake, Key Vault, App Configuration: `docs/services/storage-events.md`).
 
 **How to reach it.** `http(s)://{topic}.eventgrid.localhost:4577/api/events` (the topic is the first label of the host; a namespace host is the namespace).
@@ -12,10 +12,10 @@ the signed token with its keys, as Azure does ("Authentication" below); a bearer
 (`/_azemu/eventgrid`), a JSON file (`AZEMU_EVENTGRID_CONFIG`) or ARM; with `--lenient` a topic named by a publish is made on first use.
 
 **Not built.** Regions and `provisioningState` of topics made outside ARM (and their keys, unless you give them), the 64 KB event rule, range checks on lock
-durations, a blob dead-letter destination, `api-version` validation of the namespace API. Retry waits are much shorter than Azure's schedule. Webhooks are limited to local targets
+durations, batching of webhook deliveries (`maxEventsPerBatch`), `api-version` validation of the namespace API. Retry waits are much shorter than Azure's schedule. Webhooks are limited to local targets
 unless `--allow-webhook-host` says otherwise.
 
-Crate `azemu-eventgrid` (lib + binary `azemu-eventgrid`). Mounts: `Mount::AccountHost("eventgrid")` and `Mount::PathPrefix("/_azemu/eventgrid")` (the admin API).
+Crate `azemu-eventgrid` (lib + binary `azemu-eventgrid`). Mounts: `Mount::AccountHost("eventgrid")` and `Mount::PathPrefix("/_azemu/eventgrid")` (the admin API; a body is JSON, and from a browser any `Content-Type` but `application/json` is a `415`).
 
 Microsoft has no Event Grid emulator. This one covers four things:
 
@@ -24,7 +24,7 @@ Microsoft has no Event Grid emulator. This one covers four things:
    `:reject`, `:renewLock`).
 3. **Push delivery** to webhooks (the emulator POSTs events to a URL you run), with the
    validation handshake, retries and dead-lettering, and to a Storage queue, a Service Bus queue or topic,
-   or an event hub (unified `azemu` binary only).
+   an event hub or an Azure Function (unified `azemu` binary only).
 4. **Events of other emulated services** (Blob Storage, Data Lake, Key Vault, App Configuration): subscriptions
    on an event *source* such as a storage account. See `docs/services/storage-events.md`.
 
@@ -75,9 +75,12 @@ that the Python Basic client (`EventGridPublisherClient` without `namespace_topi
 | Event Grid system events from other emulated services | built: subscriptions on a source (a storage account, a key vault, an App Configuration store), `EventGridService::raise_source_event`; see "Event sources" below. `publish_system_event` (events on a custom topic) remains |
 | Anything else (other paths, other methods) | `501` with `{"error":{"code":"NotImplemented","message":"eventgrid: <METHOD> <path>"}}` |
 | Delivery to a Storage queue, a Service Bus queue or topic, an event hub | built in the unified `azemu` binary (handlers registered by `crates/azemu`); the standalone `azemu-eventgrid` answers 501 |
-| Delivery to Azure Functions, Relay hybrid connections, partner destinations; delivery properties (custom headers, `SessionId`, `PartitionKey`); managed identity delivery | not built |
-| Dead-letter to a storage account, managed identity, delivery with resource identity | not built (dead letters are kept in memory and readable through the admin API) |
-| Event batching on push delivery (`maxEventsPerBatch`), input mappings, MQTT broker | not built |
+| Delivery to an Azure Function (`endpointType: AzureFunction`) | built: the emulator is told where the Functions host runs ("Azure Function destinations") |
+| Delivery properties (`deliveryAttributeMappings`: static, secret, dynamic; `MessageId`, `SessionId`, `PartitionKey` and the others) | built ("Delivery properties"); checked against Azure in November 2026 |
+| Dead-letter to a blob container (`deadLetterDestination`, `StorageBlob`) | built ("Dead letters as blobs"); checked against Azure in November 2026. The emulator's own list (`GET …/deadletters`) stays as well |
+| `deliveryWithResourceIdentity`, `deadLetterWithResourceIdentity` | accepted, stored, shown and delivered like the plain form; no credentials are checked ("Managed identity") |
+| Relay hybrid connections, partner destinations | not built |
+| Event batching on push delivery (`maxEventsPerBatch`, `preferredBatchSizeInKilobytes`: the values are kept, every request carries one event), input mappings, MQTT broker | not built |
 
 ### Authentication
 
@@ -236,6 +239,7 @@ Under `/_azemu/eventgrid` on the gateway (any host) or a pinned listener. JSON i
 | `GET …/subscriptions/{sub}/events` | events still in a pull queue: `event`, `deliveryCount`, `state` (`available`, `locked`, `delayed`) |
 | `POST …/subscriptions/{sub}/validate` | run the webhook handshake again |
 | `GET /validate/{code}` | manual validation (the `validationUrl` given to webhooks) |
+| `GET /functions`, `PUT` / `GET` / `DELETE /functions/{app}` | the Functions hosts of `AzureFunction` destinations (body `{"baseUrl":"http://localhost:7071"}`) |
 | `GET /sources` | event sources that have subscriptions: `key`, `resourceId`, `subscriptions`, `published` |
 | `PUT /sources/{kind}/{name}/subscriptions/{sub}` | create (201) or replace (200) a subscription on an event source. `{kind}`: `storage` (a storage account), `keyvault`, `appconfig` |
 | `GET` / `DELETE /sources/{kind}/{name}/subscriptions/{sub}`, `GET …/subscriptions`, `GET …/{sub}/deliveries`, `GET …/{sub}/deadletters`, `POST …/{sub}/validate` | as for topic subscriptions |
@@ -251,6 +255,9 @@ Names are case-insensitive. A subscription body:
   "lockDurationSeconds": 60, "maxDeliveryCount": 10, "eventTimeToLiveSeconds": 86400,   // pull
   "retryPolicy": { "maxDeliveryAttempts": 30, "eventTimeToLiveInMinutes": 1440, "retryIntervalsMs": [500, 1000] },   // push
   "destination": { "endpointType": "StorageQueue", "storageAccount": "acct", "queueName": "q" },   // instead of webhookUrl, see below
+  "deliveryAttributeMappings": [ { "name": "x-static", "type": "Static", "value": "abc", "isSecret": false },
+                                 { "name": "x-dyn", "type": "Dynamic", "sourceField": "data.key1" } ],   // or inside the destination, ARM style
+  "deadLetterDestination": { "endpointType": "StorageBlob", "storageAccount": "acct", "blobContainerName": "dead" },
   "skipValidation": false }
 ```
 
@@ -267,6 +274,7 @@ A subscription can name a `destination` instead of a `webhookUrl`, ARM style or 
 | `ServiceBusQueue` | `resourceId` (`…/namespaces/{ns}/queues/{q}`) | `namespace`, `queueName` |
 | `ServiceBusTopic` | `resourceId` (`…/namespaces/{ns}/topics/{t}`) | `namespace`, `topicName` |
 | `EventHub` | `resourceId` (`…/namespaces/{ns}/eventhubs/{hub}`) | `namespace`, `eventHubName` |
+| `AzureFunction` | `resourceId` (`…/sites/{app}/functions/{name}`) | `functionApp`, `functionName` |
 | `WebHook` | `endpointUrl` | `endpointUrl` (same as `webhookUrl`) |
 
 The account or namespace name is what the other emulated service sees: the storage account of the queue endpoint
@@ -281,18 +289,80 @@ What is delivered (one event per message, not an array; schema by `deliverySchem
   CycleCloud guide reads these messages with the SDK's `TextBase64DecodePolicy`. Message time to live: default 7 days,
   `queueMessageTimeToLiveInSeconds` sets it, `-1` never expires (Learn, "Set custom headers on delivered events":
   "If no time is provided, the message's default time to live is 7 days. You can also set the event to never expire.").
-* **Service Bus queue or topic**: the event JSON as the body (one `data` section), `content-type` `application/json`
-  (`application/cloudevents+json; charset=utf-8` for CloudEvents), `MessageId` = the event id (Learn: "The default value of
-  `MessageId` is the internal ID of the Event Grid event"), application properties `aeg-subscription-name`,
+* **Service Bus queue or topic**: the event JSON as the body (one `data` section), `content-type` `application/json; charset=utf-8`
+  (`application/cloudevents+json; charset=utf-8` for CloudEvents; the first is what a real queue showed, November 2026), `MessageId` = the event id (Learn: "The default value of
+  `MessageId` is the internal ID of the Event Grid event"; on Azure it is a guid that is not the event's id, which the emulator cannot know), application properties `aeg-subscription-name`,
   `aeg-delivery-count` (0 on the first attempt), `aeg-event-type` (`Notification`), `aeg-metadata-version`,
   `aeg-data-version`, `aeg-output-event-id` (Learn, "Service Bus as an event handler / Message headers").
   A topic delivery goes through the topic's rules like any message sent to it.
 * **Event Hubs**: the same body, content type and `aeg-*` properties as application properties; the service picks the
   partition (round robin). Learn lists the same `aeg-*` headers for event hubs.
 
-Not built: custom delivery properties (`MessageId` from event data, `SessionId`, `PartitionKey`, static headers): a
-session-enabled queue therefore refuses the message and the delivery is dead-lettered. Learn does not say whether the body is
-the bare event or an array; the emulator sends the bare event.
+Learn does not say whether the body is the bare event or an array; the emulator sends the bare event (a real Service Bus queue got the bare event too).
+
+### Delivery properties
+
+`deliveryAttributeMappings` on a destination (any kind), written ARM style (`properties: {value, isSecret}` or `properties: {sourceField}`) or flat
+(`value`, `isSecret`, `sourceField`), inside the destination or at the top of the subscription. A mapping is `Static` (a fixed value; `isSecret` hides it when the
+subscription is read, and ARM's `getDeliveryAttributes` gives it) or `Dynamic` (`sourceField`: a path into the event, `data.key1`, `data.list[0]`, `subject`; a leading `$.` is allowed).
+What they become: HTTP headers on a webhook or an Azure Function; on a Service Bus queue or topic the message properties `MessageId`, `PartitionKey`, `SessionId`,
+`CorrelationId`, `Label` (the AMQP `subject`), `ReplyTo`, `ReplyToSessionId`, `To` (names matched without regard to case; `ViaPartitionKey` is accepted and not used) and, for any other name, an application
+property; on an event hub `PartitionKey` (the partition is chosen from it, as for a sender that gives a key) and, for other names, application properties. A Storage queue message has no properties: only
+`queueMessageTimeToLiveInSeconds` (below) applies, mappings on it are kept and not used. A session-enabled Service Bus queue gets its events when `SessionId` is mapped.
+
+Tried against a real custom topic with Service Bus queues in November 2026 (and what the emulator does):
+
+* A dynamic value that is missing, `null`, an object or an array leaves the property out; the event is still delivered (a missing `MessageId` gives the message an id of Service Bus's own).
+* A string is used as it is (an empty string too: an empty `x-dyn` or `PartitionKey` is delivered as empty). A number is its decimal text (`42`, `3.5`, `-5`, `1.0` stays `1.0`,
+  `1E+21` is written out in full); a boolean is `True` or `False`.
+* A dynamic value longer than 4096 bytes leaves the property out (the delivery still happens). Learn: "up to 10 headers", "each header value shouldn't be greater than 4,096 (4K) bytes".
+* Service Bus refused an event whose `MessageId` was empty or 200 characters long, whose `PartitionKey` was 200 characters long, and whose `SessionId` was missing, empty or an object (for a session
+  queue): such an event was not delivered. The emulator refuses the same values with a reason in the delivery log (`InvalidDeliveryProperty` for an over-long or empty value;
+  a session queue refuses a message with no session by its own rule), and the delivery is retried and dead-lettered like any other failure.
+* The mapped `MessageId` and `SessionId` can both be given; Learn says only one may be ("You can only set either `SessionId` or `MessageId`"): not enforced here, not tried.
+
+Limits: at most 10 mappings and a static value of at most 4096 bytes are refused with a `400` when the subscription is made, and so is a name that starts with `aeg-` (Learn: "Don't use
+the `aeg-` prefix"). **These checks and their texts are guesses**: no Azure answer for them was seen (the provider of the real topic could not be changed). A static value is not checked for being a
+valid header value, a header name or value that cannot be an HTTP header is left out of a webhook request (Learn: "Non-conformant values in well-known headers cause the header to be dropped").
+
+### Azure Function destinations
+
+`endpointType: AzureFunction`, `resourceId` ending `…/sites/{app}/functions/{name}`. On Azure, Event Grid calls the Event Grid trigger of the function app by itself. The emulator cannot know where a Functions host
+runs, so you tell it:
+
+```bash
+AZEMU_EVENTGRID_FUNCTION_HOSTS=myapp=http://localhost:7071,other=http://funcs:7072     # the setting
+curl -X PUT localhost:4577/_azemu/eventgrid/functions/myapp -H 'Content-Type: application/json' -d '{"baseUrl":"http://localhost:7071"}'   # or the admin API (also GET, DELETE, GET /functions)
+```
+
+A delivery then goes to `{baseUrl}/runtime/webhooks/EventGrid?functionName={name}` with the headers of a webhook (`aeg-event-type: Notification`, `aeg-subscription-name`, `aeg-delivery-count`, …, the delivery
+properties as headers) and the same body (an array of one event for the Event Grid schema, the event itself for CloudEvents). That is what the Functions Event Grid extension answers (read from its source: it
+needs `aeg-event-type`, takes an array or one object). No key is put in the address: a host started with `func start` does not ask for the extension's system key. The address follows the rule of webhooks
+(`AZEMU_ALLOW_WEBHOOK_HOST`; the admin API refuses another address with `400`). No validation handshake is run for a function (Azure runs none either). Without a mapping for the app the subscription is
+accepted and **every delivery fails** with a reason that names the app and the setting (`NotFound: no Functions host is set for the function app 'myapp'. Set AZEMU_EVENTGRID_FUNCTION_HOSTS=…`), is retried and dead-lettered.
+`tests/functions` feeds the Event Grid trigger of a real Functions host this way (group `eg`).
+
+### Dead letters as blobs
+
+`deadLetterDestination: {endpointType: StorageBlob, properties: {resourceId: …/storageAccounts/{acct}, blobContainerName: dead}}` (flat: `storageAccount`, `blobContainerName`). When an event of a push subscription is
+dead-lettered (`MaxDeliveryAttemptsExceeded`, `TimeToLiveExpired`, `NonRetryableStatusCode`, `PendingQueueFull`), it is also written as a blob into the container. What Azure wrote was seen in November 2026
+(a Storage queue that did not exist, one attempt):
+
+* the blob name is `{topic name}/{SUBSCRIPTION NAME}/{yyyy}/{MM}/{dd}/{HH}/{guid}.json` (UTC; the subscription name in capitals), content type `application/json`;
+* the body is a JSON array of events. Each event is the delivered event with these fields added after `subject`, before `data`: `deadLetterReason`, `deliveryAttempts`, `lastDeliveryOutcome`
+  (`NotFound` for the missing queue), `publishTime`, `lastDeliveryAttemptTime`; the keys are in the order `id`, `eventTime`, `eventType`, `dataVersion`, `metadataVersion`, `topic`, `subject`, …, `data`;
+* Azure wrote the blob about five minutes after the event was published, and the three events dead-lettered together were in **one** blob. **Here a blob is written at once, one event to a blob** (an array of one).
+  The events of one subscription are not collected.
+* `lastDeliveryOutcome`: `NotFound` was seen. The other values here (`BadRequest`, `Unauthorized`, `Forbidden`, `Timeout`, `PayloadTooLarge`, `Busy`, `Error`) are guesses from the HTTP status.
+* The container must exist (a write to a container that does not is logged and dropped, the event stays in `GET …/deadletters`). The write raises **no blob event**: a subscription on the same storage account
+  whose delivery failed would otherwise see its own dead letters and make more of them without end. (Azure raises one; its loop is the user's to avoid.)
+* Without the unified binary (`azemu-eventgrid` alone) a subscription with such a destination is refused with `501`.
+
+### Managed identity
+
+`deliveryWithResourceIdentity: {identity: {type: SystemAssigned | UserAssigned, userAssignedIdentity}, destination: {…}}` and `deadLetterWithResourceIdentity: {identity, deadLetterDestination}` are accepted
+(an unknown `type`, or `UserAssigned` without `userAssignedIdentity`, is a `400`), stored, shown as written (the admin view also has `destination` and `deadLetterDestination` as the plain forms) and delivered
+exactly like the plain form. The emulator checks no credentials on its own inside connections, so the identity decides nothing.
 
 The destination handlers are registered by the program that mounts the service
 (`EventGridService::register_destination(DestinationKind, handler)`); `crates/azemu` registers them for the queue,
@@ -314,6 +384,8 @@ PUT /_azemu/eventgrid/sources/storage/acct/subscriptions/orders
 
 * Source kinds: `storage` (events of a storage account: `docs/services/storage-events.md`), `keyvault` (a vault),
   `appconfig` (an App Configuration store).
+* **Default set of event types.** A subscription on a storage account that names no `includedEventTypes` gets only `Microsoft.Storage.BlobCreated` and `Microsoft.Storage.BlobDeleted`, as on Azure
+  (`docs/services/storage-events.md`, "The default set of event types"). Key Vault and App Configuration sources get every event when none is named (no default set for them was found in Microsoft's documentation); so do custom topics.
 * Default delivery schema is the Event Grid schema (the way these services publish); `topic` is the source's resource id:
   `/subscriptions/00000000-…/resourceGroups/azemu/providers/Microsoft.Storage/storageAccounts/{acct}` unless the subscription
   was made through the Rust API with a real resource id.
@@ -358,6 +430,7 @@ unreadable file is logged and ignored.
 | `AZEMU_EVENTGRID_AUTOCREATE` | off (on with `AZEMU_LENIENT=1`) | `1`/`true`/`on`: a custom topic, a namespace and a namespace topic that were never created come into being when an event is published to them, and a pull subscription when it is first received from. Off (as on Azure) they are `404 NotFound` |
 | `AZEMU_ALLOW_WEBHOOK_HOST` | none | hosts a webhook may point to besides local ones (see "Push delivery"); `*` allows every host. Option `--allow-webhook-host` |
 | `AZEMU_EVENTGRID_CONFIG` | none | config file |
+| `AZEMU_EVENTGRID_FUNCTION_HOSTS` | none | `app=http://localhost:7071,…`: where the Functions host of each function app runs (`AzureFunction` destinations; "Azure Function destinations") |
 | `AZEMU_EVENTGRID_RETRY_BASE_MS` / `_RETRY_MAX_MS` | 500 / 10000 | default webhook retry backoff |
 | `AZEMU_EVENTGRID_DELIVERY_TIMEOUT_MS` | 10000 | time a webhook has to answer |
 | `AZEMU_EVENTGRID_MAX_PENDING` / `_MAX_PENDING_MB` | 1000 / 32 | deliveries waiting for a retry, per subscription: count and size of the events |
@@ -365,7 +438,7 @@ unreadable file is logged and ignored.
 
 Defaults as on Azure: nothing is created by being named. Publishing to a topic, namespace or domain nobody created, or receiving from
 a namespace topic or subscription nobody created, is `404 NotFound` (on Azure the host name would not resolve at all; there is no
-closer answer to give). Create what a test needs first: with the admin API (`curl -X PUT http://localhost:4577/_azemu/eventgrid/topics/orders -d '{}'`,
+closer answer to give). Create what a test needs first: with the admin API (`curl -X PUT http://localhost:4577/_azemu/eventgrid/topics/orders -H 'Content-Type: application/json' -d '{}'`,
 then `.../topics/orders/subscriptions/to-hook` with `{"webhookUrl":"http://localhost:7071/hook"}`; add `?namespace=ns` for a
 namespace topic and its subscription), with the config file above, or with ARM (Terraform `azurerm_eventgrid_topic`).
 **A topic host is its own thing here:** the emulator has no notion of creating a namespace outside ARM and the config file, so
@@ -394,10 +467,23 @@ next round, receivers waiting on its pull subscriptions return, and the other ho
 * `maxWaitTime` below 10 seconds and release delays other than 0/10/60/600/3600 are accepted; lock duration, time to live and retry
   policy values are not range-checked beyond being positive.
 * Event type filters are case-insensitive (assumed). Missing-key behaviour of negative advanced filters follows the documentation as read.
-* Dead letters stay in memory on the subscription (no blob destination). Push delivery is one event per request (one message for a queue, topic or hub). Retry waits are much
+* Dead letters stay in memory on the subscription and, with a blob destination, are also written as blobs at once, one event to a blob (Azure: about five minutes later, events together). Push delivery is one event per request (one message for a queue, topic or hub). Retry waits are much
   shorter than Azure's 10 s to 12 h schedule by default.
 * `api-version` is checked on the classic publish only (see "Authentication"); the namespace API takes any version.
 * State lives in memory and is lost on restart unless `--data-dir` is set (the config file is reloaded either way).
+* **Faults.** Only on request ([`faults.md`](../faults.md)). A throttled request is `429` with `Retry-After`; the body (`TooManyRequests`) is a guess.
+
+## Behaviour that could not be confirmed against Azure
+
+* The errors for too many delivery properties (more than 10), a static value over 4096 bytes, a name with the `aeg-` prefix and a mapping with no `sourceField`: the limits and the prefix are Learn's, the texts and the
+  status (`400`) are chosen here. A name that belongs to the connection of an HTTP request (`Host`, `Content-Length`, `Transfer-Encoding`, `Connection`, `Upgrade`, `TE`, `Trailer`, `Expect`, `Keep-Alive`, and
+  anything starting with `Proxy-`) is refused in the same form: Learn names no such list and no error text, and the emulator's own reason is that such a mapping would send a second `Host` line or replace
+  the framing of the request. The delivery also leaves one out of a request when a state from before holds it. `Authorization` is allowed (Learn's own example). Whether Azure refuses a name case-insensitively, and whether it takes both `MessageId` and `SessionId`, was not tried.
+* Names of delivery properties are matched without regard to case here (`sessionid` is `SessionId`); Azure's rule was not tried (the real subscriptions used Learn's spelling).
+* `lastDeliveryOutcome` other than `NotFound`; the dead-letter blob of an event dead-lettered for `TimeToLiveExpired` or after a webhook answered with a status (only a missing Storage queue was tried).
+* What Azure does with a dead-letter container that does not exist, and whether a webhook, an event hub or a function destination dead-letters into the same blob layout (only a Storage queue was tried).
+* Delivery to a function by the real service sends the function's system key; here no key is sent (a local host does not ask).
+* The default `MessageId` of a Service Bus message is a guid of Service Bus's making on Azure; here it is the event's id.
 
 ## Keeping data between runs
 
@@ -405,3 +491,8 @@ With `--data-dir` the service saves `eventgrid.state` (topics, domains, namespac
 state) and one `sub-<hash>.state` per subscription (pull queue with events, delivery counts, locks and dead letters; the delivery log; push deliveries
 that were not finished with the attempts made). Locks stay good after a restart until they end. Unfinished push deliveries start half a second after the
 start. Details: `docs/services/persistence.md`, section "Cosmos, Event Grid, Service Bus, Event Hubs with Kafka, ARM".
+
+## Strict authorisation (`--strict-auth`)
+
+With `--strict-auth` ([`../strict-auth.md`](../strict-auth.md)) a request to a custom topic (`POST /api/events`) that carries a bearer token is checked: the token (audience `https://eventgrid.azure.net`), then `EventGrid Data Sender` on the topic. **Every refusal
+is 401**, a missing role too (`The principal associated with access token presented with the incoming request does not have permission to send data to <topic id>.`). Keys and signed tokens are checked as before; the namespace endpoints take any credential.

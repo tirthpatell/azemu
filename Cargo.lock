@@ -205,9 +205,10 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "azemu"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "azemu-amqp",
  "azemu-appconfig",
  "azemu-arm",
  "azemu-blob",
@@ -215,18 +216,22 @@ dependencies = [
  "azemu-cosmos",
  "azemu-eventgrid",
  "azemu-eventhubs",
+ "azemu-file",
  "azemu-identity",
+ "azemu-kafka",
  "azemu-keyvault",
+ "azemu-monitor",
  "azemu-queue",
  "azemu-servicebus",
  "azemu-table",
+ "bytes",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "azemu-amqp"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "azemu-core",
  "bytes",
@@ -237,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-appconfig"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -253,7 +258,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-arm"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu",
@@ -263,6 +268,7 @@ dependencies = [
  "azemu-eventgrid",
  "azemu-eventhubs",
  "azemu-keyvault",
+ "azemu-monitor",
  "azemu-servicebus",
  "azemu-servicebus-sql",
  "azemu-statefile",
@@ -279,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-blob"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -297,7 +303,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -328,7 +334,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-cosmos"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -338,6 +344,7 @@ dependencies = [
  "boa_engine",
  "nix",
  "parking_lot",
+ "percent-encoding",
  "rlimit",
  "serde",
  "serde_json",
@@ -347,7 +354,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-cosmos-sql"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "regex",
  "serde",
@@ -356,7 +363,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-eventgrid"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -379,7 +386,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-eventhubs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -401,8 +408,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "azemu-file"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "azemu-core",
+ "base64",
+ "md-5",
+ "parking_lot",
+ "percent-encoding",
+ "rmp-serde",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "azemu-identity"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -420,7 +447,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-kafka"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bytes",
  "flate2",
@@ -428,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-keyvault"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -452,8 +479,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "azemu-monitor"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "azemu-core",
+ "flate2",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "azemu-queue"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -468,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-servicebus"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -491,11 +535,11 @@ dependencies = [
 
 [[package]]
 name = "azemu-servicebus-sql"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "azemu-statefile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "azemu-core",
  "rmp-serde",
@@ -504,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-table"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "azemu-core",
@@ -519,7 +563,7 @@ dependencies = [
 
 [[package]]
 name = "azemu-testkit"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "base16ct"

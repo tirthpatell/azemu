@@ -285,10 +285,39 @@ impl LinkHandle {
     }
 }
 
+/// What a handler asked of the connection task by means other than a command: a wait, a silence, or the end. Set from inside a
+/// handler call (so it is in force before the task writes anything the call produced) and taken by the task on its next turn.
+#[derive(Default)]
+pub(crate) struct Interrupt {
+    pending: std::sync::Mutex<Interrupts>,
+}
+
+#[derive(Default, Clone, Copy)]
+pub(crate) struct Interrupts {
+    /// Do nothing (read nothing, write nothing) for this long.
+    pub delay: Duration,
+    /// Read and throw away what arrives, write nothing, for this long; then close.
+    pub hold: Option<Duration>,
+    /// Close the socket now, without a `close` frame.
+    pub abort: bool,
+}
+
+impl Interrupt {
+    pub(crate) fn take(&self) -> Interrupts {
+        self.pending.lock().map(|mut p| std::mem::take(&mut *p)).unwrap_or_default()
+    }
+    fn update(&self, f: impl FnOnce(&mut Interrupts)) {
+        if let Ok(mut p) = self.pending.lock() {
+            f(&mut p);
+        }
+    }
+}
+
 /// Post work to the connection.
 #[derive(Clone)]
 pub struct ConnHandle {
     pub(crate) tx: UnboundedSender<Command>,
+    pub(crate) interrupt: Arc<Interrupt>,
 }
 
 impl ConnHandle {
@@ -298,6 +327,25 @@ impl ConnHandle {
     }
     pub fn link(&self, link: LinkId) -> LinkHandle {
         LinkHandle { link, tx: self.tx.clone() }
+    }
+    /// A number that names this connection while it lives (two handlers of one connection, such as the two sides of a multiplexer, see
+    /// the same one). It may be reused after the connection ended.
+    pub fn id(&self) -> usize {
+        Arc::as_ptr(&self.interrupt) as usize
+    }
+    /// For a handler call that is running: make the connection wait this long before it reads or writes again (fault
+    /// injection: a slow broker). Waits add up.
+    pub fn delay(&self, d: Duration) {
+        self.interrupt.update(|i| i.delay += d);
+    }
+    /// For a handler call that is running: stop answering. Input is read and thrown away for `d`, nothing is written, then the
+    /// connection is closed (fault injection: a broker that never answers).
+    pub fn hold(&self, d: Duration) {
+        self.interrupt.update(|i| i.hold = Some(d));
+    }
+    /// For a handler call that is running: close the socket now, with no `close` frame (fault injection: a dropped connection).
+    pub fn abort(&self) {
+        self.interrupt.update(|i| i.abort = true);
     }
 }
 

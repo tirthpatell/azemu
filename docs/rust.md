@@ -1,7 +1,7 @@
 # Using azemu from Rust
 
 This page is for a Rust project that uses the Azure SDK for Rust. It takes you from nothing to a passing `cargo test` against the emulator, and says what
-to do where the SDK has no crate. Everything here was run on Linux x86-64 against azemu 0.2.0 with the crate versions in the table; what was not run says "not tried". On macOS one way was run on a GitHub runner; its section says which, and what comes from documentation and source only.
+to do where the SDK has no crate. Everything here was run on Linux x86-64 against azemu 0.3.0 with the crate versions in the table; what was not run says "not tried". On macOS one way was run on a GitHub runner; its section says which, and what comes from documentation and source only.
 
 If you only want to see one request work, the front page has it: [`README.md`](../README.md#a-first-request). A complete small project (Blob, Queue, Key Vault, Cosmos DB
 and its tests) is in [`examples/rust/`](../examples/rust/README.md).
@@ -33,7 +33,7 @@ with an *s*, `azure_security_keyvault`, `azure_messaging_servicebus`, `azure_sto
 them, all 0.21 from 2024) are no longer updated, and a crates.io search can list them before the current ones. How to tell the current ones apart: the crate name is
 singular (`azure_storage_blob`), the Key Vault crates have a suffix (`azure_security_keyvault_secrets`), the versions are 1.x, and they depend on `azure_core` 1.x.
 
-The versions below were run against azemu 0.2.0. All of them except Event Hubs sit on `azure_core` 1.1.
+The versions below were run against azemu 0.3.0. All of them except Event Hubs sit on `azure_core` 1.1.
 
 | Service | Official crate | Version run | Notes |
 |---|---|---|---|
@@ -51,7 +51,7 @@ The versions below were run against azemu 0.2.0. All of them except Event Hubs s
 
 Cosmos DB 1.0.0 and 1.1.0-beta.2 both work; the suites in [`tests/sdk-rust`](../tests/sdk-rust/README.md) use the beta and the example in `examples/rust` the stable one.
 
-**Older versions, also run.** Projects are often pinned to earlier versions. These ran against azemu 0.2.0 in [`tests/sdk-rust/older`](../tests/sdk-rust/README.md), a project of its own because it cannot share a build with the 1.1 crates:
+**Older versions, also run.** Projects are often pinned to earlier versions. These ran against azemu 0.3.0 in [`tests/sdk-rust/older`](../tests/sdk-rust/README.md), a project of its own because it cannot share a build with the 1.1 crates:
 
 | Crate | Version also run | What was run |
 |---|---|---|
@@ -388,7 +388,7 @@ Nothing below the account exists until something creates it, as on Azure. From R
 - **Event hubs** (the Rust SDK has no administration client): the emulator's admin API, one call with any HTTP client. Tried with `curl`:
 
   ```bash
-  curl -X PUT http://localhost:4577/_azemu/eventhubs/myns/hubs/orders -d '{"partitionCount":2}'      # 201, and the hub's description
+  curl -X PUT http://localhost:4577/_azemu/eventhubs/myns/hubs/orders -H 'Content-Type: application/json' -d '{"partitionCount":2}'      # 201, and the hub's description
   ```
 
 - **Service Bus queues** (no administration client in Rust either): the HTTP management call the administration clients make, a `PUT` of an ATOM entry. Any `Authorization` header is accepted. Tried with `curl` (`201`):
@@ -399,7 +399,7 @@ Nothing below the account exists until something creates it, as on Azure. From R
     -d '<entry xmlns="http://www.w3.org/2005/Atom"><content type="application/xml"><QueueDescription xmlns="http://schemas.microsoft.com/netservices/2010/10/servicebus/connect"/></content></entry>'
   ```
 
-- **Event Grid topics:** `curl -X PUT http://localhost:4577/_azemu/eventgrid/topics/orders -d '{}'` (section 6 ran it from Rust).
+- **Event Grid topics:** `curl -X PUT http://localhost:4577/_azemu/eventgrid/topics/orders -H 'Content-Type: application/json' -d '{}'` (section 6 ran it from Rust).
 - **Cosmos DB databases and containers without an SDK call** (for a version of the Rust Cosmos crate that has no create calls, or to use the same steps with every version): two `POST`s with any HTTP client. The `Authorization` value only has to be there. Tried with `curl`
   against a running emulator (`201` each; the same call again is `409`):
 
@@ -436,7 +436,7 @@ Nothing below the account exists until something creates it, as on Azure. From R
 
 ```toml
 [dev-dependencies]
-azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.2.0" }
+azemu-testkit = { git = "https://github.com/tirthpatell/azemu", tag = "v0.3.0" }
 ```
 
 (From a checkout of this repository, [`examples/rust`](../examples/rust/Cargo.toml) uses a `path` instead.) Install the matching `azemu` too (section 1). A test:

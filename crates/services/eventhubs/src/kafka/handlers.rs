@@ -4,6 +4,7 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use azemu_core::auth::sas::Claim;
 use azemu_core::RawConn;
 use azemu_kafka::api::{self, err};
 use azemu_kafka::{Request, Struct, Value};
@@ -30,6 +31,12 @@ pub struct Conn {
     pub endpoint_host: Option<String>,
     pub client_id: String,
     pub sasl_mechanism: Option<String>,
+    /// How the connection logged in (strict authorisation only).
+    pub access: super::strict::Access,
+    /// Set by a handler that answers and wants the connection closed after the answer (strict authorisation).
+    pub close_after: std::sync::atomic::AtomicBool,
+    /// The namespace as the rules know it (strict authorisation; see `strict.rs`).
+    pub rules_ns: std::sync::OnceLock<String>,
 }
 
 impl Conn {
@@ -41,6 +48,9 @@ impl Conn {
             endpoint_host: None,
             client_id: String::new(),
             sasl_mechanism: None,
+            access: Default::default(),
+            close_after: Default::default(),
+            rules_ns: Default::default(),
         }
     }
 
@@ -77,6 +87,8 @@ pub enum Reply {
     Nothing,
     /// Close the connection (a request that cannot be handled).
     Close,
+    /// Write this answer, then close the connection (a login that failed).
+    AnswerThenClose(Struct),
 }
 
 impl Broker {
@@ -92,14 +104,37 @@ impl Broker {
                 c.client_id = id.clone();
             }
         }
-        Reply::Answer(match req.header.api_key {
+        if self.strict().is_some() {
+            // the namespace the rules are under is looked up here, where no lock is held
+            let _ = self.rules_ns(c);
+            // strict authorisation: nothing but the login is answered before it succeeded (Azure: a client that skips SASL gets no answer)
+            let login = matches!(req.header.api_key, api::API_VERSIONS | api::SASL_HANDSHAKE | api::SASL_AUTHENTICATE);
+            if !login && matches!(c.access, super::strict::Access::Anonymous) {
+                return Reply::Close;
+            }
+            if req.header.api_key == api::SASL_AUTHENTICATE {
+                let failed = self.sasl_authenticate(c, b);
+                return if failed.i16("ErrorCode") != 0 { Reply::AnswerThenClose(failed) } else { Reply::Answer(failed) };
+            }
+            // a principal with no role at all is closed at the coordinator lookup (Azure: the consumer's `FindCoordinator` fails with a transport error)
+            if req.header.api_key == api::FIND_COORDINATOR && !self.has_any_right(c) {
+                return Reply::Close;
+            }
+        }
+        let answer = match req.header.api_key {
             api::API_VERSIONS => self.api_versions(err::NONE),
             api::METADATA => self.metadata(c, b),
             api::SASL_HANDSHAKE => self.sasl_handshake(c, b),
             api::SASL_AUTHENTICATE => self.sasl_authenticate(c, b),
             api::FIND_COORDINATOR => self.find_coordinator(c, b),
             api::INIT_PRODUCER_ID => self.init_producer_id(b),
-            api::PRODUCE => return self.produce(c, b).map_or(Reply::Nothing, Reply::Answer),
+            api::PRODUCE => {
+                return match self.produce(c, b) {
+                    None => Reply::Nothing,
+                    Some(a) if c.close_after.swap(false, Ordering::Relaxed) => Reply::AnswerThenClose(a),
+                    Some(a) => Reply::Answer(a),
+                }
+            }
             api::FETCH => self.fetch(c, b).await,
             api::LIST_OFFSETS => self.list_offsets(c, b),
             api::JOIN_GROUP => self.join_group(c, b, v).await,
@@ -123,7 +158,11 @@ impl Broker {
             api::CREATE_PARTITIONS => self.create_partitions(c, b),
             api::DESCRIBE_CONFIGS => self.describe_configs(c, b),
             _ => return Reply::Nothing,
-        })
+        };
+        if c.close_after.swap(false, Ordering::Relaxed) {
+            return Reply::AnswerThenClose(answer);
+        }
+        Reply::Answer(answer)
     }
 
     // ---- the one broker --------------------------------------------------------------------------------------------
@@ -196,6 +235,11 @@ impl Broker {
                     // Azure makes the event hub when a producer or an admin client names a topic that is not there (the request
                     // allows it; a consumer's does not), with one partition and 7 days of retention (November 2026). It is not
                     // switched by AZEMU_EVENTHUBS_AUTOCREATE, which is about AMQP.
+                    if allow_auto && !self.may(c, &name, Claim::Manage) {
+                        // a hub is made by a client that may manage the namespace; a guess (not tried with a send-only rule)
+                        topics.push(topic_error(&name, err::TOPIC_AUTHORIZATION_FAILED));
+                        continue;
+                    }
                     if allow_auto {
                         match st.create_hub(&ns, &name, KAFKA_DEFAULT_PARTITIONS, KAFKA_DEFAULT_RETENTION_MS, now) {
                             Ok(h) => h.autocreated = true,
@@ -275,10 +319,20 @@ impl Broker {
                 }
                 let password = String::from_utf8_lossy(parts[2]).into_owned();
                 c.endpoint_host = endpoint_host(&password);
+                if self.strict().is_some() {
+                    let user = String::from_utf8_lossy(parts[1]).into_owned();
+                    if let Err(m) = self.login_plain(c, &user, &password) {
+                        return fail(&m);
+                    }
+                }
             }
             Some("OAUTHBEARER") => {
                 let text = String::from_utf8_lossy(&bytes);
-                if !text.contains("auth=Bearer ") && !text.contains("auth=bearer ") {
+                if let Some(auth) = self.strict() {
+                    if let Err(m) = self.login_bearer(&auth, c, &text) {
+                        return fail(&m);
+                    }
+                } else if !text.contains("auth=Bearer ") && !text.contains("auth=bearer ") {
                     return fail("Invalid OAUTHBEARER client first message: no auth=Bearer value");
                 }
             }
@@ -430,10 +484,13 @@ impl Broker {
                 let name = t.str("Name").unwrap_or("").to_string();
                 let hub = st.hub(&ns, &name);
                 let mut ps = Vec::new();
+                let may_listen = self.may(c, &name, Claim::Listen);
                 for p in t.structs("Partitions") {
                     let idx = p.i32("PartitionIndex");
                     let md = p.str("CommittedMetadata").map(str::to_string);
-                    let code = if hub.is_none_or(|h| idx < 0 || idx as usize >= h.partitions.len()) {
+                    let code = if !may_listen {
+                        err::TOPIC_AUTHORIZATION_FAILED
+                    } else if hub.is_none_or(|h| idx < 0 || idx as usize >= h.partitions.len()) {
                         err::UNKNOWN_TOPIC_OR_PARTITION
                     } else if md.as_ref().is_some_and(|m| m.len() > MAX_OFFSET_METADATA_BYTES) {
                         err::OFFSET_METADATA_TOO_LARGE
@@ -483,6 +540,15 @@ impl Broker {
                 .with("Metadata", c.metadata.unwrap_or_default())
                 .with("ErrorCode", 0)
         };
+        // strict authorisation: the committed offsets of a topic are read with `Listen`; a send-only connection gets the error per partition
+        let refused = |idx: i32| {
+            Struct::new()
+                .with("PartitionIndex", idx)
+                .with("CommittedOffset", -1i64)
+                .with("CommittedLeaderEpoch", -1)
+                .with("Metadata", String::new())
+                .with("ErrorCode", err::TOPIC_AUTHORIZATION_FAILED)
+        };
         match b.get("Topics") {
             Value::Null => {
                 let mut by_topic: Vec<(String, Vec<Struct>)> = Vec::new();
@@ -490,7 +556,7 @@ impl Broker {
                 // although a request that names the partitions still gets its commits (November 2026)
                 let has_members = self.shared.kafka.describe(&ns, group).is_some_and(|g| !g.members.is_empty());
                 let all = if has_members { self.shared.kafka.all_offsets(&ns, group) } else { Vec::new() };
-                for (t, p, cm) in all {
+                for (t, p, cm) in all.into_iter().filter(|(t, _, _)| self.may(c, t, Claim::Listen)) {
                     match by_topic.last_mut() {
                         Some((n, v)) if *n == t => v.push(part(p, Some(cm))),
                         _ => by_topic.push((t, vec![part(p, Some(cm))])),
@@ -503,11 +569,15 @@ impl Broker {
             req => {
                 for t in req.structs() {
                     let name = t.str("Name").unwrap_or("").to_string();
+                    let allowed = self.may(c, &name, Claim::Listen);
+                    if !allowed {
+                        self.log_refused(c, "offset fetch", &name, Claim::Listen);
+                    }
                     let ps: Vec<Struct> = t
                         .items("PartitionIndexes")
                         .iter()
                         .map(|i| i.as_i32())
-                        .map(|i| part(i, self.shared.kafka.fetch_offset(&ns, group, &name, i)))
+                        .map(|i| if allowed { part(i, self.shared.kafka.fetch_offset(&ns, group, &name, i)) } else { refused(i) })
                         .collect();
                     topics.push(Struct::new().with("Name", name).with("Partitions", ps));
                 }
@@ -601,7 +671,10 @@ impl Broker {
             let mut parts = t.i32("NumPartitions");
             let mut retention_ms = KAFKA_DEFAULT_RETENTION_MS;
             let mut problem: Option<(i16, String)> = None;
-            if !valid_topic_name(&name) {
+            if !self.may(c, &name, Claim::Manage) {
+                self.log_refused(c, "create topic", &name, Claim::Manage);
+                problem = Some((err::TOPIC_AUTHORIZATION_FAILED, "Authorization failed.".to_string()));
+            } else if !valid_topic_name(&name) {
                 // `INVALID_CONFIG`, not `INVALID_TOPIC_EXCEPTION`: what Azure answers for a name with a space, 300 characters, `..` or a
                 // letter that is not ASCII (November 2026)
                 problem = Some((
@@ -688,6 +761,16 @@ impl Broker {
         let mut results = Vec::new();
         for n in b.get("TopicNames").items() {
             let name = n.as_str().unwrap_or("").to_string();
+            if !self.may(c, &name, Claim::Manage) {
+                self.log_refused(c, "delete topic", &name, Claim::Manage);
+                results.push(
+                    Struct::new()
+                        .with("Name", name)
+                        .with("ErrorCode", err::TOPIC_AUTHORIZATION_FAILED)
+                        .with("ErrorMessage", Value::Str("Authorization failed.".into())),
+                );
+                continue;
+            }
             let deleted = self.shared.delete_hub(&ns, &name);
             results.push(
                 Struct::new().with("Name", name).with("ErrorCode", if deleted { 0 } else { err::UNKNOWN_TOPIC_OR_PARTITION }).with(
@@ -706,6 +789,12 @@ impl Broker {
             .structs("Topics")
             .map(|t| {
                 let name = t.str("Name").unwrap_or("").to_string();
+                if !self.may(c, &name, Claim::Manage) {
+                    return Struct::new()
+                        .with("Name", name)
+                        .with("ErrorCode", err::TOPIC_AUTHORIZATION_FAILED)
+                        .with("ErrorMessage", "Authorization failed.".to_string());
+                }
                 // Azure answers INVALID_REQUEST for the same count and for more (November 2026): the count of an event hub cannot be changed
                 let (code, msg) = match st.hub(&ns, &name) {
                     None => (err::UNKNOWN_TOPIC_OR_PARTITION, "This server does not host this topic-partition.".to_string()),

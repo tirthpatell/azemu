@@ -20,6 +20,8 @@ mod disk;
 mod errors;
 mod events;
 mod headers;
+mod inspect;
+mod internal_put;
 mod lease;
 mod list;
 mod names;
@@ -32,6 +34,7 @@ mod router;
 mod service_props;
 mod state;
 mod store;
+mod strict;
 mod structured;
 mod tags;
 mod util;
@@ -72,6 +75,8 @@ pub(crate) struct Shared {
     disk: Mutex<disk::DiskIndex>,
     /// Storage Analytics logging: the queue of log lines and the switches (see `analytics.rs`).
     logger: analytics::Logger,
+    /// Strict authorisation (`strict.rs`); a handle that does nothing until the program hands over a real one.
+    auth: parking_lot::RwLock<azemu_core::auth::Auth>,
 }
 
 /// Time the state lock was held, kept so that a test can check that no request holds it for
@@ -190,6 +195,13 @@ impl BlobService {
         Self::default()
     }
 
+    /// Check roles for bearer tokens in strict mode (`docs/strict-auth.md`). The Data Lake service shares the setting.
+    pub fn set_auth(&self, auth: azemu_core::auth::Auth) {
+        auth.declare_enforced("blob");
+        auth.declare_enforced("dfs");
+        *self.shared.auth.write() = auth;
+    }
+
     /// Send storage events (`Microsoft.Storage.BlobCreated` and so on) to `sink`. The Data Lake
     /// service shares the setting. See `events.rs`.
     pub fn set_event_sink(&self, sink: Arc<dyn StorageEventSink>) {
@@ -294,8 +306,28 @@ impl Service for BlobService {
         "devstoreaccount1"
     }
 
+    fn fault_response(&self, req: &Request, answer: &azemu_core::FaultAnswer) -> Response {
+        azemu_core::storage::fault_response(req, router::SERVER, answer)
+    }
+
+    fn enforces_strict_auth(&self) -> bool {
+        true
+    }
+
+    fn inspect(&self, req: &azemu_core::inspect::InspectRequest) -> azemu_core::inspect::InspectResult {
+        inspect::node(&self.shared, req)
+    }
+
     async fn handle(&self, req: Request) -> Response {
         let op = router::op_of(&req);
+        // strict mode: the bearer token and the role come first, before the body is looked at and before anything is looked up
+        let auth = self.shared.auth.read().clone();
+        let mut strict_who = None;
+        match strict::gate(&auth, &req, op) {
+            strict::Gate::Skip => {}
+            strict::Gate::Refused(r) => return azemu_core::storage::finish(*r, &req, router::SERVER),
+            strict::Gate::Allowed(who) => strict_who = Some((auth.clone(), *who)),
+        }
         // customer-provided key headers must agree with each other (`cpk.rs`)
         if let Err(e) = cpk::validate(&req) {
             return azemu_core::storage::finish(e.into_response(&req.ctx), &req, router::SERVER);
@@ -330,6 +362,7 @@ impl Service for BlobService {
         let started = Instant::now();
         let mut pre = pre::prepare(&req, op).await;
         pre.deferred = deferred;
+        pre.strict = strict_who;
         let mut resp = self.shared.serve(&req, pre, |st, pre| router::run(st, &req, Some(&self.shared.accounts), pre)).await;
         if wrapped {
             structured::echo(&mut resp);

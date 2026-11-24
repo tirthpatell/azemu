@@ -2,7 +2,7 @@
 # tests reach it on localhost, on the standard ports (a path-style address, http://localhost:10000/devstoreaccount1).
 # `examples/ci/check.sh github` runs the same arrangement on one machine with Docker.
 #
-# Pin the image to a version (`ghcr.io/tirthpatell/azemu:0.2.0`) rather than `latest`, so that a new release does not change your tests.
+# Pin the image to a version (`ghcr.io/tirthpatell/azemu:0.3.0`) rather than `latest`, so that a new release does not change your tests.
 # The Python check below is only a stand-in for your tests. For a Rust project see github-actions-rust.yml.
 name: integration-tests
 on: [push]
@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       azemu:
-        image: ghcr.io/tirthpatell/azemu:0.2.0
+        image: ghcr.io/tirthpatell/azemu:0.3.0
         ports:
           - 10000:10000
           - 10001:10001

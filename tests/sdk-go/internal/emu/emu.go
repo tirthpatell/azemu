@@ -204,7 +204,7 @@ func (e *Emu) LogTail(n int) string {
 func (e *Emu) URL(label, name, scheme string) string {
 	suffix := "localhost"
 	switch label {
-	case "blob", "dfs", "queue", "table":
+	case "blob", "dfs", "queue", "table", "file":
 		suffix = "core.localhost"
 	}
 	return fmt.Sprintf("%s://%s.%s.%s:%d", scheme, name, label, suffix, e.Port)

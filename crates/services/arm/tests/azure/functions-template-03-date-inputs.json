@@ -1,0 +1,51 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "resources": [],
+  "outputs": {
+    "withOffset": {
+      "type": "string",
+      "value": "[dateTimeAdd('2023-06-01T12:00:00+02:00', 'PT0S')]"
+    },
+    "withOffsetFormatted": {
+      "type": "string",
+      "value": "[dateTimeAdd('2023-06-01T12:00:00+02:00', 'PT0S', 'yyyy-MM-dd HH:mm')]"
+    },
+    "dateOnly": {
+      "type": "string",
+      "value": "[dateTimeAdd('2024-02-29', 'P1D')]"
+    },
+    "basicInput": {
+      "type": "string",
+      "value": "[dateTimeAdd('20200407T145314Z', 'P1D')]"
+    },
+    "noZone": {
+      "type": "string",
+      "value": "[dateTimeAdd('2023-06-01T12:00:00', 'PT1H')]"
+    },
+    "fractionDefault": {
+      "type": "string",
+      "value": "[dateTimeAdd('2008-06-15T13:45:30.1234567Z', 'PT0S')]"
+    },
+    "fractionO": {
+      "type": "string",
+      "value": "[dateTimeAdd('2008-06-15T13:45:30.1234567Z', 'PT0S', 'o')]"
+    },
+    "fractionF": {
+      "type": "string",
+      "value": "[dateTimeAdd('2008-06-15T13:45:30.1234567Z', 'PT0S', 'fff')]"
+    },
+    "epochDateOnly": {
+      "type": "int",
+      "value": "[dateTimeToEpoch('2024-02-29')]"
+    },
+    "epochWithOffset": {
+      "type": "int",
+      "value": "[dateTimeToEpoch('2023-06-01T12:00:00+02:00')]"
+    },
+    "epochFraction": {
+      "type": "int",
+      "value": "[dateTimeToEpoch('2008-06-15T13:45:30.9Z')]"
+    }
+  }
+}

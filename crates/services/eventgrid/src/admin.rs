@@ -15,6 +15,9 @@
 //! | `GET …/{sub}/events` | events still queued (pull) |
 //! | `POST …/{sub}/validate` | run the webhook handshake again |
 //! | `GET /validate/{code}` | the manual validation URL handed to webhooks |
+//! | `GET /functions` | the Functions hosts the emulator was told about (`AzureFunction` destinations) |
+//! | `PUT /functions/{app}` | set the base address of a function app's host (body `{"baseUrl":"http://localhost:7071"}`) |
+//! | `GET` / `DELETE /functions/{app}` | read / remove one |
 //!
 //! A topic is found by `?namespace=N` (namespace topic), `?domain=D` (domain topic), else
 //! by the host of that name (custom topic or domain), else as a topic of the namespace
@@ -59,6 +62,10 @@ pub async fn handle(shared: &Arc<Shared>, req: &Request) -> Response {
         ("GET", ["topics", t]) => get_topic(shared, req, t),
         ("DELETE", ["topics", t]) => delete_topic(shared, req, t),
         ("GET", ["validate", code]) => admin_subs::manual_validate(shared, code),
+        ("GET", ["functions"]) => functions_list(shared),
+        ("PUT", ["functions", app]) => put_function(shared, req, app),
+        ("GET", ["functions", app]) => get_function(shared, app),
+        ("DELETE", ["functions", app]) => delete_function(shared, app),
         ("GET", ["sources"]) => json_resp(200, &json!({ "value": shared.state.lock().source_summaries() })),
         ("GET", ["sources", kind, name, "subscriptions"]) => with_source(kind, name, |k| admin_subs::list(shared, req, k)),
         ("PUT", ["sources", kind, name, "subscriptions", s]) => match source_key(kind, name) {
@@ -89,6 +96,44 @@ pub async fn handle(shared: &Arc<Shared>, req: &Request) -> Response {
         }
         ("POST", ["topics", t, "subscriptions", s, "validate"]) => admin_subs::revalidate(shared, req, t, s).await,
         _ => errors_for(method, &req.decoded_path()),
+    }
+}
+
+fn functions_list(shared: &Arc<Shared>) -> Response {
+    let v: Vec<Value> = shared.function_hosts.read().iter().map(|(app, url)| json!({ "app": app, "baseUrl": url })).collect();
+    json_resp(200, &json!({ "value": v }))
+}
+
+fn get_function(shared: &Arc<Shared>, app: &str) -> Response {
+    match shared.function_hosts.read().get(&app.to_ascii_lowercase()) {
+        Some(url) => json_resp(200, &json!({ "app": app.to_ascii_lowercase(), "baseUrl": url })),
+        None => admin_error(404, "NotFound", &format!("No Functions host is set for the function app '{app}'.")),
+    }
+}
+
+fn put_function(shared: &Arc<Shared>, req: &Request, app: &str) -> Response {
+    let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+    let Some(base) = body.get("baseUrl").and_then(Value::as_str).map(str::trim).filter(|u| !u.is_empty()) else {
+        return admin_error(
+            400,
+            "BadRequest",
+            "The body needs baseUrl, the address of the Functions host (for example http://localhost:7071).",
+        );
+    };
+    if app.trim().is_empty() {
+        return admin_error(400, "BadRequest", "The function app name must not be empty.");
+    }
+    if let Err(m) = crate::functions::check_base(base, &shared.opts.webhooks) {
+        return admin_error(400, "BadRequest", &m);
+    }
+    let created = shared.function_hosts.write().insert(app.to_ascii_lowercase(), base.to_string()).is_none();
+    json_resp(if created { 201 } else { 200 }, &json!({ "app": app.to_ascii_lowercase(), "baseUrl": base }))
+}
+
+fn delete_function(shared: &Arc<Shared>, app: &str) -> Response {
+    match shared.function_hosts.write().remove(&app.to_ascii_lowercase()) {
+        Some(_) => Resp::new(204u16).build(),
+        None => admin_error(404, "NotFound", &format!("No Functions host is set for the function app '{app}'.")),
     }
 }
 

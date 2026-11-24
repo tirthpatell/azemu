@@ -475,6 +475,21 @@ def g_eg(env):
     http(env, "/api/http_eg_send")
     v = wait_for(lambda: read_blob(env, "markers", "eg-topic.txt"), 40)
     record("eventgrid_topic", "Event Grid output binding -> custom topic -> webhook -> Event Grid trigger", v is not None and "hello-eventgrid" in v, v or "no marker blob in 40s")
+    # the same trigger fed through an AzureFunction destination: the emulator is told where this host runs, and calls
+    # {host}/runtime/webhooks/EventGrid?functionName=eg_trigger itself, with no key in the address
+    api(env, "DELETE", "/_azemu/eventgrid/topics/ftopic/subscriptions/fn")
+    env.blob.get_blob_client("markers", "eg-topic.txt").delete_blob()
+    api(env, "PUT", "/_azemu/eventgrid/functions/funcapp", {"baseUrl": env.url})
+    rid = "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg/providers/Microsoft.Web/sites/funcapp/functions/eg_trigger"
+    sub = api(env, "PUT", "/_azemu/eventgrid/topics/ftopic/subscriptions/fnfunc",
+              {"destination": {"endpointType": "AzureFunction", "properties": {"resourceId": rid}}})
+    say(f"  function destination: {json.dumps(sub.get('validation', sub))[:200]}")
+    http(env, "/api/http_eg_send")
+    v = wait_for(lambda: read_blob(env, "markers", "eg-topic.txt"), 40)
+    if v is None:
+        say(f"  deliveries: {json.dumps(api(env, 'GET', '/_azemu/eventgrid/topics/ftopic/subscriptions/fnfunc/deliveries'))[:600]}")
+    record("eventgrid_function_destination", "Event Grid output binding -> custom topic -> AzureFunction destination -> Event Grid trigger",
+           v is not None and "hello-eventgrid" in v, v or "no marker blob in 40s")
 
 
 def g_restart(env):
