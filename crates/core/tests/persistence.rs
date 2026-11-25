@@ -276,7 +276,16 @@ async fn a_failed_save_is_reported_kept_unsaved_and_retried() {
         waited += 1;
     }
     assert_eq!(a.saves.load(SeqCst), 1);
-    let h = srv.send("GET", &format!("{}/_azemu/health", srv.gateway_url()), &[], "").await.json();
+    // The store counts a save while it is still inside it; the emulator records the result when the save has returned.
+    // On a slow machine a look at the health in between still shows the earlier failure, so wait for the record.
+    let mut h = serde_json::Value::Null;
+    for _ in 0..100 {
+        h = srv.send("GET", &format!("{}/_azemu/health", srv.gateway_url()), &[], "").await.json();
+        if h["persistence"]["services"]["kv"]["lastResult"] == "ok" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     let kv = &h["persistence"]["services"]["kv"];
     assert_eq!(kv["lastResult"], "ok");
     assert_eq!(kv["unsavedChanges"], false);
